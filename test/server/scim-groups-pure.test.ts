@@ -108,6 +108,11 @@ describe("applyGroupPatch", () => {
     expect(applyGroupPatch(base, ops).members).toEqual(["u9"]);
   });
 
+  it("replace on members with [] clears the members (Entra's clear pattern)", () => {
+    const ops: PatchOp[] = [{ op: "replace", path: "members", value: [] }];
+    expect(applyGroupPatch(base, ops).members).toEqual([]);
+  });
+
   it("clears all members via remove on the bare members path", () => {
     const ops: PatchOp[] = [{ op: "remove", path: "members" }];
     expect(applyGroupPatch(base, ops).members).toEqual([]);

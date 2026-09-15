@@ -179,6 +179,38 @@ async function assertDisplayNameAvailable(
   }
 }
 
+/**
+ * `scim_group_org_external` (`src/schema/sql/0001_enterprise.sql`) is a real
+ * unique index on `(org_id, external_id)`, so a raw duplicate insert/update
+ * would otherwise surface as an unhandled adapter/constraint error (a 500),
+ * not a clean SCIM response. `externalId` is optional and nullable — SQLite
+ * treats multiple `NULL`s in a unique index as distinct, so a missing
+ * `externalId` never conflicts with anything and this check is a no-op for
+ * it, matching the DB's own semantics.
+ */
+async function assertExternalIdAvailable(
+  ctx: GenericEndpointContext,
+  orgId: string,
+  externalId: string | null | undefined,
+  excludeTeamId?: string,
+): Promise<void> {
+  if (!externalId) return;
+  const existing = await ctx.context.adapter.findOne<{ teamId: string }>({
+    model: "scimGroup",
+    where: [
+      { field: "orgId", value: orgId },
+      { field: "externalId", value: externalId },
+    ],
+  });
+  if (existing && existing.teamId !== excludeTeamId) {
+    throw new ScimHttpError(
+      409,
+      "uniqueness",
+      `A group with externalId "${externalId}" already exists in this organization.`,
+    );
+  }
+}
+
 /** Members must hold a `member` row in the org (ruling (c)) — else 400 `invalidValue`. */
 async function assertMembersExist(
   ctx: GenericEndpointContext,
@@ -438,9 +470,15 @@ function buildListGroups() {
           where.push({ field: "teamId", value: team.id });
         }
 
+        // `startIndex`/`count` slice this array, so its order must be
+        // deterministic across calls — plain `findMany` with no `sortBy`
+        // gives no such guarantee (adapter/index-dependent). `createdAt`
+        // (not `team.name`) so this stays a single-table query — sorting by
+        // display name would need a join with `team`.
         const rows = await fullCtx.context.adapter.findMany<ScimGroupRow>({
           model: "scimGroup",
           where,
+          sortBy: { field: "createdAt", direction: "asc" },
         });
         const totalResults = rows.length;
         const sliceStart = Math.max(startIndex - 1, 0);
@@ -468,6 +506,7 @@ function buildCreateGroup(opts: EnterpriseOptions) {
         const { providerId, organizationId } = await authenticateScimBearer(fullCtx);
 
         await assertDisplayNameAvailable(fullCtx, organizationId, ctx.body.displayName);
+        await assertExternalIdAvailable(fullCtx, organizationId, ctx.body.externalId);
         const memberIds = [...new Set((ctx.body.members ?? []).map((m) => m.value))];
         await assertMembersExist(fullCtx, organizationId, memberIds);
 
@@ -538,6 +577,7 @@ function buildReplaceGroup(opts: EnterpriseOptions) {
         if (!row) throw new ScimHttpError(404, undefined, "Group not found");
 
         await assertDisplayNameAvailable(fullCtx, organizationId, ctx.body.displayName, groupId);
+        await assertExternalIdAvailable(fullCtx, organizationId, ctx.body.externalId, groupId);
         const nextMemberIds = [...new Set((ctx.body.members ?? []).map((m) => m.value))];
         await assertMembersExist(fullCtx, organizationId, nextMemberIds);
 

@@ -399,24 +399,186 @@ describe("scimGroups plugin", () => {
     expect(deletedAudit.rows.length).toBe(1);
   });
 
-  it("startIndex is 1-based and count paginates the (unfiltered) list", async () => {
+  it("a user in two mapped groups keeps the higher role when removed from just one", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    await setGroupRoleMap(t, cookie, orgId, { Admins: "admin", Owners: "owner" });
+    const bearer = await mintScimToken(t, cookie, orgId);
+    const userId = await createScimUser(t, bearer, "twogroups@acme.test");
+
+    const admins = (await (
+      await t.api.post("/scim/v2/Groups", { displayName: "Admins" }, bearer)
+    ).json()) as { id: string };
+    const owners = (await (
+      await t.api.post("/scim/v2/Groups", { displayName: "Owners" }, bearer)
+    ).json()) as { id: string };
+
+    const patchAdd = (groupId: string) =>
+      t.api.request(
+        "PATCH",
+        `/scim/v2/Groups/${groupId}`,
+        {
+          schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+          Operations: [{ op: "add", path: `members[value eq "${userId}"]` }],
+        },
+        bearer,
+      );
+    const patchRemove = (groupId: string) =>
+      t.api.request(
+        "PATCH",
+        `/scim/v2/Groups/${groupId}`,
+        {
+          schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+          Operations: [{ op: "remove", path: `members[value eq "${userId}"]` }],
+        },
+        bearer,
+      );
+    const roleOf = async () => {
+      const res = await t.client.execute({
+        sql: `SELECT role FROM member WHERE organizationId = ? AND userId = ?`,
+        args: [orgId, userId],
+      });
+      return res.rows[0]!.role;
+    };
+
+    expect((await patchAdd(admins.id)).status).toBe(200);
+    expect(await roleOf()).toBe("admin");
+    expect((await patchAdd(owners.id)).status).toBe(200);
+    expect(await roleOf()).toBe("owner"); // highest of {admin, owner} wins, still in both groups
+
+    // Removing from "Owners" while still in "Admins" -> falls back to
+    // "admin", not all the way to "member". (This user isn't the org's sole
+    // owner at this point — the human org creator also holds "owner" — so
+    // the sole-owner guard doesn't block this demotion.)
+    const removeOwnersRes = await patchRemove(owners.id);
+    expect(removeOwnersRes.status).toBe(200);
+    expect(await roleOf()).toBe("admin");
+
+    const removeAdminsRes = await patchRemove(admins.id);
+    expect(removeAdminsRes.status).toBe(200);
+    expect(await roleOf()).toBe("member");
+  });
+
+  it("PATCH replace on members with [] clears the members (Entra's clear pattern)", async () => {
+    const { t, orgId, bearer } = await setup();
+    const userId = await createScimUser(t, bearer, "clearme@acme.test");
+    const createRes = await t.api.post(
+      "/scim/v2/Groups",
+      { displayName: "ClearMe", members: [{ value: userId }] },
+      bearer,
+    );
+    const group = (await createRes.json()) as { id: string };
+
+    const patchRes = await t.api.request(
+      "PATCH",
+      `/scim/v2/Groups/${group.id}`,
+      {
+        schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        Operations: [{ op: "replace", path: "members", value: [] }],
+      },
+      bearer,
+    );
+    expect(patchRes.status).toBe(200);
+    const updated = (await patchRes.json()) as { members: unknown[] };
+    expect(updated.members).toEqual([]);
+
+    const rows = await t.client.execute({
+      sql: `SELECT * FROM teamMember WHERE teamId = ?`,
+      args: [group.id],
+    });
+    expect(rows.rows.length).toBe(0);
+
+    const removedAudit = await t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE org_id = ? AND action = 'scim.group_member_removed' AND target_id = ?`,
+      args: [orgId, userId],
+    });
+    expect(removedAudit.rows.length).toBe(1);
+  });
+
+  it("duplicate externalId within an org returns a clean 409 uniqueness on POST", async () => {
+    const { t, bearer } = await setup();
+    const first = await t.api.post(
+      "/scim/v2/Groups",
+      { displayName: "A", externalId: "ext-dup" },
+      bearer,
+    );
+    expect(first.status).toBe(201);
+    const res = await t.api.post(
+      "/scim/v2/Groups",
+      { displayName: "B", externalId: "ext-dup" },
+      bearer,
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Json;
+    expect(body.scimType).toBe("uniqueness");
+  });
+
+  it("PUT changing externalId to one already used by another group in the org returns 409 uniqueness", async () => {
+    const { t, bearer } = await setup();
+    await t.api.post("/scim/v2/Groups", { displayName: "A", externalId: "ext-1" }, bearer);
+    const createRes = await t.api.post(
+      "/scim/v2/Groups",
+      { displayName: "B", externalId: "ext-2" },
+      bearer,
+    );
+    const groupB = (await createRes.json()) as { id: string };
+
+    const conflictRes = await t.api.put(
+      `/scim/v2/Groups/${groupB.id}`,
+      { displayName: "B", externalId: "ext-1" },
+      bearer,
+    );
+    expect(conflictRes.status).toBe(409);
+    const body = (await conflictRes.json()) as Json;
+    expect(body.scimType).toBe("uniqueness");
+
+    // PUTting a group's own unchanged externalId back onto itself must not
+    // false-positive as a conflict (the uniqueness check excludes the
+    // group's own team id).
+    const selfRes = await t.api.put(
+      `/scim/v2/Groups/${groupB.id}`,
+      { displayName: "B", externalId: "ext-2" },
+      bearer,
+    );
+    expect(selfRes.status).toBe(200);
+  });
+
+  it("startIndex is 1-based and count paginates the (unfiltered) list in stable, deterministic order", async () => {
     const { t, bearer } = await setup();
     await t.api.post("/scim/v2/Groups", { displayName: "Alpha" }, bearer);
     await t.api.post("/scim/v2/Groups", { displayName: "Beta" }, bearer);
     await t.api.post("/scim/v2/Groups", { displayName: "Gamma" }, bearer);
 
-    const res = await t.api.get("/scim/v2/Groups?startIndex=2&count=1", bearer);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
+    // Two independent list calls, one page each, must together reproduce
+    // the full, non-overlapping, creation-order sequence — proving the
+    // underlying `findMany` is deterministically ordered (`sortBy:
+    // createdAt asc`) rather than however the adapter/index happens to
+    // return rows, which `startIndex`/`count` slicing depends on.
+    const page1 = (await (
+      await t.api.get("/scim/v2/Groups?startIndex=1&count=1", bearer)
+    ).json()) as { Resources: { displayName: string }[] };
+    const page2 = (await (
+      await t.api.get("/scim/v2/Groups?startIndex=2&count=1", bearer)
+    ).json()) as {
       totalResults: number;
       startIndex: number;
       itemsPerPage: number;
-      Resources: Json[];
+      Resources: { displayName: string }[];
     };
-    expect(body.totalResults).toBe(3);
-    expect(body.startIndex).toBe(2);
-    expect(body.itemsPerPage).toBe(1);
-    expect(body.Resources.length).toBe(1);
+    const page3 = (await (
+      await t.api.get("/scim/v2/Groups?startIndex=3&count=1", bearer)
+    ).json()) as { Resources: { displayName: string }[] };
+
+    expect(page2.totalResults).toBe(3);
+    expect(page2.startIndex).toBe(2);
+    expect(page2.itemsPerPage).toBe(1);
+    expect(page2.Resources.length).toBe(1);
+    expect([
+      page1.Resources[0]!.displayName,
+      page2.Resources[0]!.displayName,
+      page3.Resources[0]!.displayName,
+    ]).toEqual(["Alpha", "Beta", "Gamma"]);
   });
 
   it("cross-org: a token for org B gets 404 on org A's group", async () => {
