@@ -26,6 +26,7 @@ export default defineConfig({
           name: "portal",
           include: ["test/portal/**/*.test.ts"],
           environment: "happy-dom",
+          setupFiles: ["./test/portal/setup.ts"],
         },
       },
     ],
