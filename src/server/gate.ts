@@ -36,7 +36,21 @@ export const GATED_PATHS: Record<string, Feature> = {
   "/enterprise/sso/providers": "sso",
   "/enterprise/sso/register": "sso",
   "/enterprise/sso/test-login/start": "sso",
-  "/enterprise/sso/test-login/finish": "sso",
+  // `/enterprise/sso/test-login/finish` is deliberately **absent** (C-1).
+  // It is the one `/enterprise/*` path a browser reaches immediately after
+  // an SSO sign-in, and the session that sign-in mints never carries an
+  // `activeOrganizationId` (only `/organization/set-active` ever writes one
+  // — `node_modules/better-auth/dist/plugins/organization/adapter.mjs:295`;
+  // `@better-auth/sso` never does). It is also a GET with no body and no
+  // `orgId` query parameter, so the org-id resolution below had *no* source
+  // for it and answered `400 ORG_REQUIRED` on the default path — which made
+  // the mandatory test login, and therefore `ssoEnforced`, unreachable for
+  // every org. The org for that request comes from the provider row
+  // (`ssoProvider.organizationId`), which is the trustworthy source anyway,
+  // so the `sso` entitlement check lives in the handler itself
+  // (`./enterprise-api/sso.ts`) where the provider is already resolved — and
+  // fails through that endpoint's redirect rather than a JSON error page the
+  // wizard cannot read.
   "/enterprise/scim/tokens": "scim",
   "/enterprise/scim/tokens/create": "scim",
   "/enterprise/scim/tokens/revoke": "scim",

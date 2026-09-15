@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
+import type { Feature } from "../../src/server/types";
 
 // `jwksEndpoint` is required alongside `authorizationEndpoint`/`tokenEndpoint`
 // for `skipDiscovery` to actually avoid a runtime OIDC discovery fetch on
@@ -298,6 +299,61 @@ describe("SSO test login (start + finish)", () => {
     const res = await t.api.get("/enterprise/sso/test-login/finish?providerId=okta", { cookie });
     expect(res.status).toBe(302);
     expect(redirectReason(res)).toBe("no_pending");
+  });
+
+  // C-1 — the single line the rest of this block was missing: every other
+  // `finish:` case here reuses the pre-SSO cookie from `createOrg()`, which
+  // carries an `activeOrganizationId`. A real browser arrives here on the
+  // session the SSO callback just minted, and nothing ever sets that field on
+  // a fresh session, so the entitlement gate's org-id resolution had no
+  // source and answered `400 ORG_REQUIRED` — permanently blocking the
+  // mandatory test login for every org. The org now comes from the provider
+  // row. (`test/e2e/oidc.test.ts` drives the same thing through the real
+  // issuer; this is the narrow, fast reproduction.)
+  it("finish: succeeds on a session with no activeOrganizationId (the state SSO leaves behind)", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    await registerProvider(t, cookie, orgId);
+    await verifyProviderDomain(t);
+    await startTestLogin(t, cookie, orgId);
+
+    await t.client.execute(`UPDATE session SET activeOrganizationId = NULL`);
+
+    const res = await t.api.get("/enterprise/sso/test-login/finish?providerId=okta", { cookie });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/?ab_sso_test=ok");
+
+    const flag = await t.client.execute({
+      sql: `SELECT identifier FROM verification WHERE identifier = ?`,
+      args: ["ab-sso-test-ok:okta"],
+    });
+    expect(flag.rows.length).toBe(1);
+  });
+
+  // The deferred minor recorded against Task 7, closed by the same change:
+  // an entitlement lost mid-flow used to surface as a bare 403 JSON error
+  // page the wizard cannot read. It redirects like every other failure now.
+  it("finish: entitlement revoked mid-flow -> redirects with reason=not_entitled, not a JSON 403", async () => {
+    let entitled = new Set<Feature>(["sso", "scim", "audit_log", "enforce_2fa"]);
+    const t = await makeAuth({ resolveEntitlements: async () => entitled });
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    await registerProvider(t, cookie, orgId);
+    await verifyProviderDomain(t);
+    await startTestLogin(t, cookie, orgId);
+
+    entitled = new Set<Feature>();
+
+    const res = await t.api.get("/enterprise/sso/test-login/finish?providerId=okta", { cookie });
+    expect(res.status).toBe(302);
+    expect(redirectReason(res)).toBe("not_entitled");
+
+    const flag = await t.client.execute({
+      sql: `SELECT identifier FROM verification WHERE identifier = ?`,
+      args: ["ab-sso-test-ok:okta"],
+    });
+    expect(flag.rows.length).toBe(0);
   });
 
   it("finish: mismatched email domain -> redirects with reason=domain_mismatch", async () => {

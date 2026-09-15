@@ -28,7 +28,7 @@ import type { GenericEndpointContext } from "better-auth";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
 import { getOrgPolicy, requireOrgMember, requireOwnerOrAdmin } from "../policy/store";
-import { forwardJson, relayStatus } from "./forward";
+import { forwardJson, forwardToAuth, relayStatus } from "./forward";
 
 const DOMAIN_TOKEN_PREFIX = "better-auth-token";
 
@@ -279,15 +279,34 @@ function buildTestLoginStartEndpoint() {
       );
 
       const callbackURL = `${ctx.context.baseURL}/enterprise/sso/test-login/finish?providerId=${encodeURIComponent(providerId)}`;
-      const { status, data } = await forwardJson(fullCtx, "POST", "/sign-in/sso", {
+      // Returns a raw `Response` (the same shape `../audit/plugin.ts`'s CSV
+      // export endpoint uses) rather than `ctx.json`, because the upstream
+      // `Set-Cookie` headers have to be relayed **verbatim** (C-1, second
+      // half): `/sign-in/sso` ends in better-auth's `generateGenericState`
+      // (`node_modules/better-auth/dist/state.mjs:61-62`), which stores the
+      // OAuth state as a *signed* `state` cookie alongside the `verification`
+      // row, and `parseGenericState` compares the two on the callback. A
+      // wrapper that reads only the JSON body — as this one did — swallows
+      // that cookie, so every test login came back from the IdP to
+      // `/sso/callback/:providerId` and redirected to
+      // `/api/auth/error?error=state_mismatch`. `ctx.setHeader` cannot carry
+      // more than one `set-cookie` (it `set`s rather than `append`s —
+      // `node_modules/better-call/dist/context.mjs:26`), and re-serialising
+      // the cookie through `ctx.setCookie` would have to reconstruct its
+      // attributes by hand; relaying the raw header keeps the signature,
+      // `HttpOnly`/`SameSite`/`Path` and `Max-Age` exactly as upstream set
+      // them.
+      const upstream = await forwardToAuth(fullCtx, "POST", "/sign-in/sso", {
         providerId,
         callbackURL,
       });
-      if (status < 200 || status >= 300 || !data) {
-        relayStatus(ctx, status);
-        return ctx.json(data);
+      const data = (await upstream.json().catch(() => null)) as Record<string, unknown> | null;
+      const headers = new Headers({ "content-type": "application/json" });
+      for (const cookie of upstream.headers.getSetCookie()) headers.append("set-cookie", cookie);
+      if (!upstream.ok || !data) {
+        return new Response(JSON.stringify(data ?? {}), { status: upstream.status, headers });
       }
-      return ctx.json({ url: data.url });
+      return new Response(JSON.stringify({ url: data.url }), { status: 200, headers });
     },
   );
 }
@@ -299,13 +318,31 @@ function emailDomain(email: string): string | null {
   return at === -1 ? null : email.slice(at + 1).toLowerCase();
 }
 
-// Entitlement/membership are enforced generically here: unlike the other
-// SSO endpoints, this one deliberately doesn't use `sessionMiddleware` (a
-// missing session is a normal "not signed in yet" outcome that redirects
-// with `reason=no_session`, not a 401 JSON error) — `GATED_PATHS`
-// (`../gate.ts`) still runs `requireFeature` for a caller who *does* have a
-// session, via its `activeOrganizationId` fallback (this path carries no
-// `orgId` of its own — see the controller ruling).
+// Every check on this endpoint is local, and the org it acts on is derived
+// from the **provider row**, never from the session (C-1).
+//
+// This is the one `/enterprise/*` path a browser arrives at straight out of
+// an SSO sign-in, so the session it carries is the brand-new one that
+// sign-in minted: no `activeOrganizationId` (nothing in better-auth or
+// `@better-auth/sso` writes one — only `/organization/set-active` does), and
+// the request is a GET with neither a body nor an `orgId` query parameter.
+// The generic entitlement gate (`../gate.ts`) therefore had no org id to
+// work with and rejected every real call with `400 ORG_REQUIRED`, which made
+// the mandatory test login — and so `ssoEnforced` — unreachable for every
+// org. This path is out of `GATED_PATHS` now and does the `sso` check itself,
+// against `ssoProvider.organizationId`.
+//
+// It deliberately doesn't use `sessionMiddleware` either: a missing session
+// is a normal "not signed in yet" outcome that redirects with
+// `reason=no_session`, not a 401 JSON error. Everything that can go wrong
+// here leaves the browser on a URL the wizard can read — including a revoked
+// entitlement, which used to be a bare 403 JSON error page (the deferred
+// minor recorded against Task 7, closed here).
+//
+// No separate membership check: the single-use `ab-sso-test:<providerId>`
+// row is what authorizes this call. `.../test-login/start` only writes it
+// for an owner/admin of the provider's own org, it is bound to that user's
+// id, and this handler refuses a session that isn't that same user.
 function buildTestLoginFinishEndpoint() {
   return createAuthEndpoint(
     "/enterprise/sso/test-login/finish",
@@ -349,6 +386,22 @@ function buildTestLoginFinishEndpoint() {
       const userDomain = emailDomain(session.user.email);
       if (!provider || !userDomain || !domains.includes(userDomain)) throw fail("domain_mismatch");
 
+      // The org this whole request is about. `enterprisePreset` only ever
+      // registers org-scoped providers, so a row without one is a hand-made
+      // or legacy "personal" provider: refused rather than audited into an
+      // empty-string org chain (m-1).
+      const orgId = provider.organizationId;
+      if (!orgId) throw fail("provider_not_org_scoped");
+
+      // The entitlement check the gate used to run, now against the org the
+      // provider itself names — and redirecting instead of answering JSON,
+      // so the wizard's landing page always gets a readable outcome.
+      try {
+        await requireFeature(fullCtx, orgId, "sso");
+      } catch {
+        throw fail("not_entitled");
+      }
+
       const now = new Date();
       // Effectively permanent — `getPolicyPreconditions` (`../policy/
       // plugin.ts`) only ever checks *existence* of this row, and a passed
@@ -367,7 +420,7 @@ function buildTestLoginFinishEndpoint() {
       // public, framework-agnostic append primitive, safe to call directly.
       const { writeAudit } = await import("../audit/chain");
       await writeAudit(fullCtx, {
-        orgId: provider.organizationId ?? "",
+        orgId,
         actorType: "user",
         actorId: session.user.id,
         action: "sso.test_login_passed",
