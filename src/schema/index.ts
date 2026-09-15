@@ -65,4 +65,4 @@ export const enterpriseSchema = { orgPolicy, auditEvent, scimGroup };
 
 export { EXPECTED_TABLES } from "./expected";
 export { verifyDatabase, type MissingItem, type VerifyResult } from "./verify";
-export { applyMigration, migrationFilePath } from "./migrate";
+export { applyMigration } from "./migrate";
