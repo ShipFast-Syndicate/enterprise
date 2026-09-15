@@ -191,4 +191,39 @@ describe("<ab-audit-log>", () => {
     expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1);
     expect(el.shadowRoot!.querySelector("form")).not.toBeNull();
   });
+
+  it("a stale inline error from a failed verify is cleared by a subsequent filter reload", async () => {
+    let verifyShouldFail = true;
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("/enterprise/audit/verify")) {
+        return verifyShouldFail
+          ? jsonResponse(500, { message: "Verify unavailable" })
+          : jsonResponse(200, { ok: true });
+      }
+      return jsonResponse(200, { items: [event()], nextCursor: null });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const el = makeEl();
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1));
+
+    const verifyButton = [...el.shadowRoot!.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Verify chain"),
+    )!;
+    verifyButton.click();
+    await vi.waitFor(() => expect(el.shadowRoot!.textContent).toContain("Verify unavailable"));
+
+    // A filter re-submit (a `reset` load, mocked to succeed) must clear the
+    // stale error left over from the failed verify above — it must not
+    // persist over the freshly (re-)loaded rows.
+    verifyShouldFail = false;
+    const form = el.shadowRoot!.querySelector("form")!;
+    form.querySelector<HTMLInputElement>('[name="actorId"]')!.value = "user_9";
+    form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(el.shadowRoot!.textContent).not.toContain("Verify unavailable"));
+    expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1);
+  });
 });

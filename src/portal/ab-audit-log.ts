@@ -129,12 +129,16 @@ export class AbAuditLog extends AbElement {
   }
 
   private async load(reset: boolean): Promise<void> {
+    // Cleared unconditionally on every call, not just the branch that can
+    // set it (`else` below) — a stale `submitError` from an earlier failed
+    // "Load more"/"Verify chain" must not linger over freshly loaded data
+    // once a *reset* load (initial load or a filter re-submit) succeeds.
+    this.submitError = undefined;
     if (reset) {
       this.loading = true;
       this.loadError = undefined;
     } else {
       this.loadingMore = true;
-      this.submitError = undefined;
     }
     try {
       const query = this.queryFromFilters();
