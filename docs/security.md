@@ -37,10 +37,20 @@
   above) and bound to the organization that generated them. A token is shown to the admin
   exactly once at creation time (`<ab-scim-tokens>`); it cannot be retrieved again, only revoked
   and replaced.
-- **`secretsKey`** (`EnterpriseOptions.secretsKey`, minimum 32 characters) encrypts IdP client
-  secrets (OIDC `clientSecret`, SAML SP private keys passed via `samlSpKeys`) at rest. Generate
-  it once per deployment and store it the same way every other product secret is stored — a 1Password
-  Service Account item, never checked into a repo or product config file.
+- **`secretsKey`** (`EnterpriseOptions.secretsKey`, minimum 32 characters) encrypts the
+  **per-provider** secret material on the `ssoProvider` row at rest: `oidcConfig.clientSecret`,
+  and `samlConfig`'s `privateKey`, `privateKeyPass`, `decryptionPvk`, `encPrivateKey` and
+  `encPrivateKeyPass` (including inside a nested `spMetadata`). Generate it once per deployment
+  and store it the same way every other product secret is stored — a 1Password Service Account
+  item, never checked into a repo or product config file.
+- **What is _not_ encrypted.** Everything else on `ssoProvider` is stored exactly as upstream
+  stores it, in the clear: `samlConfig`'s `cert`, `idpMetadata` and `entryPoint`, the issuer, the
+  domain. That is public IdP material, not secrets. And the **`samlSpKeys` option is reserved and
+  unused** — `enterprisePreset` cannot pass it to `@better-auth/sso@1.6.x`, which has no
+  plugin-level slot for a shared SP signing identity, so its value never reaches the database and
+  no at-rest guarantee applies to it. If you set it, read it back yourself and put it in your own
+  `/sso/register` body's `samlConfig.spMetadata`, where the per-provider encryption above does
+  cover the private-key fields. Wiring the option properly is a P2 item, gated on upstream.
 - **The CLI's `--token` flag** (`ab-enterprise verify`/`audit-verify`) is visible in `ps` output
   and shell history. Prefer the `TURSO_AUTH_TOKEN` environment variable — every error message the
   CLI prints already names it, and both commands read it as the default when `--token` is

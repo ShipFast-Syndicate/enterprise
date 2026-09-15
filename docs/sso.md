@@ -148,3 +148,45 @@ reveals whether the email belongs to an existing user — only whether its
 organization, not an individual account. Wire your sign-in page to call this
 before rendering a password/magic-link field; see the README's client
 snippet.
+
+## `samlSpKeys` — reserved, not wired
+
+`EnterpriseOptions.samlSpKeys` is typed and documented, but **not consumed by
+`enterprisePreset`**, and it is not encrypted at rest because it never reaches
+the database at all.
+
+`@better-auth/sso@1.6.x`'s `sso()` constructor has no plugin-level slot for a
+default or shared SP (service provider) signing identity — the only place SP
+key material exists upstream is a *per-provider* `samlConfig.spMetadata`, set
+at `/sso/register` time for that one organization's connection. There is
+therefore nothing for the preset to pass it to.
+
+If you want one shared SP identity across every org's SAML connection, read
+the option back yourself and put it in your own registration body:
+
+```ts
+await authClient.$fetch("/enterprise/sso/register", {
+  method: "POST",
+  body: {
+    organizationId: orgId,
+    providerId,
+    issuer,
+    domain,
+    samlConfig: {
+      entryPoint,
+      cert,
+      spMetadata: { entityID, privateKey: mySpPrivateKey, cert: mySpCert },
+    },
+  },
+});
+```
+
+The private-key fields of a registered `samlConfig` (`privateKey`,
+`privateKeyPass`, `decryptionPvk`, `encPrivateKey`, `encPrivateKeyPass`,
+including inside `spMetadata`) **are** encrypted at rest with `secretsKey` —
+see [`security.md`](./security.md#secrets-and-token-storage). The rest of
+`samlConfig` (certificates, IdP metadata, entry point) is public material and
+is stored as upstream stores it.
+
+Wiring the option into the preset properly needs upstream support; it is a P2
+item, kept typed so the shape does not change when that lands.

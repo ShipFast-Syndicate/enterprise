@@ -117,8 +117,18 @@ does four things in one operation (`src/server/policy/deprovision.ts`):
 
 1. suspends the user in that organization,
 2. revokes **all** of their sessions,
-3. revokes the API keys they own in that organization,
+3. revokes **all** of that user's API keys — every one they own, not just the
+   ones tied to this organization,
 4. writes an `audit_event` row.
+
+Step 3 is wider than it looks, and deliberately so for v0.1: API keys are
+per **user**, not per organization (upstream `@better-auth/api-key` owns them
+by `referenceId = userId`, and `<ab-api-keys>` drives the per-user
+`/api-key/list` and `/api-key/create`). There is no per-org key scoping to
+revoke against, so a deprovision from one organization revokes that user's
+keys everywhere. If a user is a member of two organizations that both use
+SCIM, deprovisioning them from one cuts off their keys for both. Per-org key
+scoping is post-v0.1.
 
 ## Token storage
 

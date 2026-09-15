@@ -66,15 +66,11 @@ export const auth = betterAuth({
     product: "klar",
     // Reads your own billing/plan state — see "Entitlements" below.
     resolveEntitlements: async (orgId) => resolveEntitlementsFromStripe(orgId),
-    // Encrypts IdP client secrets and SP private keys at rest. >=32 chars,
-    // from your product's 1Password vault — never a literal in source.
+    // Encrypts the per-provider IdP secrets stored on the `ssoProvider` row
+    // (OIDC `clientSecret`, SAML private-key fields). >=32 chars, from your
+    // product's 1Password vault — never a literal in source. See
+    // docs/security.md for exactly which fields it covers.
     secretsKey: process.env.ENTERPRISE_SECRETS_KEY!,
-    // Optional: one shared SP signing identity across every org's SAML
-    // connection (see docs/sso.md) instead of a fresh key pair per org.
-    samlSpKeys: {
-      cert: process.env.ENTERPRISE_SAML_SP_CERT!,
-      privateKey: process.env.ENTERPRISE_SAML_SP_KEY!,
-    },
     // Optional: runs on every SSO-driven JIT signup (CRM sync, welcome email, ...).
     provisionUser: async (user) => trackNewEnterpriseUser(user),
     audit: { retentionDays: 365 },
@@ -82,6 +78,13 @@ export const auth = betterAuth({
   }),
 });
 ```
+
+`samlSpKeys` is **not** in that list. It is typed on `EnterpriseOptions` and reserved, but
+`enterprisePreset` cannot consume it: `@better-auth/sso@1.6.x`'s `sso()` has no plugin-level slot
+for a shared SP signing identity — only a _per-provider_ `samlConfig.spMetadata`, set at
+`/sso/register` time. Read it back yourself and put it in your own registration body if you want
+one shared identity across orgs; see [`docs/sso.md`](./docs/sso.md). Wiring it properly is a P2
+item, gated on upstream.
 
 `enterprisePreset` returns the full plugin list: `organization` (teams enabled), `sso`,
 `scim`, `twoFactor`, `passkey`, `apiKey`, plus this package's own `enterpriseGate` (entitlement
@@ -170,6 +173,12 @@ including what `org_policy.sso_enforced` does to non-SSO sign-in attempts.
 `<ab-members>`, `<ab-security-settings>` (tabbed shell), `<ab-sso-wizard>`, `<ab-scim-tokens>`,
 `<ab-security-policy>`, `<ab-api-keys>`, `<ab-audit-log>`. They render a shadow DOM and talk to
 the `/enterprise/*` API directly — no server code needed beyond `enterprisePreset` above.
+
+One scope caveat: **API keys are per user in v0.1, not per organization.** `<ab-api-keys>` drives
+upstream `/api-key/list` and `/api-key/create`, which are scoped to the signed-in user, so an
+org's security screen shows and creates _that user's_ keys wherever they were created — and a
+SCIM deprovision revokes all of that user's keys, not only the ones they used for this org.
+Per-org key scoping is post-v0.1.
 
 **Import the elements only from a browser-only context.** Lit's browser build references
 `HTMLElement`, which doesn't exist on the server; importing the module in server-rendered code
