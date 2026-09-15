@@ -126,12 +126,19 @@ export async function hashRow(prevHash: string, row: AuditRowForHash): Promise<s
  * re-anchored on its `metadata.lastHash` — the hash of the last row
  * compaction removed — instead of `GENESIS`. The anchor itself still has to
  * hash correctly (`prevHash` = `metadata.lastHash`, `hash` =
- * `hashRow(prevHash, row)`), so an attacker cannot forge a gap by dropping
- * rows and inventing an anchor unless they already know the hash the
- * surviving rows chain back to — which is exactly the hash the row after
- * the anchor carries in its own `prevHash`, i.e. tail truncation and prefix
- * rewriting stay exactly as (un)detectable as they were before. What this
- * buys is that *normal operation* no longer reports `ok: false`.
+ * `hashRow(prevHash, row)`).
+ *
+ * Honest about the trade: within the limits I-08 already documents (anyone
+ * with database *write* can recompute a whole chain, and tail truncation is
+ * undetectable), the anchor makes prefix deletion cheaper than it was. Such
+ * an attacker no longer has to rewrite every surviving row's hash to hide
+ * dropped rows — forging one anchor whose `prevHash`/`metadata.lastHash`
+ * equal the next row's `prevHash` suffices, and the `compactedCount` it
+ * claims is unverifiable. That is weaker for that one scenario, and much
+ * stronger for the scenario that actually occurs: routine retention, which
+ * before this reported the chain as tampered forever. The real fix for both
+ * is an external anchor (I-08's periodic signed, off-box checkpoint), still
+ * the post-v0.1 answer.
  */
 export async function verifyChain(
   rows: AuditRow[],

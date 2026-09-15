@@ -311,13 +311,36 @@ async function auditMembershipChanges(
  * never reach the second operand — `defaultPolicy` returns `{}`, which is
  * not nullish — so a product configuring `scim.groupRoleMap` silently got no
  * mapping at all (flagged in the audit's Area 4 alongside C-03).
+ *
+ * **`"owner"` is stripped here, whichever source it came from (M-01).**
+ * `POST /enterprise/policy/set` refuses it at the boundary and
+ * `EnterpriseOptions.scim.groupRoleMap`'s type excludes it, but neither
+ * covers a policy row written before that rule existed, a row edited
+ * directly in the database, or an untyped JavaScript caller — and the raise
+ * branch of `recomputeRoleForUser` below would happily apply it. Dropping
+ * the entry (loudly) is the last line of the "no IdP group ever confers org
+ * ownership" rule; the group still maps to nothing, so the user keeps
+ * whatever role they already hold.
  */
 function resolveGroupRoleMap(
+  ctx: GenericEndpointContext,
   policyMap: Record<string, MappedRole>,
   opts: EnterpriseOptions,
-): Record<string, MappedRole> {
-  if (Object.keys(policyMap).length > 0) return policyMap;
-  return opts.scim?.groupRoleMap ?? {};
+): Record<string, Exclude<MappedRole, "owner">> {
+  const source: Record<string, MappedRole> =
+    Object.keys(policyMap).length > 0 ? policyMap : (opts.scim?.groupRoleMap ?? {});
+
+  const safe: Record<string, Exclude<MappedRole, "owner">> = {};
+  for (const [group, role] of Object.entries(source)) {
+    if (role === "owner") {
+      ctx.context.logger.warn(
+        `enterprise-scim-groups: ignoring groupRoleMap entry "${group}" -> "owner"; a SCIM group may only map to "admin" or "member".`,
+      );
+      continue;
+    }
+    if (role === "admin" || role === "member") safe[group] = role;
+  }
+  return safe;
 }
 
 async function auditRoleChangeSkipped(
@@ -404,7 +427,7 @@ async function recomputeRoleForUser(
   const groupNames = teams.map((t) => t.name);
 
   const policy = await getOrgPolicy(ctx, orgId);
-  const map = resolveGroupRoleMap(policy.groupRoleMap, opts);
+  const map = resolveGroupRoleMap(ctx, policy.groupRoleMap, opts);
   const role = effectiveRole(groupNames, map);
 
   if (member.role === role) return; // already correct — no write, no audit
@@ -433,7 +456,7 @@ async function recomputeRoleForUser(
   const isRaise = ROLE_RANK[role] > ROLE_RANK[currentRole];
   // (5) lowering requires the current role to be one the mapping grants —
   // the minimal provenance proxy for "SCIM assigned this".
-  if (!isRaise && !Object.values(map).includes(currentRole)) {
+  if (!isRaise && !(Object.values(map) as string[]).includes(currentRole)) {
     return skip("not_scim_managed");
   }
 

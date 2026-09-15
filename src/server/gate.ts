@@ -15,6 +15,7 @@ import type { EnterpriseOptions, Feature } from "./types";
 import { requireFeature } from "./entitlements";
 import { getMemberRoles } from "./policy/store";
 import { withSecretEncryption } from "./secrets";
+import { assertEnterpriseOptions } from "./options";
 
 export const GATED_PATHS: Record<string, Feature> = {
   "/sso/register": "sso",
@@ -72,6 +73,11 @@ const OWNER_ONLY_PATHS = new Set<string>([
 // by itself, but keeps every plugin constructor in this package following
 // the same `satisfies BetterAuthPlugin` convention.
 export function enterpriseGate(opts: EnterpriseOptions) {
+  // Validated here, not only in `./preset.ts`: this plugin is the one the
+  // rest of the layer cannot work without (it carries `options` for
+  // `requireFeature`, and installs the at-rest encryption wrapper below), so
+  // a product that hand-composes its plugin list still gets the checks.
+  assertEnterpriseOptions(opts);
   return {
     id: "enterprise-gate",
     // Exposed the same way built-in plugins (e.g. `jwt`) expose their

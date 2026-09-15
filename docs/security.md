@@ -64,8 +64,22 @@
   bare delete, and `verify` then reported tampering forever — see C-02 below). Retention and
   tamper-evidence remain two different guarantees: `audit-verify` proves nothing was altered
   **within the retention window**, and the anchor row records how many rows left it, not what
-  they said. Compaction runs when an owner/admin lists the log, and on demand via
-  `POST /enterprise/audit/compact`.
+  they said.
+- **Compaction is triggered by a read.** It runs on `GET /enterprise/audit/list` — already
+  owner/admin-only and feature-gated — because a deployment with no scheduler has no other
+  reliable trigger, and on demand via `POST /enterprise/audit/compact` (same authorization).
+  So an owner or admin opening the audit viewer is what actually enforces `retentionDays`, and
+  the destructive step happens inside a request they did not explicitly mark as destructive.
+  That is deliberate; run the explicit endpoint from a job if you would rather control when it
+  happens, and note that `audit.retentionDays` is validated (`>= 1`) at construction so a `0`
+  cannot compact a whole chain on the next read.
+- **What the anchor costs.** Within the limits already documented above, the anchor makes
+  *prefix* deletion cheaper for an attacker who can write the database directly: instead of
+  recomputing every surviving row's hash, they can forge one anchor whose `prev_hash` and
+  `metadata.lastHash` match the next row's `prev_hash`, and its `compactedCount` is
+  unverifiable. That is weaker than the pre-C-02 chain for that one scenario and much stronger
+  for the one that actually happens (routine retention, which used to report tampering
+  forever). A periodic signed off-box checkpoint is the post-v0.1 fix for both.
 - **A sign-in-path audit write failure does not block sign-in.** Per the design's error-handling
   rule, an audit write failure on any admin/config-changing path fails that action; on the
   sign-in path specifically it is logged (`enterprise-audit: failed to write audit row`) and the
@@ -207,13 +221,13 @@ audit's own exploit (failing before the fix, passing after).
 | C-01 | Any authenticated user could append rows to **any other tenant's** audit chain with `?orgId=<victim>`, with attacker-controlled `user_agent`, and `verify` still said `ok` | `resolveOrgId` (`src/server/audit/plugin.ts`) resolves the org from the SCIM bearer's own provider row, then the SSO provider row, then the session — a body/query org id is honoured **only** when the resolved actor holds a `member` row in it. Anything else skips the write with a warning. A `hooks.before` captures the caller's session so `/sign-out` (which deletes it) stays audited | `test/security/c01-audit-org-injection.test.ts` |
 | C-02 | Retention deleted rows out from under the hash chain, so `verify` reported `{"ok":false,"brokenAtSeq":…}` **permanently** after any row aged out — during entirely normal operation | Retention is archival **compaction** now (`compactChain`, `src/server/audit/chain.ts`): the expired prefix is replaced by one `audit.retention_compacted` anchor row carrying `{compactedThroughSeq, compactedCount, lastHash}`, whose `prev_hash` is that `lastHash`; `verifyChain` re-anchors on it. Tampering *inside* the surviving window is still caught. Compaction still runs from `GET /enterprise/audit/list` (owner/admin, feature-gated) and is now also available deliberately as `POST /enterprise/audit/compact` | `test/security/c02-retention-compaction.test.ts` |
 | C-03 | A SCIM group change rewrote `member.role` wholesale, so adding an existing **owner** or **admin** to any group demoted them to `member` (with two owners, either could be stripped) and multi-role values were flattened | `recomputeRoleForUser` (`src/server/scim-groups/plugin.ts`) never touches an `owner`, never overwrites a multi-role value, never touches a role outside `owner`/`admin`/`member`, always allows a *raise*, and only *lowers* a role the effective `groupRoleMap` itself grants somewhere. Every skip is audited as `scim.role_change_skipped` with a reason | `test/security/c03-scim-role-demotion.test.ts` |
-| C-04 | `secretsKey` was declared, documented (spec §7.4) and **never read** — IdP `clientSecret` and SAML private keys sat in the database in plaintext | `src/server/secrets.ts` wraps `context.adapter` from `enterpriseGate`'s `init()` and transparently encrypts/decrypts `ssoProvider.oidcConfig.clientSecret` plus the `samlConfig` private-key fields with AES-256-GCM (Web Crypto; key = SHA-256 of `secretsKey`; random 12-byte IV; `enc:v1:<base64url>`). Values without the prefix are read back untouched, so existing rows migrate on next write | `test/security/c04-secrets-at-rest.test.ts` (ciphertext asserted with raw SQL; `test/e2e/oidc.test.ts` proves the real OIDC callback still gets plaintext) |
+| C-04 | `secretsKey` was declared, documented (spec §7.4) and **never read** — IdP `clientSecret` and SAML private keys sat in the database in plaintext | `src/server/secrets.ts` wraps `context.adapter` from `enterpriseGate`'s `init()` and transparently encrypts/decrypts `ssoProvider.oidcConfig.clientSecret` plus the `samlConfig` private-key fields with AES-256-GCM (Web Crypto; key = SHA-256 of `secretsKey`; random 12-byte IV; **AAD = the provider's `providerId`**, so a ciphertext copied onto another provider row fails to decrypt instead of silently re-pointing a live IdP credential; `enc:v1:<base64url>`). Values without the prefix are read back untouched, so existing rows migrate on next write. `enterpriseGate` validates the options too, so a hand-composed plugin list is covered | `test/security/c04-secrets-at-rest.test.ts` (ciphertext asserted with raw SQL; `test/e2e/oidc.test.ts` proves the real OIDC callback still gets plaintext) |
 
 ### Medium
 
 | id | fix | test |
 | --- | --- | --- |
-| M-01 | `groupRoleMap` may target `admin`/`member` only (`owner` → 400 `GROUP_ROLE_MAP_OWNER_FORBIDDEN`); only an **owner** may write `groupRoleMap`/`breakGlassUserId` or mint a SCIM token (enforced on both `/enterprise/scim/tokens/create` and upstream `/scim/generate-token`). Admins keep list/revoke | `test/security/m01-privilege-escalation.test.ts` |
+| M-01 | `groupRoleMap` may target `admin`/`member` only — refused by the type, by `POST /enterprise/policy/set` (400 `GROUP_ROLE_MAP_OWNER_FORBIDDEN`), and at runtime in `resolveGroupRoleMap`, which drops an `owner` entry arriving from a stale policy row or the static `EnterpriseOptions.scim.groupRoleMap` with a warning; only an **owner** may write `groupRoleMap`/`breakGlassUserId` or mint a SCIM token (enforced on both `/enterprise/scim/tokens/create` and upstream `/scim/generate-token`). Admins keep list/revoke | `test/security/m01-privilege-escalation.test.ts` |
 | M-02 | Every exported CSV cell starting with `= + - @ TAB CR` is prefixed with `'`, RFC 4180 quoting unchanged | `test/security/m02-csv-injection.test.ts` |
 | M-03 | A global `hooks.before` on `/scim/v2/*` resolves the org from the bearer (`authenticateScimBearer`) and requires the `scim` feature, covering our Groups endpoints *and* upstream's Users endpoints; refusal is a SCIM-shaped 403 body. An unauthenticated call still gets the endpoint's own 401 | `test/security/m03-scim-entitlement-gate.test.ts` |
 | M-04 | `parseFilter` and the `members[value eq "…"]` patch-path parser are hand-written linear tokenizers behind a 512-character cap; `members`/`Operations` arrays are capped at the schema boundary. The audit's 64 000-space input went from **9.3 s** to under 1 ms | `test/security/m04-filter-redos.test.ts` |
@@ -258,6 +272,11 @@ org can tell the two apart, and for them the plan is not a secret.
   contract (`src/client/home-realm.ts` and its consumers), so it is deferred to the next minor
   rather than slipped into the publish pass. Mitigation in place: 10 requests/minute/IP, and the
   response depends only on the domain, never on whether the email is a real user.
+  **That rate limit only bites if the embedding product keeps better-auth's global
+  `rateLimit.enabled` on.** It is a plugin-declared rule, and better-auth disables rate limiting
+  outside production by default (`options.rateLimit?.enabled ?? isProduction`), so a product
+  that ships with it off has an unmetered domain-enumeration endpoint — enable it in whatever
+  environment faces traffic.
 - **L-09 — `ab-sso-test-ok:<providerId>` survives provider reconfiguration.** Needs a config
   fingerprint keyed alongside the provider and invalidation on every `/sso/register` update — a
   design change to the test-login precondition, deferred to P2. Mitigation: the row can only be

@@ -21,6 +21,8 @@ import {
   isEncrypted,
   assertSecretsKey,
 } from "../../src/server/secrets";
+import { enterpriseGate } from "../../src/server/gate";
+import { enterprisePreset } from "../../src/server/preset";
 
 const SECRET = "SUPERSECRET-idp-client-secret";
 
@@ -87,20 +89,83 @@ describe("C-04 — IdP client secrets are encrypted at rest", () => {
 
   it("round-trips, and leaves values that were never encrypted alone (migration)", async () => {
     const key = "k".repeat(32);
-    const sealed = await encryptSecret("hunter2", key);
+    const sealed = await encryptSecret("hunter2", key, "okta");
     expect(isEncrypted(sealed)).toBe(true);
     expect(sealed).not.toContain("hunter2");
-    expect(await decryptSecret(sealed, key)).toBe("hunter2");
+    expect(await decryptSecret(sealed, key, "okta")).toBe("hunter2");
     // Two encryptions of the same value differ (random IV per call).
-    expect(await encryptSecret("hunter2", key)).not.toBe(sealed);
+    expect(await encryptSecret("hunter2", key, "okta")).not.toBe(sealed);
     // A legacy plaintext row is returned untouched rather than mangled.
-    expect(await decryptSecret("plaintext-legacy", key)).toBe("plaintext-legacy");
+    expect(await decryptSecret("plaintext-legacy", key, "okta")).toBe("plaintext-legacy");
     // A wrong key is loud, not silently wrong.
-    await expect(decryptSecret(sealed, "x".repeat(32))).rejects.toThrow();
+    await expect(decryptSecret(sealed, "x".repeat(32), "okta")).rejects.toThrow();
+    // …and so is a ciphertext lifted onto a different provider (AAD binding).
+    await expect(decryptSecret(sealed, key, "entra")).rejects.toThrow();
   });
 
   it("secretsKey shorter than 32 characters is rejected at construction (L-08)", () => {
     expect(() => assertSecretsKey("too-short")).toThrow(/at least 32 characters/);
     expect(() => assertSecretsKey("s".repeat(32))).not.toThrow();
+  });
+
+  // Round 2: the ciphertext is bound to its provider with AES-GCM additional
+  // authenticated data, so the move available to an attacker who can write
+  // the database but not read the key — copy a working sealed secret onto a
+  // provider they control — fails instead of silently re-pointing a live IdP
+  // credential.
+  it("a ciphertext transplanted onto another provider row fails to decrypt", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    await registerOidc(t, cookie, orgId, "okta-src");
+    await registerOidc(t, cookie, orgId, "okta-dst");
+
+    const stolen = await rawOidcConfig(t, "okta-src");
+    await t.client.execute({
+      sql: `UPDATE "ssoProvider" SET oidcConfig = ? WHERE providerId = ?`,
+      args: [stolen, "okta-dst"],
+    });
+
+    const ctx = await t.auth.$context;
+    await expect(
+      ctx.adapter.findOne({
+        model: "ssoProvider",
+        where: [{ field: "providerId", value: "okta-dst" }],
+      }),
+    ).rejects.toThrow();
+
+    // The row it was stolen *from* is unaffected.
+    const source = await ctx.adapter.findOne<{ oidcConfig: string }>({
+      model: "ssoProvider",
+      where: [{ field: "providerId", value: "okta-src" }],
+    });
+    expect((JSON.parse(source!.oidcConfig) as { clientSecret: string }).clientSecret).toBe(SECRET);
+  });
+
+  it("enterpriseGate validates options too, so a hand-composed plugin list is covered", () => {
+    expect(() =>
+      enterpriseGate({ product: "test", secretsKey: "short", resolveEntitlements: async () => [] }),
+    ).toThrow(/at least 32 characters/);
+
+    // Round 2: retention bounds (a 0/negative window would compact an org's
+    // entire chain to a single anchor row on the next read).
+    for (const retentionDays of [0, -1]) {
+      expect(() =>
+        enterprisePreset({
+          product: "test",
+          secretsKey: "s".repeat(32),
+          resolveEntitlements: async () => [],
+          audit: { retentionDays },
+        }),
+      ).toThrow(/retentionDays/);
+    }
+    expect(() =>
+      enterprisePreset({
+        product: "test",
+        secretsKey: "s".repeat(32),
+        resolveEntitlements: async () => [],
+        audit: { retentionDays: 1 },
+      }),
+    ).not.toThrow();
   });
 });

@@ -44,8 +44,18 @@ export interface EnterpriseOptions {
    * and asks the caller to narrow the range (M-05).
    */
   audit?: { retentionDays?: number; exportMaxRows?: number };
-  /** SCIM Groups behavior. @default groupRoleMap {} */
-  scim?: { groupRoleMap?: Record<string, "owner" | "admin" | "member"> };
+  /**
+   * SCIM Groups behavior — the static fallback used when an org's
+   * `org_policy.group_role_map` is empty. @default groupRoleMap {}
+   *
+   * `"owner"` is **not** a legal target (M-01): an IdP group that confers org
+   * ownership is the payload of the admin→owner escalation the 2026-09-15
+   * audit reproduced. The type refuses it, and `resolveGroupRoleMap`
+   * (`./scim-groups/plugin.ts`) additionally drops any `"owner"` entry that
+   * reaches it at runtime — from a stale policy row written before this rule,
+   * or from untyped JavaScript — with a warning.
+   */
+  scim?: { groupRoleMap?: Record<string, "admin" | "member"> };
   /**
    * Forwarded verbatim to `sso()` in the preset (`./preset.ts`) so callers
    * configure JIT user provisioning in one place.

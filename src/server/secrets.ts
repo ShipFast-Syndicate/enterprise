@@ -93,12 +93,30 @@ function importKey(secretsKey: string): Promise<CryptoKey> {
   return key;
 }
 
-/** `enc:v1:<base64url(iv || ciphertext||tag)>` — AES-256-GCM, fresh IV per call. */
-export async function encryptSecret(plaintext: string, secretsKey: string): Promise<string> {
+/**
+ * `enc:v1:<base64url(iv || ciphertext||tag)>` — AES-256-GCM, fresh IV per
+ * call, **bound to `aad`** (the owning provider's `providerId`) as GCM
+ * additional authenticated data.
+ *
+ * The binding is what makes a ciphertext non-transplantable: copying a
+ * sealed `clientSecret` from one `ssoProvider` row onto another — the move
+ * available to anyone who can write the database but not read the key —
+ * produces a decryption failure rather than silently re-pointing a working
+ * IdP credential at a provider the attacker controls.
+ */
+export async function encryptSecret(
+  plaintext: string,
+  secretsKey: string,
+  aad: string,
+): Promise<string> {
   const key = await importKey(secretsKey);
   const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
   const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext)),
+    await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(aad) },
+      key,
+      new TextEncoder().encode(plaintext),
+    ),
   );
   const packed = new Uint8Array(iv.length + ciphertext.length);
   packed.set(iv, 0);
@@ -111,19 +129,29 @@ export function isEncrypted(value: unknown): value is string {
 }
 
 /**
- * Inverse of `encryptSecret`. A value without the `enc:v1:` prefix is
- * returned unchanged (migration-friendly: rows written before this shipped
- * are plaintext and must keep working). A prefixed value that fails to
- * decrypt throws — a wrong/rotated `secretsKey` must be loud, not silently
- * produce a garbage client secret that then fails at the IdP.
+ * Inverse of `encryptSecret`, including the `aad` binding. A value without
+ * the `enc:v1:` prefix is returned unchanged (migration-friendly: rows
+ * written before this shipped are plaintext and must keep working). A
+ * prefixed value that fails to decrypt throws — a wrong or rotated
+ * `secretsKey`, or a ciphertext lifted from another provider's row, must be
+ * loud, not silently produce a garbage client secret that then fails at the
+ * IdP with an unexplainable error.
  */
-export async function decryptSecret(value: string, secretsKey: string): Promise<string> {
+export async function decryptSecret(
+  value: string,
+  secretsKey: string,
+  aad: string,
+): Promise<string> {
   if (!isEncrypted(value)) return value;
   const key = await importKey(secretsKey);
   const packed = fromBase64Url(value.slice(PREFIX.length));
   const iv = packed.slice(0, IV_BYTES);
   const ciphertext = packed.slice(IV_BYTES);
-  const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv, additionalData: new TextEncoder().encode(aad) },
+    key,
+    ciphertext,
+  );
   return new TextDecoder().decode(plaintext);
 }
 
@@ -201,17 +229,27 @@ async function mapProviderSecrets(
   return out;
 }
 
-const encryptPayload = (data: unknown, secretsKey: string): Promise<unknown> =>
+const encryptPayload = (data: unknown, secretsKey: string, aad: string): Promise<unknown> =>
   data && typeof data === "object" && !Array.isArray(data)
     ? mapProviderSecrets(data as Json, (value) =>
-        isEncrypted(value) ? Promise.resolve(value) : encryptSecret(value, secretsKey),
+        isEncrypted(value) ? Promise.resolve(value) : encryptSecret(value, secretsKey, aad),
       )
     : Promise.resolve(data);
 
-const decryptRow = async (row: unknown, secretsKey: string): Promise<unknown> =>
-  row && typeof row === "object" && !Array.isArray(row)
-    ? mapProviderSecrets(row as Json, (value) => decryptSecret(value, secretsKey))
-    : row;
+/**
+ * Decrypts a row read back from the adapter. The AAD is the row's own
+ * `providerId`; a row that doesn't carry one (no upstream or in-package read
+ * path narrows the column set — `@better-auth/sso@1.6.33` uses no `select`
+ * anywhere, verified by grep — so this is defensive) is returned untouched
+ * rather than throwing, since an undecryptable-but-present ciphertext is
+ * more useful to an operator than a failed request.
+ */
+const decryptRow = async (row: unknown, secretsKey: string): Promise<unknown> => {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+  const aad = (row as { providerId?: unknown }).providerId;
+  if (typeof aad !== "string") return row;
+  return mapProviderSecrets(row as Json, (value) => decryptSecret(value, secretsKey, aad));
+};
 
 // --- the adapter wrapper ---------------------------------------------------
 
@@ -219,10 +257,70 @@ interface ModelParams {
   model?: unknown;
   data?: unknown;
   update?: unknown;
+  where?: unknown;
 }
 
 function isSecretModel(params: unknown): boolean {
   return (params as ModelParams | undefined)?.model === SECRET_MODEL;
+}
+
+function whereValue(params: ModelParams, field: string): string | null {
+  const where = params.where;
+  if (!Array.isArray(where)) return null;
+  for (const clause of where as Array<{ field?: unknown; value?: unknown; operator?: unknown }>) {
+    if (clause?.field === field && typeof clause.value === "string") {
+      if (clause.operator === undefined || clause.operator === "eq") return clause.value;
+    }
+  }
+  return null;
+}
+
+/**
+ * The AAD for a write: the `providerId` of the row being written.
+ *
+ * Resolved from the payload first (`create` always carries it —
+ * `@better-auth/sso@1.6.33`'s register call, `dist/index.mjs:2723`), then
+ * from an `eq` clause on `providerId` in the `where` (which is how upstream
+ * updates address the row, `:1525`), and finally by reading the row back by
+ * `id` through the *unwrapped* adapter (no recursion, and no decryption
+ * needed — only the `providerId` column is used).
+ *
+ * `null` means "cannot bind this write", and the caller refuses rather than
+ * writing an unbound — or worse, plaintext — secret.
+ */
+async function resolveWriteAad(
+  target: Adapter,
+  params: ModelParams,
+  payload: unknown,
+): Promise<string | null> {
+  const fromPayload = (payload as { providerId?: unknown } | undefined)?.providerId;
+  if (typeof fromPayload === "string" && fromPayload) return fromPayload;
+
+  const fromWhere = whereValue(params, "providerId");
+  if (fromWhere) return fromWhere;
+
+  const id = whereValue(params, "id");
+  if (!id) return null;
+  const row = await target.findOne<{ providerId?: string }>({
+    model: SECRET_MODEL,
+    where: [{ field: "id", value: id }],
+  });
+  return typeof row?.providerId === "string" ? row.providerId : null;
+}
+
+/** Only thrown for a write this wrapper cannot bind — never for ordinary traffic. */
+function unbindableWrite(operation: string): Error {
+  return new Error(
+    `@alphabros/enterprise: refusing to write ${SECRET_MODEL} secret material via "${operation}" without a resolvable providerId — the ciphertext is bound to it, so an unbound write could not be read back. Include providerId in the payload or address the row by providerId/id.`,
+  );
+}
+
+/** Whether a payload actually carries any secret-bearing field worth binding. */
+function touchesSecrets(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  return Object.keys(SECRET_JSON_FIELDS).some(
+    (field) => (payload as Json)[field] !== undefined && (payload as Json)[field] !== null,
+  );
 }
 
 /**
@@ -243,16 +341,22 @@ export function withSecretEncryption(adapter: Adapter, secretsKey: string): Adap
 
       switch (prop) {
         case "create":
-          return async (params: { data?: unknown }) => {
+          return async (params: ModelParams) => {
             if (!isSecretModel(params)) return call(params);
-            const data = await encryptPayload(params.data, secretsKey);
+            if (!touchesSecrets(params.data)) return decryptRow(await call(params), secretsKey);
+            const aad = await resolveWriteAad(target, params, params.data);
+            if (!aad) throw unbindableWrite("create");
+            const data = await encryptPayload(params.data, secretsKey, aad);
             return decryptRow(await call({ ...params, data }), secretsKey);
           };
         case "update":
         case "updateMany":
-          return async (params: { update?: unknown }) => {
+          return async (params: ModelParams) => {
             if (!isSecretModel(params)) return call(params);
-            const update = await encryptPayload(params.update, secretsKey);
+            if (!touchesSecrets(params.update)) return decryptRow(await call(params), secretsKey);
+            const aad = await resolveWriteAad(target, params, params.update);
+            if (!aad) throw unbindableWrite(String(prop));
+            const update = await encryptPayload(params.update, secretsKey, aad);
             return decryptRow(await call({ ...params, update }), secretsKey);
           };
         case "findOne":

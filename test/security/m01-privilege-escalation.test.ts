@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
-import { insertMemberRow, setPolicy } from "./helpers";
+import { insertMemberRow, mintScimToken, setPolicy } from "./helpers";
 
 async function code(res: Response): Promise<string> {
   return ((await res.json()) as { code: string }).code;
@@ -79,6 +79,68 @@ describe("M-01 — the admin→owner escalation is closed at every step", () => 
     );
     expect(wrapper.status).toBe(403);
     expect(await code(wrapper)).toBe("NOT_ORG_OWNER");
+  });
+
+  // Round 2: the *static* `EnterpriseOptions.scim.groupRoleMap` fallback is
+  // a second source of group→role mappings (it only became reachable when
+  // the dead `?? opts.scim?.groupRoleMap` chain was fixed), and the raise
+  // branch of the role recompute would apply an `"owner"` target from it.
+  // The type refuses it; `resolveGroupRoleMap` drops it at runtime too, so
+  // neither untyped JavaScript nor a stale policy row can grant ownership.
+  it("a static scim.groupRoleMap targeting owner never yields an owner", async () => {
+    const t = await makeAuth({
+      // Deliberately past the (now narrowed) type — the runtime guard is
+      // what this asserts.
+      scim: { groupRoleMap: { Bosses: "owner" } as unknown as Record<string, "admin"> },
+    });
+    const owner = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, owner.cookie);
+    const victimOfEscalation = await signUpOwner(t, "climber@acme.test");
+    await insertMemberRow(t, orgId, victimOfEscalation.userId, "member");
+    const bearer = await mintScimToken(t, owner.cookie, orgId);
+
+    const created = await t.api.post(
+      "/scim/v2/Groups",
+      { displayName: "Bosses", members: [{ value: victimOfEscalation.userId }] },
+      bearer,
+    );
+    expect(created.status).toBe(201);
+
+    const role = await t.client.execute({
+      sql: `SELECT role FROM member WHERE organizationId = ? AND userId = ?`,
+      args: [orgId, victimOfEscalation.userId],
+    });
+    expect(role.rows[0]!.role).toBe("member");
+  });
+
+  it("a stale policy row mapping a group to owner is ignored at runtime", async () => {
+    const t = await makeAuth();
+    const owner = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, owner.cookie);
+    const climber = await signUpOwner(t, "climber@acme.test");
+    await insertMemberRow(t, orgId, climber.userId, "member");
+    const bearer = await mintScimToken(t, owner.cookie, orgId);
+
+    // Written directly, the way a row predating M-01 (or a hand-edited
+    // database) would look.
+    await setPolicy(t, owner.cookie, { orgId, groupRoleMap: { Bosses: "admin" } });
+    await t.client.execute({
+      sql: `UPDATE org_policy SET group_role_map = ? WHERE org_id = ?`,
+      args: ['{"Bosses":"owner"}', orgId],
+    });
+
+    const created = await t.api.post(
+      "/scim/v2/Groups",
+      { displayName: "Bosses", members: [{ value: climber.userId }] },
+      bearer,
+    );
+    expect(created.status).toBe(201);
+
+    const role = await t.client.execute({
+      sql: `SELECT role FROM member WHERE organizationId = ? AND userId = ?`,
+      args: [orgId, climber.userId],
+    });
+    expect(role.rows[0]!.role).toBe("member");
   });
 
   it("an admin may still list and revoke SCIM tokens", async () => {

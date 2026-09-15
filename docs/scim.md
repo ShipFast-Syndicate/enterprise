@@ -22,11 +22,48 @@ team name, and `members` are `teamMember` rows. `scimGroups` stores only
 what `team` doesn't already carry — `externalId` and its own timestamps — in
 a small `scim_group` table (see the schema doc / `sql/0001_enterprise.sql`).
 
-`groupRoleMap` (`EnterpriseOptions.scim.groupRoleMap`) maps a SCIM group's
-`displayName` to an org role (`owner` | `admin` | `member`) that a member of
-that group is granted in addition to their base role — e.g. map an IdP
-group called `Acme-Admins` to `admin` so anyone your IdP puts in that group
-is provisioned as an org admin.
+## Group → role mapping
+
+`groupRoleMap` maps a SCIM group's `displayName` to an org role — e.g. map an
+IdP group called `Acme-Admins` to `admin` so anyone your IdP puts in that
+group is provisioned as an org admin. Two sources, in this order: the org's
+own `org_policy.group_role_map` (written by an **owner** through
+`POST /enterprise/policy/set`, and what the admin portal edits) when it has
+any entries, otherwise the static `EnterpriseOptions.scim.groupRoleMap` the
+product configures.
+
+**`admin` and `member` are the only legal targets. `owner` is refused** —
+by the type, by `POST /enterprise/policy/set` (`400
+GROUP_ROLE_MAP_OWNER_FORBIDDEN`), and at runtime, where an `owner` entry
+reaching the recompute from a stale row or untyped caller is dropped with a
+warning. An IdP group that confers org ownership is a privilege-escalation
+path (an org admin who can write the map and mint a SCIM token could promote
+themselves), so v0.1 does not offer it at all.
+
+### What a group change actually does to a role
+
+On every group create/update/patch/delete, each affected user's role is
+recomputed from the groups they are *currently* in — the highest-ranked
+mapped role wins (`admin` > `member`), and a user in no mapped group
+computes to `member`. That result is then applied under these rules:
+
+- **An `owner` is never touched.** Not raised, not lowered, whatever the map
+  says.
+- **A raise always applies.** A `member` in a group mapped to `admin`
+  becomes an `admin`.
+- **A lowering applies only to a role the map itself grants somewhere.** The
+  practical consequence to plan for: a single-role, non-owner member whose
+  current role equals a value in the effective map is **reset to `member`
+  when they leave every mapped group** — that is how deprovisioning an admin
+  through the IdP works. An `admin` in an org whose map grants `admin`
+  nowhere was assigned by hand, and is left alone.
+- **A multi-role `member.role` value (e.g. `admin,billing`) is never
+  overwritten**, and neither is a role outside `owner`/`admin`/`member`.
+
+Every applied change is audited as `member.role_changed` with
+`{from, to}`; every skipped one as `scim.role_change_skipped` with the
+reason (`owner_protected`, `multi_role`, `unmanaged_role`,
+`not_scim_managed`).
 
 ## `ResourceTypes` limitation
 
@@ -56,7 +93,8 @@ in-house Groups implementation are reconciled into one plugin.
 5. **Group push**: Okta's group-push UI does not gate on `ResourceTypes`
    advertising Groups — add the groups you want pushed under **Push
    Groups** and they provision against `/scim/v2/Groups` normally. Map the
-   pushed group's name to `groupRoleMap` if it should carry a role.
+   pushed group's name to `groupRoleMap` if it should carry a role (`admin`
+   or `member` — see the mapping rules above).
 
 ### Microsoft Entra ID (Azure AD)
 
