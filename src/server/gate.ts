@@ -27,6 +27,17 @@ export const GATED_PATHS: Record<string, Feature> = {
   "/enterprise/policy/set": "enforce_2fa", // any policy write needs the top tier
 };
 
+// `@better-auth/scim` below 1.7 has an unpatched HIGH advisory
+// (GHSA-j8v8-g9cx-5qf4): a SCIM provider created without `organizationId`
+// ("personal" provider) can be taken over. This design only ever allows
+// org-scoped providers, so these two paths require `organizationId`
+// explicitly in the body — unlike every other gated path, they must NOT
+// fall back to the session's active org (see the org-id resolution below).
+const ORG_ID_REQUIRED_IN_BODY = new Set<string>([
+  "/scim/generate-token",
+  "/scim/delete-provider-connection",
+]);
+
 export function enterpriseGate(opts: EnterpriseOptions): BetterAuthPlugin {
   return {
     id: "enterprise-gate",
@@ -40,17 +51,29 @@ export function enterpriseGate(opts: EnterpriseOptions): BetterAuthPlugin {
         {
           matcher: (ctx) => !!ctx.path && ctx.path in GATED_PATHS,
           handler: createAuthMiddleware(async (ctx) => {
+            // `ctx.path` is guaranteed to be a `GATED_PATHS` key here — the
+            // matcher above is the only way into this handler, and it
+            // already checked `ctx.path in GATED_PATHS`. Kept as a defensive
+            // fallback rather than a non-null assertion.
             const feature = GATED_PATHS[ctx.path];
             if (!feature) return;
 
+            // The hook context (`HookEndpointContext`) is structurally the
+            // same shape `getSessionFromCtx`/`requireFeature` need
+            // (`{ context: AuthContext, path, body, ... }` — a
+            // `GenericEndpointContext` minus a few endpoint-specific,
+            // unused-here fields); this hook runs inside the same request
+            // dispatch as the endpoint itself, so `ctx.context` is the real,
+            // live `AuthContext` for this request either way.
             const session = await getSessionFromCtx(ctx as unknown as GenericEndpointContext);
             if (!session) return; // anonymous — let the endpoint answer 401
 
             const body = ctx.body as { organizationId?: string; orgId?: string } | undefined;
-            const orgId =
-              body?.organizationId ??
-              body?.orgId ??
-              (session.session as { activeOrganizationId?: string }).activeOrganizationId;
+            const orgId = ORG_ID_REQUIRED_IN_BODY.has(ctx.path)
+              ? body?.organizationId
+              : (body?.organizationId ??
+                body?.orgId ??
+                (session.session as { activeOrganizationId?: string }).activeOrganizationId);
             if (!orgId) {
               throw new APIError("BAD_REQUEST", {
                 code: "ORG_REQUIRED",

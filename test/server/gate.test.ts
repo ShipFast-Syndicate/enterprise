@@ -107,4 +107,42 @@ describe("enterpriseGate", () => {
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe("ORG_REQUIRED");
   });
+
+  // GHSA-j8v8-g9cx-5qf4: @better-auth/scim below 1.7 lets a SCIM provider be
+  // created without an organizationId ("personal" provider), which can then
+  // be taken over. This design only allows org-scoped providers, so
+  // `/scim/generate-token` and `/scim/delete-provider-connection` must
+  // require `organizationId` explicitly in the body — never falling back to
+  // the session's active org, unlike every other gated path.
+  describe("SCIM provider paths never fall back to the session's active org", () => {
+    it("POST /scim/generate-token without organizationId returns 400 ORG_REQUIRED, even with an active org, and creates no scimProvider row", async () => {
+      const t = await makeAuth({ resolveEntitlements: async () => ["scim"] });
+      const { cookie } = await signUpOwner(t);
+      await createOrg(t, cookie); // sets an active org on the session
+
+      const res = await t.api.post("/scim/generate-token", { providerId: "p1" }, { cookie });
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("ORG_REQUIRED");
+
+      const rows = await t.client.execute(`SELECT * FROM "scimProvider"`);
+      expect(rows.rows.length).toBe(0);
+    });
+
+    it("POST /scim/generate-token with organizationId passes the gate (201 from upstream)", async () => {
+      const t = await makeAuth({ resolveEntitlements: async () => ["scim"] });
+      const { cookie } = await signUpOwner(t);
+      const { orgId } = await createOrg(t, cookie);
+
+      const res = await t.api.post(
+        "/scim/generate-token",
+        { providerId: "p1", organizationId: orgId },
+        { cookie },
+      );
+
+      expect(res.status).toBe(201);
+      const rows = await t.client.execute(`SELECT * FROM "scimProvider"`);
+      expect(rows.rows.length).toBe(1);
+    });
+  });
 });

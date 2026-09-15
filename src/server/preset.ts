@@ -8,6 +8,16 @@
 // (see `./types.ts`) for a later task to wire into the `sso()` call below;
 // per the controller ruling for this task, the `sso()` options here are
 // exactly `domainVerification` + `organizationProvisioning`, nothing more.
+//
+// `scim({ providerOwnership: { enabled: true } })`: `@better-auth/scim`
+// below 1.7 has an unpatched HIGH advisory (GHSA-j8v8-g9cx-5qf4) — a SCIM
+// provider created without `organizationId` ("personal" provider) can be
+// taken over. This design only ever allows org-scoped providers (enforced
+// in `./gate.ts`, which requires `organizationId` explicitly for
+// `/scim/generate-token` and `/scim/delete-provider-connection` rather than
+// falling back to the session's active org), and `providerOwnership`
+// additionally binds each provider connection to the user who generated its
+// token as defense in depth.
 
 import type { BetterAuthPlugin } from "better-auth";
 import { admin, organization, twoFactor } from "better-auth/plugins";
@@ -29,7 +39,7 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
       domainVerification: { enabled: true },
       organizationProvisioning: { disabled: false, defaultRole: "member" },
     }),
-    scim({ storeSCIMToken: "hashed" }),
+    scim({ storeSCIMToken: "hashed", providerOwnership: { enabled: true } }),
     enterpriseGate(opts),
   ];
 }

@@ -103,59 +103,66 @@ function buildDynamicSchema(authOptions: BetterAuthOptions) {
   return { drizzleSchema, ddl };
 }
 
+// Our own 3 enterprise tables. Not part of better-auth's model registry
+// (`enterpriseGate` declares no `schema`), so they're never in a
+// `buildDynamicSchema()` result — mirror the drizzle definitions in
+// `src/schema/index.ts` directly. Task 3 replaces this with the real
+// `sql/0001_enterprise.sql` migration.
+const ENTERPRISE_TABLES_DDL = [
+  `CREATE TABLE IF NOT EXISTS org_policy (
+    org_id TEXT PRIMARY KEY,
+    require_2fa INTEGER NOT NULL DEFAULT 0,
+    sso_enforced INTEGER NOT NULL DEFAULT 0,
+    break_glass_user_id TEXT,
+    session_max_age_s INTEGER,
+    allowed_methods TEXT NOT NULL DEFAULT '["sso","magic_link","google","github","linkedin","microsoft","password","passkey"]',
+    group_role_map TEXT NOT NULL DEFAULT '{}',
+    updated_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS audit_event (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT,
+    action TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT,
+    ip TEXT,
+    user_agent TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    prev_hash TEXT NOT NULL,
+    hash TEXT NOT NULL
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS audit_event_org_seq ON audit_event (org_id, seq)`,
+  `CREATE INDEX IF NOT EXISTS audit_event_org_created ON audit_event (org_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS scim_group (
+    team_id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    external_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS scim_group_org ON scim_group (org_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS scim_group_org_external ON scim_group (org_id, external_id)`,
+];
+
+async function applyMigrations(ddl: string[], client: Client): Promise<void> {
+  await client.batch([...ddl, ...ENTERPRISE_TABLES_DDL], "write");
+}
+
+// Recomputes the dynamic schema from `auth.options` — fine for a one-off
+// standalone call, but `makeAuth` below already has a `buildDynamicSchema()`
+// result in hand (it needs the schema before `auth` exists, to build `db`)
+// and calls `applyMigrations` with that directly rather than through this,
+// to avoid deriving the schema from the same options twice.
 export async function runMigrations(
   auth: { options: BetterAuthOptions },
   client: Client,
 ): Promise<void> {
   const { ddl } = buildDynamicSchema(auth.options);
-  await client.batch(
-    [
-      ...ddl,
-      // Our own 3 enterprise tables. Not part of better-auth's model
-      // registry (`enterpriseGate` declares no `schema`), so they're never
-      // in `ddl` above — mirror the drizzle definitions in
-      // `src/schema/index.ts` directly. Task 3 replaces this with the real
-      // `sql/0001_enterprise.sql` migration.
-      `CREATE TABLE IF NOT EXISTS org_policy (
-        org_id TEXT PRIMARY KEY,
-        require_2fa INTEGER NOT NULL DEFAULT 0,
-        sso_enforced INTEGER NOT NULL DEFAULT 0,
-        break_glass_user_id TEXT,
-        session_max_age_s INTEGER,
-        allowed_methods TEXT NOT NULL DEFAULT '["sso","magic_link","google","github","linkedin","microsoft","password","passkey"]',
-        group_role_map TEXT NOT NULL DEFAULT '{}',
-        updated_at INTEGER NOT NULL
-      )`,
-      `CREATE TABLE IF NOT EXISTS audit_event (
-        id TEXT PRIMARY KEY,
-        org_id TEXT NOT NULL,
-        seq INTEGER NOT NULL,
-        actor_type TEXT NOT NULL,
-        actor_id TEXT,
-        action TEXT NOT NULL,
-        target_type TEXT NOT NULL,
-        target_id TEXT,
-        ip TEXT,
-        user_agent TEXT,
-        metadata TEXT NOT NULL DEFAULT '{}',
-        created_at INTEGER NOT NULL,
-        prev_hash TEXT NOT NULL,
-        hash TEXT NOT NULL
-      )`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS audit_event_org_seq ON audit_event (org_id, seq)`,
-      `CREATE INDEX IF NOT EXISTS audit_event_org_created ON audit_event (org_id, created_at)`,
-      `CREATE TABLE IF NOT EXISTS scim_group (
-        team_id TEXT PRIMARY KEY,
-        org_id TEXT NOT NULL,
-        external_id TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )`,
-      `CREATE INDEX IF NOT EXISTS scim_group_org ON scim_group (org_id)`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS scim_group_org_external ON scim_group (org_id, external_id)`,
-    ],
-    "write",
-  );
+  await applyMigrations(ddl, client);
 }
 
 type ApiHeaders = Record<string, string>;
@@ -184,14 +191,14 @@ export async function makeAuth(
     plugins: [...enterprisePreset(opts), ...(overrides.plugins ?? [])],
   };
 
-  const { drizzleSchema } = buildDynamicSchema(baseOptions);
+  const { drizzleSchema, ddl } = buildDynamicSchema(baseOptions);
   const client = createClient({ url: ":memory:" });
   const db = drizzle(client, { schema: { ...enterpriseSchema, ...drizzleSchema } });
   const auth = betterAuth({
     database: drizzleAdapter(db, { provider: "sqlite" }),
     ...baseOptions,
   });
-  await runMigrations(auth, client);
+  await applyMigrations(ddl, client);
 
   const api = {
     post: (path: string, body: unknown, headers: ApiHeaders = {}) =>
