@@ -1,18 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { magicLink } from "better-auth/plugins";
 import { orgPolicy } from "../../src/server/policy/plugin";
+import {
+  deriveSessionCreateMethod,
+  buildSessionCreateBeforeHook,
+} from "../../src/server/policy/enforcement";
+import { ALLOWED_METHOD_VALUES } from "../../src/server/policy/store";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
-
-const DEFAULT_ALLOWED_METHODS = [
-  "sso",
-  "magic_link",
-  "google",
-  "github",
-  "linkedin",
-  "microsoft",
-  "password",
-  "passkey",
-];
 
 async function insertVerifiedProvider(
   t: TestAuth,
@@ -60,7 +54,7 @@ describe("GET /enterprise/policy", () => {
       ssoEnforced: false,
       breakGlassUserId: null,
       sessionMaxAgeS: null,
-      allowedMethods: DEFAULT_ALLOWED_METHODS,
+      allowedMethods: [...ALLOWED_METHOD_VALUES],
       groupRoleMap: {},
     });
   });
@@ -160,6 +154,20 @@ describe("POST /enterprise/policy/set", () => {
     const body = await res.json();
     expect(body.require2fa).toBe(true); // untouched by the second call
     expect(body.allowedMethods).toEqual(["password", "sso"]);
+  });
+
+  it("400s on an allowedMethods value outside the closed ALLOWED_METHOD_VALUES set", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+
+    const res = await t.api.post(
+      "/enterprise/policy/set",
+      { orgId, allowedMethods: ["password", "carrier_pigeon"] },
+      { cookie },
+    );
+
+    expect(res.status).toBe(400);
   });
 
   it("ssoEnforced:true with no verified provider and no break-glass owner -> 400 SSO_ENFORCE_PRECONDITION", async () => {
@@ -317,6 +325,49 @@ describe("sign-in enforcement + session-creation backstop", () => {
     expect(verifyRes.status).toBe(200);
   });
 
+  it("magic-link with storeToken:'hashed' still resolves the pending email pre-flight and 403s SSO_REQUIRED on verify for a non-break-glass user", async () => {
+    const sent: Array<{ email: string; token: string }> = [];
+    const t = await makeAuth({
+      plugins: [
+        magicLink({
+          storeToken: "hashed",
+          async sendMagicLink({ email, token }) {
+            sent.push({ email, token });
+          },
+        }),
+      ],
+    });
+    // bob's link is requested *before* ssoEnforced flips on, so the request
+    // stage itself isn't what's under test — /magic-link/verify is.
+    const { cookie, userId: ownerId } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    await signUpOwner(t, "bob@acme.test");
+    const requestRes = await t.api.post("/sign-in/magic-link", { email: "bob@acme.test" }, {});
+    expect(requestRes.status).toBe(200);
+    expect(sent).toHaveLength(1);
+
+    await insertVerifiedProvider(t, orgId, "acme.test");
+    await t.api.post(
+      "/enterprise/policy/set",
+      { orgId, ssoEnforced: true, breakGlassUserId: ownerId },
+      { cookie },
+    );
+
+    const verifyRes = await t.api.get(`/magic-link/verify?token=${sent[0]!.token}`);
+    expect(verifyRes.status).toBe(403);
+    expect((await verifyRes.json()).code).toBe("SSO_REQUIRED");
+
+    // Proves the *pre-flight* hook (not just the session-creation backstop)
+    // is what caught this: if it failed to resolve bob's email from the
+    // hashed verification identifier (the bug this test guards against),
+    // the real `magicLinkVerify` handler would have run far enough to
+    // consume (delete) the verification row before the backstop rejected
+    // the resulting session — so the row still existing here proves the
+    // request was rejected before the real endpoint ever ran.
+    const rows = await t.client.execute(`SELECT * FROM verification`);
+    expect(rows.rows.length).toBe(1);
+  });
+
   it("allowedMethods excluding password blocks /sign-in/email with 403 METHOD_NOT_ALLOWED", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");
@@ -339,7 +390,7 @@ describe("sign-in enforcement + session-creation backstop", () => {
     expect((await res.json()).code).toBe("METHOD_NOT_ALLOWED");
   });
 
-  it("a password sign-in for an email whose domain has no SSO provider is never enforced (no policy resolvable)", async () => {
+  it("a password sign-in for a user with no org membership and no SSO provider on their domain is never enforced (no policy resolvable)", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "freeagent@nodomain.test");
     await t.api.post("/sign-out", {}, { cookie });
@@ -352,18 +403,144 @@ describe("sign-in enforcement + session-creation backstop", () => {
 
     expect(res.status).toBe(200);
   });
+
+  it("the break-glass user is exempt from allowedMethods too, not only SSO_REQUIRED", async () => {
+    const t = await makeAuth();
+    const { cookie, userId: ownerId } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    // ssoEnforced stays false, so the SSO_ENFORCE_PRECONDITION check never
+    // runs — this isolates the allowedMethods exemption specifically.
+    const setRes = await t.api.post(
+      "/enterprise/policy/set",
+      { orgId, allowedMethods: ["sso"], breakGlassUserId: ownerId },
+      { cookie },
+    );
+    expect(setRes.status).toBe(200);
+
+    const res = await t.api.post(
+      "/sign-in/email",
+      { email: "owner@acme.test", password: "password1234" },
+      {},
+    );
+
+    expect(res.status).toBe(200);
+  });
 });
 
-describe("sessionMaxAgeS", () => {
-  it("caps a newly created session's lifetime to ~sessionMaxAgeS seconds", async () => {
+describe("resolvePolicyOrgForUser (via the sign-in backstop, membership priority)", () => {
+  it("a single, unambiguous org membership resolves the policy even with no SSO provider configured at all", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, cookie);
-    // sessionMaxAgeS resolution is domain-based (ruling (d): "look up the
-    // user's email domain -> org policy"), same as ssoEnforced, so a
-    // verified provider is required for the org's policy to be resolvable
-    // at session-creation time even though ssoEnforced stays false here.
-    await insertVerifiedProvider(t, orgId, "acme.test");
+    const setRes = await t.api.post(
+      "/enterprise/policy/set",
+      { orgId, allowedMethods: ["sso"] }, // excludes password — no ssoProvider row exists for this org at all
+      { cookie },
+    );
+    expect(setRes.status).toBe(200);
+
+    const res = await t.api.post(
+      "/sign-in/email",
+      { email: "owner@acme.test", password: "password1234" },
+      {},
+    );
+
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("METHOD_NOT_ALLOWED");
+  });
+
+  it("a user belonging to two orgs is ambiguous — membership resolution defers, so no policy applies without a matching SSO domain", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId: orgA } = await createOrg(t, cookie, "acme-a");
+    const { orgId: orgB } = await createOrg(t, cookie, "acme-b"); // now a member of 2 orgs
+    await t.api.post(
+      "/enterprise/policy/set",
+      { orgId: orgA, allowedMethods: ["sso"] },
+      { cookie },
+    );
+    await t.api.post(
+      "/enterprise/policy/set",
+      { orgId: orgB, allowedMethods: ["sso"] },
+      { cookie },
+    );
+
+    const res = await t.api.post(
+      "/sign-in/email",
+      { email: "owner@acme.test", password: "password1234" },
+      {},
+    );
+
+    // Neither org's policy is applied — ambiguous membership, and
+    // owner@acme.test's domain has no verified ssoProvider either.
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("deriveSessionCreateMethod (session-creation backstop's path -> method mapping)", () => {
+  it("maps every session-creating path this preset's plugins register to its method", () => {
+    expect(deriveSessionCreateMethod({ path: "/sign-in/email" })).toBe("password");
+    expect(deriveSessionCreateMethod({ path: "/magic-link/verify" })).toBe("magic_link");
+    expect(deriveSessionCreateMethod({ path: "/passkey/verify-authentication" })).toBe("passkey");
+    expect(deriveSessionCreateMethod({ path: "/sso/callback/okta-prod" })).toBe("sso");
+    expect(deriveSessionCreateMethod({ path: "/sso/saml2/sp/acs/okta-prod" })).toBe("sso");
+    // Concrete resolved path (provider embedded directly)
+    expect(deriveSessionCreateMethod({ path: "/callback/google" })).toBe("google");
+    // Registered pattern form (provider in params)
+    expect(deriveSessionCreateMethod({ path: "/callback/:id", params: { id: "github" } })).toBe(
+      "github",
+    );
+    expect(
+      deriveSessionCreateMethod({ path: "/sign-in/social", body: { provider: "linkedin" } }),
+    ).toBe("linkedin");
+  });
+
+  it("returns null (never blocked) for unrecognized paths", () => {
+    expect(deriveSessionCreateMethod({ path: "/some/other/endpoint" })).toBeNull();
+    expect(deriveSessionCreateMethod({})).toBeNull();
+    expect(deriveSessionCreateMethod({ path: "/callback/:id" })).toBeNull(); // pattern, no params.id
+  });
+});
+
+describe("session-creation backstop enforces allowedMethods independent of the pre-flight hook", () => {
+  it("blocks a session-creating call whose derived method is excluded, for a path the pre-flight hook never inspects", async () => {
+    const t = await makeAuth();
+    const { cookie, userId: ownerId } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    const setRes = await t.api.post(
+      "/enterprise/policy/set",
+      { orgId, allowedMethods: ["password"] },
+      { cookie },
+    );
+    expect(setRes.status).toBe(200);
+
+    // `buildSignInBeforeHook`'s matcher never fires for an OAuth callback
+    // path at all (`/callback/:id`/`/callback/google` isn't one of the 5
+    // sign-in paths it matches) — driving this through a real request would
+    // require a full OAuth round trip against a mocked provider. Calling
+    // the exported backstop builder directly against the real auth
+    // instance's context (`$context`, better-auth's own escape hatch for
+    // this — `node_modules/better-auth/dist/auth/base.mjs`) proves the
+    // backstop enforces `allowedMethods` on its own, independent of the
+    // pre-flight hook, for exactly the paths the pre-flight hook can't see.
+    const context = await (t.auth as unknown as { $context: Promise<unknown> }).$context;
+    const hook = buildSessionCreateBeforeHook();
+
+    await expect(
+      hook({ userId: ownerId } as never, { path: "/callback/google", context } as never),
+    ).rejects.toMatchObject({ body: { code: "METHOD_NOT_ALLOWED" } });
+  });
+});
+
+describe("sessionMaxAgeS", () => {
+  it("caps a newly created session's lifetime to ~sessionMaxAgeS seconds — resolved via org membership, no SSO provider needed", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    // `resolvePolicyOrgForUser` (`../../src/server/policy/enforcement.ts`)
+    // resolves the org via the owner's single, unambiguous `member` row —
+    // no `ssoProvider` row exists for this org at all, proving
+    // `sessionMaxAgeS` enforcement isn't tied to SSO being configured.
     const setRes = await t.api.post(
       "/enterprise/policy/set",
       { orgId, sessionMaxAgeS: 600 },

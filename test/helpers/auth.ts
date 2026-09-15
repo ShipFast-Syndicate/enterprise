@@ -143,6 +143,50 @@ export async function runMigrations(
   await applyMigrations(ddl, client);
 }
 
+// Rate limiting is disabled by default outside production
+// (`options.rateLimit?.enabled ?? isProduction`,
+// `node_modules/better-auth/dist/context/create-context.mjs`) — off by
+// default in this `NODE_ENV=test` suite too, so `test/server/home-realm.
+// test.ts`'s rate-limit behavioural test needs it turned on here to exercise
+// real behavior instead of asserting against a no-op. Products embedding
+// this package must likewise keep rate limiting enabled in whatever
+// environment actually faces traffic — `enterpriseGate`/`orgPolicy`'s own
+// per-path rules (10/min on `/enterprise/home-realm`, ruling (c)) only bite
+// when the global switch is on.
+//
+// better-auth also hardcodes a *separate*, much stricter "special rule" for
+// every `/sign-in*`/`/sign-up*`/`/change-password`/`/change-email` path
+// (`getDefaultSpecialRules()` in `node_modules/better-auth/dist/api/
+// rate-limiter/index.mjs`: window 10s, max **3** — not configurable via the
+// top-level `rateLimit.max`, which only sets the *generic* per-path default
+// used when nothing more specific matches). Every test file in this suite
+// calls `/sign-up/email` (`signUpOwner`) and `/sign-in/email` far more than
+// 3 times each, and the rate limiter's in-memory store is a module-level
+// singleton shared by every `it()` in one test file (vitest isolates
+// modules per *file*, not per test) regardless of how many separate
+// `makeAuth()` instances a file creates — so enabling rate limiting without
+// relaxing this specific special rule would break most of the existing
+// suite, not just add coverage. `customRules` is the only mechanism that
+// overrides it (checked after both the special rule and any plugin's own
+// `rateLimit` array, so it always wins for a matching path); scoped to just
+// `/sign-up/*` and `/sign-in/*` so plugin-declared rules — `orgPolicy`'s own
+// `/enterprise/home-realm` (10/min) and upstream `magicLink`'s
+// `/sign-in/magic-link`+`/magic-link/verify` (5/min, matched by exact path,
+// not by this wildcard) — stay intact and testable.
+const TEST_RATE_LIMIT: NonNullable<BetterAuthOptions["rateLimit"]> = {
+  enabled: true,
+  // Generous generic ceiling for every other path (`/get-session`,
+  // `/organization/*`, `/scim/*`, `/api-key/*`, `/enterprise/policy*`, ...)
+  // that has neither a special rule nor a plugin-declared one — the
+  // upstream default (100/10s) is plenty in isolation, but many of those
+  // paths are also called dozens of times per test file.
+  max: 1000,
+  customRules: {
+    "/sign-up/*": { window: 10, max: 10_000 },
+    "/sign-in/*": { window: 10, max: 10_000 },
+  },
+};
+
 // The same "Task 2 preset mounted" base options `test/schema/verify.test.ts`
 // and `test/cli/cli.test.ts` both need to derive the upstream better-auth
 // schema (`getAuthTables`/`runMigrations`) without booting a full `makeAuth`
@@ -155,6 +199,7 @@ export function baseAuthOptions(): BetterAuthOptions {
     secret: "x".repeat(32),
     baseURL: "http://localhost:3000",
     emailAndPassword: { enabled: true },
+    rateLimit: TEST_RATE_LIMIT,
     plugins: enterprisePreset({
       product: "test",
       secretsKey: "s".repeat(32),
@@ -186,6 +231,7 @@ export async function makeAuth(
     secret: "x".repeat(32),
     baseURL: "http://localhost:3000",
     emailAndPassword: { enabled: true },
+    rateLimit: TEST_RATE_LIMIT,
     plugins: [...enterprisePreset(opts), ...(overrides.plugins ?? [])],
   };
 
