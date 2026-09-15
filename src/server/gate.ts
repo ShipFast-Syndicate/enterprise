@@ -13,6 +13,8 @@ import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/a
 import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import type { EnterpriseOptions, Feature } from "./types";
 import { requireFeature } from "./entitlements";
+import { getMemberRoles } from "./policy/store";
+import { withSecretEncryption } from "./secrets";
 
 export const GATED_PATHS: Record<string, Feature> = {
   "/sso/register": "sso",
@@ -24,6 +26,7 @@ export const GATED_PATHS: Record<string, Feature> = {
   "/api-key/create": "api_keys",
   "/enterprise/audit/list": "audit_log",
   "/enterprise/audit/export": "audit_log",
+  "/enterprise/audit/compact": "audit_log",
   "/enterprise/policy/set": "enforce_2fa", // any policy write needs the top tier
   // Task 7 (`./enterprise-api/plugin.ts`) portal wrappers. `/enterprise/
   // members` and `/enterprise/features` are deliberately absent — basic org
@@ -49,6 +52,19 @@ const ORG_ID_REQUIRED_IN_BODY = new Set<string>([
   "/scim/delete-provider-connection",
 ]);
 
+// Paths only an org **owner** may call (M-01). Minting a SCIM token is the
+// second half of the admin→owner escalation the audit reproduced (write
+// `groupRoleMap: {Bosses: "owner"}` as an admin, mint a token, `POST
+// /scim/v2/Groups {displayName: "Bosses", members: [self]}`); the first half
+// is closed in `./policy/plugin.ts`. Enforced here rather than only in
+// `./enterprise-api/scim.ts` so calling the upstream endpoint directly is
+// covered too — the portal wrapper forwards through this same dispatch
+// pipeline, so both routes hit this check.
+const OWNER_ONLY_PATHS = new Set<string>([
+  "/scim/generate-token",
+  "/enterprise/scim/tokens/create",
+]);
+
 // No explicit `: BetterAuthPlugin` return-type annotation (client task-9 fix
 // round 1, applied here too for consistency — see `./enterprise-api/
 // plugin.ts`'s identical comment on `enterpriseApi`). `enterpriseGate` has
@@ -63,6 +79,16 @@ export function enterpriseGate(opts: EnterpriseOptions) {
     // `ctx.context.options.plugins` so it isn't tied to this specific
     // closure.
     options: opts,
+    // Encryption at rest for IdP secrets (C-04). better-auth merges a
+    // plugin's returned `context` into the live `AuthContext` and builds
+    // `internalAdapter` from `context.adapter` *after* every plugin's
+    // `init()` has run (`node_modules/better-auth/dist/context/helpers.mjs`),
+    // so wrapping the adapter here covers both access paths — including
+    // every `@better-auth/sso` read/write of `ssoProvider`. See
+    // `./secrets.ts`.
+    init(context) {
+      return { context: { adapter: withSecretEncryption(context.adapter, opts.secretsKey) } };
+    },
     hooks: {
       before: [
         {
@@ -99,6 +125,33 @@ export function enterpriseGate(opts: EnterpriseOptions) {
               throw new APIError("BAD_REQUEST", {
                 code: "ORG_REQUIRED",
                 message: "An organization id is required.",
+              });
+            }
+
+            // Membership before entitlement (M-07). `orgId` here is still
+            // caller-supplied on most paths, and `resolveEntitlements` is the
+            // product's own billing/plan lookup: letting a non-member reach
+            // it turned `/enterprise/*?orgId=<any string>` into both a
+            // cross-tenant existence/plan oracle (`FEATURE_NOT_ENTITLED` =
+            // "org exists, no plan" vs. `NOT_ORG_ADMIN` = "org exists and is
+            // entitled") and a free amplifier into that lookup. A non-member
+            // now gets the same `NOT_ORG_MEMBER` for every org id they do not
+            // belong to, whatever its plan — and never reaches the resolver.
+            const roles = await getMemberRoles(
+              ctx as unknown as GenericEndpointContext,
+              orgId,
+              session.user.id,
+            );
+            if (roles.length === 0) {
+              throw new APIError("FORBIDDEN", {
+                code: "NOT_ORG_MEMBER",
+                message: "You are not a member of this organization.",
+              });
+            }
+            if (OWNER_ONLY_PATHS.has(ctx.path) && !roles.includes("owner")) {
+              throw new APIError("FORBIDDEN", {
+                code: "NOT_ORG_OWNER",
+                message: "Owner role required.",
               });
             }
 

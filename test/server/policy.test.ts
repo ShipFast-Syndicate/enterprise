@@ -94,7 +94,11 @@ describe("GET /enterprise/policy", () => {
     expect((await res.json()).code).toBe("NOT_ORG_MEMBER");
   });
 
-  it("a plain member (not owner/admin) can still read the policy", async () => {
+  // M-08 (security audit 2026-09-15): a plain member used to be able to read
+  // the whole security policy — `breakGlassUserId`, `groupRoleMap`,
+  // `allowedMethods`. It is owner/admin-only now; `require2fa` still reaches
+  // ordinary members through `/get-session`.
+  it("a plain member (not owner/admin) is refused (403 NOT_ORG_ADMIN)", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, cookie);
@@ -103,7 +107,8 @@ describe("GET /enterprise/policy", () => {
 
     const res = await t.api.get(`/enterprise/policy?orgId=${orgId}`, { cookie: memberCookie });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { code: string }).code).toBe("NOT_ORG_ADMIN");
   });
 });
 

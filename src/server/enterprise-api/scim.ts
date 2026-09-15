@@ -20,7 +20,7 @@ import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import type { GenericEndpointContext } from "better-auth";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
-import { requireOrgMember, requireOwnerOrAdmin } from "../policy/store";
+import { requireOwner, requireOwnerOrAdmin } from "../policy/store";
 import { forwardJson, relayStatus } from "./forward";
 
 interface ScimProviderRow {
@@ -36,7 +36,10 @@ function buildTokensListEndpoint() {
     async (ctx) => {
       const fullCtx = ctx as unknown as GenericEndpointContext;
       const { orgId } = ctx.query;
-      await requireOrgMember(fullCtx, orgId);
+      // Owner/admin, not any member (M-08); role before entitlement (M-07).
+      // Admins may list (and revoke) tokens; only an owner may create one
+      // (M-01, below).
+      await requireOwnerOrAdmin(fullCtx, orgId);
       await requireFeature(fullCtx, orgId, "scim");
 
       const rows = await ctx.context.adapter.findMany<ScimProviderRow>({
@@ -63,8 +66,13 @@ function buildTokensCreateEndpoint() {
     async (ctx) => {
       const fullCtx = ctx as unknown as GenericEndpointContext;
       const { orgId, providerId } = ctx.body;
-      await requireOrgMember(fullCtx, orgId);
-      await requireOwnerOrAdmin(fullCtx, orgId);
+      // Owner only (M-01): a SCIM token is the second half of the
+      // admin→owner escalation (write `groupRoleMap`, mint a token, add
+      // yourself to the mapped group). `../gate.ts` enforces the same rule
+      // on the upstream `/scim/generate-token` path this forwards to, so the
+      // escalation is closed whether an attacker calls the wrapper or
+      // upstream directly. Admins keep list/revoke.
+      await requireOwner(fullCtx, orgId);
       await requireFeature(fullCtx, orgId, "scim");
 
       const { status, data } = await forwardJson(fullCtx, "POST", "/scim/generate-token", {
@@ -89,7 +97,6 @@ function buildTokensRevokeEndpoint() {
     async (ctx) => {
       const fullCtx = ctx as unknown as GenericEndpointContext;
       const { orgId, providerId } = ctx.body;
-      await requireOrgMember(fullCtx, orgId);
       await requireOwnerOrAdmin(fullCtx, orgId);
       await requireFeature(fullCtx, orgId, "scim");
 

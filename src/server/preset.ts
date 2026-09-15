@@ -72,8 +72,14 @@ import { auditLog } from "./audit/plugin";
 import { orgPolicy } from "./policy/plugin";
 import { scimGroups } from "./scim-groups/plugin";
 import { enterpriseApi } from "./enterprise-api/plugin";
+import { assertSecretsKey } from "./secrets";
 
 export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
+  // `secretsKey` is load-bearing as of the pre-publish security pass (C-04):
+  // it encrypts `ssoProvider` secret material at rest, so the documented
+  // ">= 32 characters" rule is now enforced here (L-08) instead of being a
+  // comment on a dead option.
+  assertSecretsKey(opts.secretsKey);
   return [
     admin(),
     organization({ teams: { enabled: true } }),

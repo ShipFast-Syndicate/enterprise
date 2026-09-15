@@ -410,20 +410,23 @@ describe("SCIM token endpoints", () => {
     expect(revoked.rows.length).toBe(1);
   });
 
-  it("create requires owner/admin", async () => {
+  // M-01 (security audit 2026-09-15): minting a SCIM token is owner-only —
+  // it is the second half of the admin→owner escalation. Admins keep
+  // list/revoke.
+  it("create requires owner (403 NOT_ORG_OWNER for an admin)", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, cookie);
-    const { cookie: memberCookie, userId: memberId } = await signUpOwner(t, "member@acme.test");
-    await insertMemberRow(t, orgId, memberId, "member");
+    const { cookie: adminCookie, userId: adminId } = await signUpOwner(t, "admin@acme.test");
+    await insertMemberRow(t, orgId, adminId, "admin");
 
     const res = await t.api.post(
       "/enterprise/scim/tokens/create",
       { orgId, providerId: "hris" },
-      { cookie: memberCookie },
+      { cookie: adminCookie },
     );
     expect(res.status).toBe(403);
-    expect((await res.json()).code).toBe("NOT_ORG_ADMIN");
+    expect((await res.json()).code).toBe("NOT_ORG_OWNER");
   });
 });
 

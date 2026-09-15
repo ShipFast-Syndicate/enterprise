@@ -135,7 +135,12 @@ function buildProvidersEndpoint() {
     async (ctx) => {
       const fullCtx = ctx as unknown as GenericEndpointContext;
       const { orgId } = ctx.query;
-      await requireOrgMember(fullCtx, orgId);
+      // Owner/admin, not any member (M-08): this response contains the DNS
+      // TXT verification token (`verificationRecord.value`) — whoever holds
+      // it can complete domain verification for the org's SSO connection —
+      // plus the IdP issuer, ACS/redirect URLs and enforcement state. None
+      // of it is something a plain member needs.
+      await requireOwnerOrAdmin(fullCtx, orgId);
 
       const rows = await ctx.context.adapter.findMany<SsoProviderRow>({
         model: "ssoProvider",

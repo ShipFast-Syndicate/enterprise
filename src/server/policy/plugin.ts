@@ -46,7 +46,7 @@ import {
   findPolicyRow,
   getOrgPolicy,
   isOrgOwner,
-  requireOrgMember,
+  requireOwner,
   requireOwnerOrAdmin,
   toOrgPolicy,
   type OrgPolicy,
@@ -115,7 +115,12 @@ function buildPolicyEndpoints() {
     async (ctx) => {
       const fullCtx = ctx as unknown as GenericEndpointContext;
       const { orgId } = ctx.query;
-      await requireOrgMember(fullCtx, orgId);
+      // Owner/admin, not any member (M-08): this response carries
+      // `breakGlassUserId`, `groupRoleMap` and `allowedMethods` — the org's
+      // security configuration, and a map of exactly which IdP group grants
+      // which role. Plain members get `require2fa` surfaced on
+      // `/get-session` instead (see `buildRequire2faAfterHook` below).
+      await requireOwnerOrAdmin(fullCtx, orgId);
       return ctx.json(await getOrgPolicy(fullCtx, orgId));
     },
   );
@@ -126,13 +131,34 @@ function buildPolicyEndpoints() {
     async (ctx) => {
       const fullCtx = ctx as unknown as GenericEndpointContext;
       const { orgId, ...patch } = ctx.body;
+      // Role before entitlement (M-07) — a non-member must never reach the
+      // product's `resolveEntitlements` with an org id they invented.
       // `./gate.ts`'s `GATED_PATHS` already runs `requireFeature` for this
       // path (mapped to the top `"enforce_2fa"` tier) before this handler
       // ever executes; called again here so this endpoint is self-defending
       // the same way `../audit/plugin.ts`'s audit endpoints are, independent
       // of the gate staying wired up.
-      await requireFeature(fullCtx, orgId, "enforce_2fa");
       await requireOwnerOrAdmin(fullCtx, orgId);
+      await requireFeature(fullCtx, orgId, "enforce_2fa");
+
+      // The two knobs that can mint owners are owner-only (M-01): an admin
+      // who can write `groupRoleMap` can point a group at `owner`, mint
+      // themselves a SCIM token and add themselves to that group — the full
+      // admin→owner escalation the audit reproduced end to end. Same for
+      // `breakGlassUserId`, which exempts a user from `ssoEnforced` *and*
+      // from `allowedMethods`.
+      if (patch.groupRoleMap !== undefined || patch.breakGlassUserId !== undefined) {
+        await requireOwner(fullCtx, orgId);
+      }
+      // `owner` is refused as a mapping target outright in v0.1 (M-01):
+      // there is no legitimate reason for an IdP group to confer org
+      // ownership, and it is the escalation's payload.
+      if (patch.groupRoleMap && Object.values(patch.groupRoleMap).includes("owner")) {
+        throw new APIError("BAD_REQUEST", {
+          code: "GROUP_ROLE_MAP_OWNER_FORBIDDEN",
+          message: 'groupRoleMap may map a group to "admin" or "member" only, never "owner".',
+        });
+      }
 
       const existing = await findPolicyRow(fullCtx, orgId);
       const current = toOrgPolicy(existing, orgId);
@@ -158,6 +184,25 @@ function buildPolicyEndpoints() {
             code: "SSO_ENFORCE_PRECONDITION",
             message:
               "Enforcing SSO requires a verified SSO provider for this organization and a breakGlassUserId who holds the owner role.",
+          });
+        }
+      }
+
+      // Break-glass identity is validated on *every* write (M-06), not only
+      // when `ssoEnforced` is being turned on — which is what the check
+      // above (deliberately left first, so enabling enforcement still
+      // reports `SSO_ENFORCE_PRECONDITION`) used to be the only cover for.
+      // Without this, an owner could set `breakGlassUserId` to a user of
+      // another org — or of no org at all — while `ssoEnforced` was false,
+      // and that outsider was then permanently exempt from the org's
+      // `allowedMethods` enforcement too (`./enforcement.ts` honours
+      // break-glass for both rules).
+      if (patch.breakGlassUserId !== undefined && patch.breakGlassUserId !== null) {
+        if (!(await isOrgOwner(fullCtx, orgId, patch.breakGlassUserId))) {
+          throw new APIError("BAD_REQUEST", {
+            code: "BREAK_GLASS_NOT_OWNER",
+            message:
+              "breakGlassUserId must be a user who holds the owner role in this organization.",
           });
         }
       }
