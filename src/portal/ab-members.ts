@@ -49,13 +49,17 @@ export class AbMembers extends AbElement {
     members: { state: true },
     invitations: { state: true },
     loading: { state: true },
-    error: { state: true },
+    loadError: { state: true },
+    submitError: { state: true },
   };
 
   declare members: Member[];
   declare invitations: Invitation[];
   declare loading: boolean;
-  declare error: unknown;
+  /** Fatal load error — replaces the whole view (`./base.ts`'s `renderError`). */
+  declare loadError: unknown;
+  /** Inline mutation error (invite/role-change/remove) — rendered above the table; the loaded roster is left untouched. */
+  declare submitError: unknown;
 
   /**
    * Confirmation gate before `/organization/remove-member` is called.
@@ -66,16 +70,8 @@ export class AbMembers extends AbElement {
 
   static styles = [
     AbElement.baseStyles,
+    AbElement.tableStyles,
     css`
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      th,
-      td {
-        text-align: left;
-        padding: var(--ab-space-2);
-      }
       form {
         display: flex;
         gap: var(--ab-space-2);
@@ -95,7 +91,8 @@ export class AbMembers extends AbElement {
     this.members = [];
     this.invitations = [];
     this.loading = true;
-    this.error = undefined;
+    this.loadError = undefined;
+    this.submitError = undefined;
   }
 
   override connectedCallback(): void {
@@ -105,7 +102,7 @@ export class AbMembers extends AbElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = undefined;
+    this.loadError = undefined;
     try {
       const data = await this.api.get<MembersResponse>("/enterprise/members", {
         orgId: this.orgId,
@@ -113,7 +110,7 @@ export class AbMembers extends AbElement {
       this.members = data.members ?? [];
       this.invitations = data.invitations ?? [];
     } catch (e) {
-      this.error = e;
+      this.loadError = e;
     } finally {
       this.loading = false;
     }
@@ -126,6 +123,7 @@ export class AbMembers extends AbElement {
     const email = String(data.get("email") ?? "").trim();
     const role = String(data.get("role") ?? "member");
     if (!email) return;
+    this.submitError = undefined;
     try {
       await this.api.post("/organization/invite-member", {
         email,
@@ -136,12 +134,13 @@ export class AbMembers extends AbElement {
       await this.load();
       this.emitChange({ type: "invite", email, role });
     } catch (e) {
-      this.error = e;
+      this.submitError = e;
     }
   }
 
   private async handleRoleChange(member: Member, e: Event): Promise<void> {
     const role = (e.target as HTMLSelectElement).value;
+    this.submitError = undefined;
     try {
       await this.api.post("/organization/update-member-role", {
         memberId: member.id,
@@ -151,13 +150,14 @@ export class AbMembers extends AbElement {
       await this.load();
       this.emitChange({ type: "role", memberId: member.id, role });
     } catch (e) {
-      this.error = e;
+      this.submitError = e;
     }
   }
 
   private async handleRemove(member: Member): Promise<void> {
     const ok = this.confirm(`Remove ${member.email ?? member.userId} from this organization?`);
     if (!ok) return;
+    this.submitError = undefined;
     try {
       await this.api.post("/organization/remove-member", {
         memberIdOrEmail: member.id,
@@ -166,15 +166,16 @@ export class AbMembers extends AbElement {
       await this.load();
       this.emitChange({ type: "remove", memberId: member.id });
     } catch (e) {
-      this.error = e;
+      this.submitError = e;
     }
   }
 
   override render(): TemplateResult {
-    if (this.error) return this.renderError(this.error);
+    if (this.loadError) return this.renderError(this.loadError);
     if (this.loading) return this.renderLoading();
 
     return html`
+      ${this.submitError ? this.renderError(this.submitError) : ""}
       <table>
         <thead>
           <tr>

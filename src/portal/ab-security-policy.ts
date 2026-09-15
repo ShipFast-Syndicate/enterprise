@@ -67,6 +67,7 @@ export class AbSecurityPolicy extends AbElement {
     loading: { state: true },
     error: { state: true },
     submitError: { state: true },
+    noChangesMessage: { state: true },
     policy: { state: true },
     require2fa: { state: true },
     sessionMaxAgeS: { state: true },
@@ -81,6 +82,8 @@ export class AbSecurityPolicy extends AbElement {
   declare error: unknown;
   /** Inline save error — rendered within the form, load state untouched. */
   declare submitError: unknown;
+  /** Set instead of `submitError` when a submit's diff against `policy` is empty — a no-op, not a failure. */
+  declare noChangesMessage: string | undefined;
   /** The last-loaded policy — the diff baseline for the next submit. */
   declare policy: OrgPolicy | null;
   declare require2fa: boolean;
@@ -129,6 +132,7 @@ export class AbSecurityPolicy extends AbElement {
     this.loading = true;
     this.error = undefined;
     this.submitError = undefined;
+    this.noChangesMessage = undefined;
     this.policy = null;
     this.require2fa = false;
     this.sessionMaxAgeS = null;
@@ -208,8 +212,12 @@ export class AbSecurityPolicy extends AbElement {
 
   private async handleSubmit(e: SubmitEvent): Promise<void> {
     e.preventDefault();
+    this.noChangesMessage = undefined;
     const patch = this.buildPatch();
-    if (Object.keys(patch).length === 0) return;
+    if (Object.keys(patch).length === 0) {
+      this.noChangesMessage = "Nothing to save.";
+      return;
+    }
     this.submitError = undefined;
     try {
       await this.api.post("/enterprise/policy/set", { orgId: this.orgId, ...patch });
@@ -328,6 +336,7 @@ export class AbSecurityPolicy extends AbElement {
         </fieldset>
 
         ${this.submitError ? this.renderError(this.submitError) : ""}
+        ${this.noChangesMessage ? html`<p class="ab-muted">${this.noChangesMessage}</p>` : ""}
         <button type="submit">Save changes</button>
       </form>
     `;

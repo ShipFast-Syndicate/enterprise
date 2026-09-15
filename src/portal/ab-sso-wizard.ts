@@ -345,11 +345,22 @@ export class AbSsoWizard extends AbElement {
 
   private async handleEnforce(): Promise<void> {
     this.error = undefined;
+    // Defends the same rule the `enforce-toggle` button's `?disabled=`
+    // binding enforces in the DOM (ruling: the toggle stays disabled while
+    // `breakGlassUserId` is empty) — checked again here so a caller that
+    // invokes this handler directly (bypassing the disabled button) can't
+    // send an empty value the server would otherwise happily accept as
+    // "no break-glass user", which is not what an empty field means.
+    const breakGlassUserId = this.breakGlassUserId.trim();
+    if (!breakGlassUserId) {
+      this.error = new Error("A break-glass user id is required before enforcing SSO.");
+      return;
+    }
     try {
       await this.api.post("/enterprise/policy/set", {
         orgId: this.orgId,
         ssoEnforced: true,
-        breakGlassUserId: this.breakGlassUserId,
+        breakGlassUserId,
       });
       this.step = "done";
       this.emitChange({ type: "sso-enforced" });
@@ -456,16 +467,18 @@ export class AbSsoWizard extends AbElement {
   }
 
   private renderEnforce(): TemplateResult {
-    const enabled = !!this.provider?.testLoginPassedAt;
+    const testLoginPassed = !!this.provider?.testLoginPassedAt;
+    const hasBreakGlassUser = this.breakGlassUserId.trim() !== "";
     return html`
       ${this.error ? this.renderError(this.error) : ""}
-      <p class=${enabled ? "" : "ab-muted"}>
-        ${enabled ? "Test login passed." : "Complete a test login before enforcing SSO."}
+      <p class=${testLoginPassed ? "" : "ab-muted"}>
+        ${testLoginPassed ? "Test login passed." : "Complete a test login before enforcing SSO."}
       </p>
       <label>
         Break-glass user id (keeps password sign-in for this owner)
         <input
           name="breakGlassUserId"
+          required
           .value=${this.breakGlassUserId}
           @input=${(e: Event) => this.handleBreakGlassInput(e)}
         />
@@ -474,7 +487,7 @@ export class AbSsoWizard extends AbElement {
         <button
           type="button"
           data-testid="enforce-toggle"
-          ?disabled=${!enabled}
+          ?disabled=${!testLoginPassed || !hasBreakGlassUser}
           @click=${() => void this.handleEnforce()}
         >
           Enforce SSO for this organization

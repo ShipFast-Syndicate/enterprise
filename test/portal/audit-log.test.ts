@@ -164,4 +164,31 @@ describe("<ab-audit-log>", () => {
     verifyButton.click();
     await vi.waitFor(() => expect(el.shadowRoot!.textContent).toContain("Broken at seq 7"));
   });
+
+  it("a failed verify renders an inline error without wiping the loaded rows", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("/enterprise/audit/verify")) {
+        return jsonResponse(500, { message: "Verify unavailable" });
+      }
+      return jsonResponse(200, { items: [event()], nextCursor: null });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const el = makeEl();
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1));
+
+    const verifyButton = [...el.shadowRoot!.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Verify chain"),
+    )!;
+    verifyButton.click();
+
+    await vi.waitFor(() => expect(el.shadowRoot!.textContent).toContain("Verify unavailable"));
+    // The load-error path would have replaced the whole view — asserting
+    // the row and filter form are both still present proves this is the
+    // inline `submitError` path instead.
+    expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1);
+    expect(el.shadowRoot!.querySelector("form")).not.toBeNull();
+  });
 });

@@ -290,4 +290,44 @@ describe("<ab-members>", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1);
   });
+
+  it("a failed invite renders an inline error without wiping the loaded roster", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          200,
+          membersBody([
+            {
+              id: "m1",
+              userId: "u1",
+              email: "owner@acme.test",
+              name: "Owner",
+              role: "owner",
+              teams: [],
+            },
+          ]),
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(409, { code: "ALREADY_INVITED", message: "Already invited" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const el = makeEl();
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1));
+
+    const form = el.shadowRoot!.querySelector("form")!;
+    form.querySelector<HTMLInputElement>('input[name="email"]')!.value = "dup@acme.test";
+    form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+
+    await vi.waitFor(() => expect(el.shadowRoot!.textContent).toContain("Already invited"));
+    // The load-error path (`renderError` replacing the whole view) would
+    // have dropped the table entirely — asserting both proves this is the
+    // inline `submitError` path instead.
+    expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1);
+    expect(el.shadowRoot!.querySelector("form")).not.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

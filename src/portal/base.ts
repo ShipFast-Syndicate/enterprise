@@ -71,6 +71,35 @@ export class AbElement extends LitElement {
     .ab-loading {
       color: var(--ab-color-text-muted);
     }
+    .ab-copy-box {
+      background: var(--ab-color-surface);
+      border: var(--ab-border);
+      border-radius: var(--ab-radius);
+      padding: var(--ab-space-3);
+    }
+    .ab-copy-box code {
+      font: inherit;
+      word-break: break-all;
+    }
+  `;
+
+  /**
+   * Shared table primitives (`<ab-members>`, `<ab-scim-tokens>`,
+   * `<ab-api-keys>`, `<ab-audit-log>` each compose this into their own
+   * `static styles` array alongside `baseStyles`) — every one of them
+   * rendered an identical `table`/`th`/`td` block before this was factored
+   * out.
+   */
+  protected static tableStyles = css`
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    th,
+    td {
+      text-align: left;
+      padding: var(--ab-space-2);
+    }
   `;
 
   constructor() {
@@ -114,6 +143,26 @@ export class AbElement extends LitElement {
           ? e.message
           : "Something went wrong.";
     return html`<p class="ab-error" role="alert">${message}</p>`;
+  }
+
+  /**
+   * The inner content of a "shown once" secret copy box — `<ab-scim-tokens>`'s
+   * SCIM token and `<ab-api-keys>`'s raw API key are each returned exactly
+   * once by their create endpoint and never persisted, so both render this
+   * same message + label/value pair inside their own `.ab-copy-box` (styled
+   * by `baseStyles` above) wrapper. `extra` renders between the message and
+   * the value line for a caller that needs another field shown alongside it
+   * (e.g. SCIM's `baseUrl`, or API keys' `name`) — the caller still owns the
+   * surrounding `.ab-copy-box` `<div>` and its own "Done" button, since both
+   * of those differ per component (SCIM re-fetches tokens, API keys
+   * re-fetches keys).
+   */
+  protected renderShownOnce(label: string, value: string, extra?: TemplateResult): TemplateResult {
+    return html`
+      <p>This ${label} is shown once. Store it securely.</p>
+      ${extra ?? ""}
+      <p><strong>${label}:</strong> <code>${value}</code></p>
+    `;
   }
 
   /** Dispatches a bubbling, composed `ab-change` `CustomEvent` — every mutating component fires this after each write. */

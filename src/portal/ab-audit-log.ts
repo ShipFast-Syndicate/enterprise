@@ -53,7 +53,8 @@ export class AbAuditLog extends AbElement {
     nextCursor: { state: true },
     loading: { state: true },
     loadingMore: { state: true },
-    error: { state: true },
+    loadError: { state: true },
+    submitError: { state: true },
     filters: { state: true },
     verifyResult: { state: true },
     verifying: { state: true },
@@ -63,23 +64,18 @@ export class AbAuditLog extends AbElement {
   declare nextCursor: string | null;
   declare loading: boolean;
   declare loadingMore: boolean;
-  declare error: unknown;
+  /** Fatal load error (the initial load, or a filter re-submit) — replaces the whole view (`./base.ts`'s `renderError`). */
+  declare loadError: unknown;
+  /** Inline error ("Load more" pagination, or "Verify chain") — rendered above the toolbar; the already-loaded rows are left untouched. */
+  declare submitError: unknown;
   declare filters: Filters;
   declare verifyResult: VerifyResponse | null;
   declare verifying: boolean;
 
   static styles = [
     AbElement.baseStyles,
+    AbElement.tableStyles,
     css`
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      th,
-      td {
-        text-align: left;
-        padding: var(--ab-space-2);
-      }
       form {
         display: flex;
         flex-wrap: wrap;
@@ -110,7 +106,8 @@ export class AbAuditLog extends AbElement {
     this.nextCursor = null;
     this.loading = true;
     this.loadingMore = false;
-    this.error = undefined;
+    this.loadError = undefined;
+    this.submitError = undefined;
     this.filters = { ...EMPTY_FILTERS };
     this.verifyResult = null;
     this.verifying = false;
@@ -134,9 +131,10 @@ export class AbAuditLog extends AbElement {
   private async load(reset: boolean): Promise<void> {
     if (reset) {
       this.loading = true;
-      this.error = undefined;
+      this.loadError = undefined;
     } else {
       this.loadingMore = true;
+      this.submitError = undefined;
     }
     try {
       const query = this.queryFromFilters();
@@ -145,7 +143,12 @@ export class AbAuditLog extends AbElement {
       this.items = reset ? (data.items ?? []) : [...this.items, ...(data.items ?? [])];
       this.nextCursor = data.nextCursor ?? null;
     } catch (e) {
-      this.error = e;
+      // A "Load more" failure (reset === false) must not discard the rows
+      // already on screen — inline `submitError` only; the initial/filtered
+      // load (reset === true) has nothing meaningful to show yet, so it's
+      // the one case that still replaces the whole view.
+      if (reset) this.loadError = e;
+      else this.submitError = e;
     } finally {
       this.loading = false;
       this.loadingMore = false;
@@ -167,12 +170,13 @@ export class AbAuditLog extends AbElement {
 
   private async handleVerify(): Promise<void> {
     this.verifying = true;
+    this.submitError = undefined;
     try {
       this.verifyResult = await this.api.get<VerifyResponse>("/enterprise/audit/verify", {
         orgId: this.orgId,
       });
     } catch (e) {
-      this.error = e;
+      this.submitError = e;
     } finally {
       this.verifying = false;
     }
@@ -192,10 +196,11 @@ export class AbAuditLog extends AbElement {
   }
 
   override render(): TemplateResult {
-    if (this.error) return this.renderError(this.error);
+    if (this.loadError) return this.renderError(this.loadError);
     if (this.loading) return this.renderLoading();
 
     return html`
+      ${this.submitError ? this.renderError(this.submitError) : ""}
       <form @submit=${(e: SubmitEvent) => this.handleFilterSubmit(e)}>
         <select name="action">
           <option value="">All actions</option>

@@ -399,4 +399,98 @@ describe("<ab-sso-wizard>", () => {
 
     await vi.waitFor(() => expect(el.step).toBe("done"));
   });
+
+  it("a storage event keyed ab_sso_test re-fetches providers and advances to enforce", async () => {
+    let passed = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (input) => {
+        const url = String(input);
+        if (url.includes("/enterprise/sso/providers")) {
+          return jsonResponse(200, {
+            providers: [
+              provider({
+                domainVerified: true,
+                testLoginPassedAt: passed ? "2026-01-01T00:00:00Z" : null,
+              }),
+            ],
+          });
+        }
+        throw new Error(`unmocked fetch: ${url}`);
+      }),
+    );
+
+    const el = makeEl();
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.step).toBe("test-login"));
+
+    // The finish redirect's landing page (out of this component's scope)
+    // is what actually writes `localStorage.ab_sso_test` — a `storage`
+    // event only fires on *other* same-origin windows/tabs than the one
+    // that wrote it, which is exactly the wizard's own window here, so a
+    // plain dispatched `StorageEvent` is a faithful stand-in for that.
+    passed = true;
+    window.dispatchEvent(new StorageEvent("storage", { key: "ab_sso_test" }));
+
+    await vi.waitFor(() => expect(el.step).toBe("enforce"));
+  });
+
+  it("enforce toggle stays disabled when breakGlassUserId is empty, even with a passed test login", async () => {
+    vi.stubGlobal(
+      "fetch",
+      routeJson({
+        "/enterprise/sso/providers": {
+          providers: [
+            provider({ domainVerified: true, testLoginPassedAt: "2026-01-01T00:00:00Z" }),
+          ],
+        },
+        // No user id in the session response — `breakGlassUserId` stays empty.
+        "/get-session": { user: null },
+      }),
+    );
+    const el = makeEl();
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.step).toBe("enforce"));
+    expect(el.breakGlassUserId).toBe("");
+
+    const toggle = el.shadowRoot!.querySelector<HTMLButtonElement>(
+      '[data-testid="enforce-toggle"]',
+    )!;
+    expect(toggle.disabled).toBe(true);
+
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>('[name="breakGlassUserId"]')!;
+    expect(input.required).toBe(true);
+  });
+
+  it("handleEnforce refuses an empty breakGlassUserId even if the disabled button is bypassed", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("/enterprise/sso/providers")) {
+        return jsonResponse(200, {
+          providers: [
+            provider({ domainVerified: true, testLoginPassedAt: "2026-01-01T00:00:00Z" }),
+          ],
+        });
+      }
+      if (url.includes("/get-session")) return jsonResponse(200, { user: null });
+      throw new Error(`unmocked fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const el = makeEl();
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.step).toBe("enforce"));
+    expect(el.breakGlassUserId).toBe("");
+
+    // Bypasses the disabled button entirely — the handler itself must still
+    // refuse, per the controller finding.
+    await (el as unknown as { handleEnforce(): Promise<void> }).handleEnforce();
+    await el.updateComplete;
+
+    expect(el.step).toBe("enforce");
+    expect(el.shadowRoot!.textContent).toContain("break-glass user id is required");
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/enterprise/policy/set"))).toBe(
+      false,
+    );
+  });
 });

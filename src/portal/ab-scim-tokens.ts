@@ -32,13 +32,17 @@ export class AbScimTokens extends AbElement {
     ...AbElement.properties,
     tokens: { state: true },
     loading: { state: true },
-    error: { state: true },
+    loadError: { state: true },
+    submitError: { state: true },
     newToken: { state: true },
   };
 
   declare tokens: ScimToken[];
   declare loading: boolean;
-  declare error: unknown;
+  /** Fatal load error — replaces the whole view (`./base.ts`'s `renderError`). */
+  declare loadError: unknown;
+  /** Inline mutation error (create/revoke) — rendered above the table/form; the loaded token list is left untouched. */
+  declare submitError: unknown;
   declare newToken: NewToken | null;
 
   /** Confirmation gate before revoking a token. @default window.confirm */
@@ -46,30 +50,12 @@ export class AbScimTokens extends AbElement {
 
   static styles = [
     AbElement.baseStyles,
+    AbElement.tableStyles,
     css`
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      th,
-      td {
-        text-align: left;
-        padding: var(--ab-space-2);
-      }
       form {
         display: flex;
         gap: var(--ab-space-2);
         margin-top: var(--ab-space-4);
-      }
-      .ab-copy-box {
-        background: var(--ab-color-surface);
-        border: var(--ab-border);
-        border-radius: var(--ab-radius);
-        padding: var(--ab-space-3);
-      }
-      .ab-copy-box code {
-        font: inherit;
-        word-break: break-all;
       }
     `,
   ];
@@ -78,7 +64,8 @@ export class AbScimTokens extends AbElement {
     super();
     this.tokens = [];
     this.loading = true;
-    this.error = undefined;
+    this.loadError = undefined;
+    this.submitError = undefined;
     this.newToken = null;
   }
 
@@ -89,14 +76,14 @@ export class AbScimTokens extends AbElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = undefined;
+    this.loadError = undefined;
     try {
       const data = await this.api.get<TokensResponse>("/enterprise/scim/tokens", {
         orgId: this.orgId,
       });
       this.tokens = data.tokens ?? [];
     } catch (e) {
-      this.error = e;
+      this.loadError = e;
     } finally {
       this.loading = false;
     }
@@ -107,6 +94,7 @@ export class AbScimTokens extends AbElement {
     const form = e.currentTarget as HTMLFormElement;
     const providerId = String(new FormData(form).get("providerId") ?? "").trim();
     if (!providerId) return;
+    this.submitError = undefined;
     try {
       const data = await this.api.post<{ scimToken: string; baseUrl: string }>(
         "/enterprise/scim/tokens/create",
@@ -115,7 +103,7 @@ export class AbScimTokens extends AbElement {
       this.newToken = { providerId, scimToken: data.scimToken, baseUrl: data.baseUrl };
       this.emitChange({ type: "scim-token-created", providerId });
     } catch (e) {
-      this.error = e;
+      this.submitError = e;
     }
   }
 
@@ -127,6 +115,7 @@ export class AbScimTokens extends AbElement {
   private async handleRevoke(token: ScimToken): Promise<void> {
     const ok = this.confirm(`Revoke the SCIM token for provider "${token.providerId}"?`);
     if (!ok) return;
+    this.submitError = undefined;
     try {
       await this.api.post("/enterprise/scim/tokens/revoke", {
         orgId: this.orgId,
@@ -135,7 +124,7 @@ export class AbScimTokens extends AbElement {
       await this.load();
       this.emitChange({ type: "scim-token-revoked", providerId: token.providerId });
     } catch (e) {
-      this.error = e;
+      this.submitError = e;
     }
   }
 
@@ -144,21 +133,24 @@ export class AbScimTokens extends AbElement {
   }
 
   override render(): TemplateResult {
-    if (this.error) return this.renderError(this.error);
+    if (this.loadError) return this.renderError(this.loadError);
     if (this.loading) return this.renderLoading();
 
     if (this.newToken) {
       return html`
         <div class="ab-copy-box">
-          <p>This token is shown once. Store it securely.</p>
-          <p><strong>Base URL:</strong> <code>${this.newToken.baseUrl}</code></p>
-          <p><strong>Token:</strong> <code>${this.newToken.scimToken}</code></p>
+          ${this.renderShownOnce(
+            "Token",
+            this.newToken.scimToken,
+            html`<p><strong>Base URL:</strong> <code>${this.newToken.baseUrl}</code></p>`,
+          )}
           <button type="button" @click=${() => this.handleDone()}>Done</button>
         </div>
       `;
     }
 
     return html`
+      ${this.submitError ? this.renderError(this.submitError) : ""}
       <table>
         <thead>
           <tr>

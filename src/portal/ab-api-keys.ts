@@ -48,13 +48,17 @@ export class AbApiKeys extends AbElement {
     ...AbElement.properties,
     keys: { state: true },
     loading: { state: true },
-    error: { state: true },
+    loadError: { state: true },
+    submitError: { state: true },
     newKey: { state: true },
   };
 
   declare keys: ApiKey[];
   declare loading: boolean;
-  declare error: unknown;
+  /** Fatal load error — replaces the whole view (`./base.ts`'s `renderError`). */
+  declare loadError: unknown;
+  /** Inline mutation error (create/delete) — rendered above the table/form; the loaded key list is left untouched. */
+  declare submitError: unknown;
   declare newKey: NewKey | null;
 
   /** Confirmation gate before deleting a key. @default window.confirm */
@@ -62,30 +66,12 @@ export class AbApiKeys extends AbElement {
 
   static styles = [
     AbElement.baseStyles,
+    AbElement.tableStyles,
     css`
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      th,
-      td {
-        text-align: left;
-        padding: var(--ab-space-2);
-      }
       form {
         display: flex;
         gap: var(--ab-space-2);
         margin-top: var(--ab-space-4);
-      }
-      .ab-copy-box {
-        background: var(--ab-color-surface);
-        border: var(--ab-border);
-        border-radius: var(--ab-radius);
-        padding: var(--ab-space-3);
-      }
-      .ab-copy-box code {
-        font: inherit;
-        word-break: break-all;
       }
     `,
   ];
@@ -94,7 +80,8 @@ export class AbApiKeys extends AbElement {
     super();
     this.keys = [];
     this.loading = true;
-    this.error = undefined;
+    this.loadError = undefined;
+    this.submitError = undefined;
     this.newKey = null;
   }
 
@@ -105,12 +92,12 @@ export class AbApiKeys extends AbElement {
 
   private async load(): Promise<void> {
     this.loading = true;
-    this.error = undefined;
+    this.loadError = undefined;
     try {
       const data = await this.api.get<ListResponse>("/api-key/list");
       this.keys = data.apiKeys ?? [];
     } catch (e) {
-      this.error = e;
+      this.loadError = e;
     } finally {
       this.loading = false;
     }
@@ -125,6 +112,7 @@ export class AbApiKeys extends AbElement {
     const body: Record<string, unknown> = {};
     if (name) body.name = name;
     if (expiresInRaw) body.expiresIn = Number(expiresInRaw);
+    this.submitError = undefined;
     try {
       const created = await this.api.post<{ id: string; name: string | null; key: string }>(
         "/api-key/create",
@@ -133,7 +121,7 @@ export class AbApiKeys extends AbElement {
       this.newKey = { id: created.id, name: created.name, key: created.key };
       this.emitChange({ type: "api-key-created", id: created.id });
     } catch (e) {
-      this.error = e;
+      this.submitError = e;
     }
   }
 
@@ -145,31 +133,35 @@ export class AbApiKeys extends AbElement {
   private async handleDelete(key: ApiKey): Promise<void> {
     const ok = this.confirm(`Delete the API key "${key.name ?? key.id}"?`);
     if (!ok) return;
+    this.submitError = undefined;
     try {
       await this.api.post("/api-key/delete", { keyId: key.id });
       await this.load();
       this.emitChange({ type: "api-key-deleted", id: key.id });
     } catch (e) {
-      this.error = e;
+      this.submitError = e;
     }
   }
 
   override render(): TemplateResult {
-    if (this.error) return this.renderError(this.error);
+    if (this.loadError) return this.renderError(this.loadError);
     if (this.loading) return this.renderLoading();
 
     if (this.newKey) {
       return html`
         <div class="ab-copy-box">
-          <p>This key is shown once. Store it securely.</p>
-          <p><strong>Name:</strong> ${this.newKey.name ?? "—"}</p>
-          <p><strong>Key:</strong> <code>${this.newKey.key}</code></p>
+          ${this.renderShownOnce(
+            "Key",
+            this.newKey.key,
+            html`<p><strong>Name:</strong> ${this.newKey.name ?? "—"}</p>`,
+          )}
           <button type="button" @click=${() => this.handleDone()}>Done</button>
         </div>
       `;
     }
 
     return html`
+      ${this.submitError ? this.renderError(this.submitError) : ""}
       <table>
         <thead>
           <tr>

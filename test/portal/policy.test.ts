@@ -96,7 +96,7 @@ describe("<ab-security-policy>", () => {
     });
   });
 
-  it("submitting with no changes does not POST", async () => {
+  it('submitting with no changes does not POST and shows "Nothing to save."', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(jsonResponse(200, policyBody()));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -106,6 +106,8 @@ describe("<ab-security-policy>", () => {
 
     const form = el.shadowRoot!.querySelector("form")!;
     form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    await el.updateComplete;
+    expect(el.shadowRoot!.textContent).toContain("Nothing to save.");
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

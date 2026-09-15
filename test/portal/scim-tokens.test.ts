@@ -143,4 +143,31 @@ describe("<ab-scim-tokens>", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("a failed revoke renders an inline error without wiping the loaded token list", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          tokens: [{ providerId: "scim-org_1", createdAt: null, lastUsedAt: null }],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(500, { message: "Upstream failure" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const el = makeEl();
+    el.confirm = () => true;
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1));
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>("tbody button")!.click();
+
+    await vi.waitFor(() => expect(el.shadowRoot!.textContent).toContain("Upstream failure"));
+    // The load-error path would have replaced the whole view — asserting
+    // the row and form are both still present proves this is the inline
+    // `submitError` path instead.
+    expect(el.shadowRoot!.querySelectorAll("tbody tr").length).toBe(1);
+    expect(el.shadowRoot!.querySelector("form")).not.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
