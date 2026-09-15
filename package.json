@@ -34,7 +34,7 @@
     }
   },
   "scripts": {
-    "build": "tsup && cp -R src/schema/sql sql",
+    "build": "tsup && rm -rf sql && cp -R src/schema/sql sql",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format:check": "prettier --check .",
@@ -48,6 +48,7 @@
     "@better-auth/passkey": "1.6.33",
     "@better-auth/scim": "1.6.33",
     "@better-auth/sso": "1.6.33",
+    "@libsql/client": "^0.15.15",
     "better-auth": "1.6.33",
     "drizzle-orm": "^0.45.2",
     "lit": "^3"

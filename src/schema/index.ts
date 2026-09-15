@@ -2,10 +2,10 @@
 //
 // Drizzle sqlite table definitions for the enterprise layer's own tables
 // (org security policy, the tamper-evident audit log, and our SCIM Groups
-// mapping — better-auth 1.6 has no SCIM Groups). Task 3 adds the matching
-// SQL migration under `src/schema/sql/`, a `verify` check, and the
-// `ab-enterprise` CLI; this task only defines the tables so
-// `test/helpers/auth.ts` can create them for tests.
+// mapping — better-auth 1.6 has no SCIM Groups), plus the matching SQL
+// migration (`sql/0001_enterprise.sql`), the `verify`/`migrate` helpers
+// built on it, and the static `EXPECTED_TABLES` snapshot they check
+// against.
 
 import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqlite-core";
 
@@ -62,3 +62,7 @@ export const scimGroup = sqliteTable(
 );
 
 export const enterpriseSchema = { orgPolicy, auditEvent, scimGroup };
+
+export { EXPECTED_TABLES } from "./expected";
+export { verifyDatabase, type MissingItem, type VerifyResult } from "./verify";
+export { applyMigration, migrationFilePath } from "./migrate";

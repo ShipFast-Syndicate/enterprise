@@ -45,11 +45,15 @@
 // from `better-auth/db`) gives the full field list per model, and
 // `buildDynamicSchema` turns that into both a drizzle sqlite schema (for
 // `drizzleAdapter` to query through) and matching `CREATE TABLE IF NOT
-// EXISTS` SQL (executed directly on the libsql client). Our own 3 tables
-// aren't part of better-auth's model registry (the `enterpriseGate` plugin
-// declares no `schema`), so those stay exactly as the brief describes:
-// hand-written SQL mirroring `src/schema/index.ts` — Task 3 replaces that
-// half with the real migration file.
+// EXISTS` SQL (executed directly on the libsql client) for every upstream
+// better-auth model. Our own 3 tables aren't part of that model registry
+// (the `enterpriseGate` plugin declares no `schema`) — Task 3's real
+// `applyMigration` (`src/schema/migrate.ts`, executing the checked-in
+// `sql/0001_enterprise.sql`) creates those, plus the two `studio_ref`
+// columns on `user`/`organization`, on top of the dynamic upstream schema
+// below. Per Task 3's controller ruling (a), every server test now goes
+// through that real migration rather than hand-written SQL mirroring
+// `src/schema/index.ts`, so the shipped SQL is what's actually exercised.
 
 import type { BetterAuthOptions, BetterAuthPlugin } from "better-auth";
 import { betterAuth } from "better-auth";
@@ -58,7 +62,7 @@ import { getAuthTables } from "better-auth/db";
 import { createClient, type Client } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
-import { enterpriseSchema } from "../../src/schema";
+import { applyMigration, enterpriseSchema } from "../../src/schema";
 import { enterprisePreset } from "../../src/server/preset";
 import type { EnterpriseOptions, Feature } from "../../src/server/types";
 
@@ -103,60 +107,24 @@ function buildDynamicSchema(authOptions: BetterAuthOptions) {
   return { drizzleSchema, ddl };
 }
 
-// Our own 3 enterprise tables. Not part of better-auth's model registry
-// (`enterpriseGate` declares no `schema`), so they're never in a
-// `buildDynamicSchema()` result — mirror the drizzle definitions in
-// `src/schema/index.ts` directly. Task 3 replaces this with the real
-// `sql/0001_enterprise.sql` migration.
-const ENTERPRISE_TABLES_DDL = [
-  `CREATE TABLE IF NOT EXISTS org_policy (
-    org_id TEXT PRIMARY KEY,
-    require_2fa INTEGER NOT NULL DEFAULT 0,
-    sso_enforced INTEGER NOT NULL DEFAULT 0,
-    break_glass_user_id TEXT,
-    session_max_age_s INTEGER,
-    allowed_methods TEXT NOT NULL DEFAULT '["sso","magic_link","google","github","linkedin","microsoft","password","passkey"]',
-    group_role_map TEXT NOT NULL DEFAULT '{}',
-    updated_at INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS audit_event (
-    id TEXT PRIMARY KEY,
-    org_id TEXT NOT NULL,
-    seq INTEGER NOT NULL,
-    actor_type TEXT NOT NULL,
-    actor_id TEXT,
-    action TEXT NOT NULL,
-    target_type TEXT NOT NULL,
-    target_id TEXT,
-    ip TEXT,
-    user_agent TEXT,
-    metadata TEXT NOT NULL DEFAULT '{}',
-    created_at INTEGER NOT NULL,
-    prev_hash TEXT NOT NULL,
-    hash TEXT NOT NULL
-  )`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS audit_event_org_seq ON audit_event (org_id, seq)`,
-  `CREATE INDEX IF NOT EXISTS audit_event_org_created ON audit_event (org_id, created_at)`,
-  `CREATE TABLE IF NOT EXISTS scim_group (
-    team_id TEXT PRIMARY KEY,
-    org_id TEXT NOT NULL,
-    external_id TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-  )`,
-  `CREATE INDEX IF NOT EXISTS scim_group_org ON scim_group (org_id)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS scim_group_org_external ON scim_group (org_id, external_id)`,
-];
-
+// Applies just the dynamically-derived upstream better-auth DDL. Our own 3
+// enterprise tables (and the `studio_ref` columns) are never part of a
+// `buildDynamicSchema()` result — not in better-auth's model registry (the
+// `enterpriseGate` plugin declares no `schema`) — so `makeAuth` below
+// follows this with the real `applyMigration` (`src/schema/migrate.ts`,
+// executing the checked-in `sql/0001_enterprise.sql`) rather than any
+// hand-written SQL here.
 async function applyMigrations(ddl: string[], client: Client): Promise<void> {
-  await client.batch([...ddl, ...ENTERPRISE_TABLES_DDL], "write");
+  await client.batch(ddl, "write");
 }
 
 // Recomputes the dynamic schema from `auth.options` — fine for a one-off
 // standalone call, but `makeAuth` below already has a `buildDynamicSchema()`
 // result in hand (it needs the schema before `auth` exists, to build `db`)
 // and calls `applyMigrations` with that directly rather than through this,
-// to avoid deriving the schema from the same options twice.
+// to avoid deriving the schema from the same options twice. Upstream-only,
+// deliberately: callers that also want our own tables/columns call the real
+// `applyMigration` (`src/schema`) afterward, same as `makeAuth` does.
 export async function runMigrations(
   auth: { options: BetterAuthOptions },
   client: Client,
@@ -199,6 +167,9 @@ export async function makeAuth(
     ...baseOptions,
   });
   await applyMigrations(ddl, client);
+  // Real migration (ruling (a)): creates org_policy/audit_event/scim_group
+  // and adds the two studio_ref columns, now that user/organization exist.
+  await applyMigration(client);
 
   const api = {
     post: (path: string, body: unknown, headers: ApiHeaders = {}) =>
