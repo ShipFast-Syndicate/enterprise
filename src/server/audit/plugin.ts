@@ -49,7 +49,10 @@ import { requireFeature } from "../entitlements";
 import type { EnterpriseOptions } from "../types";
 import { verifyChain, writeAudit, type AuditInput, type AuditRow } from "./chain";
 
-export const AUDITED_PATHS: Record<string, { action: string; targetType: string }> = {
+export const AUDITED_PATHS: Record<
+  string,
+  { action: string; targetType: string; methods?: string[] }
+> = {
   "/sign-in/email": { action: "auth.sign_in", targetType: "user" },
   "/sign-in/social": { action: "auth.sign_in", targetType: "user" },
   "/sign-in/magic-link": { action: "auth.magic_link_requested", targetType: "user" },
@@ -65,13 +68,53 @@ export const AUDITED_PATHS: Record<string, { action: string; targetType: string 
   "/sso/verify-domain": { action: "sso.domain_verified", targetType: "sso_provider" },
   "/scim/generate-token": { action: "scim.token_created", targetType: "scim_provider" },
   "/scim/delete-provider-connection": { action: "scim.token_revoked", targetType: "scim_provider" },
-  "/scim/v2/Users": { action: "scim.user_created", targetType: "user" },
+  // "/scim/v2/Users" and "/scim/v2/Users/:userId" are each shared by several
+  // SCIM endpoints at different HTTP methods (list vs. create; get/put/patch
+  // vs. delete) — `methods` restricts a path entry to only the mutating ones
+  // (list/get are reads, never audited); DELETE on the `:userId` path needs
+  // a *different* action than its PUT/PATCH default, so it's handled via
+  // `METHOD_ACTION_OVERRIDES` below rather than `methods` alone.
+  "/scim/v2/Users": { action: "scim.user_created", targetType: "user", methods: ["POST"] },
   // Real upstream pattern (`:userId`), not the brief's illustrative `:id` — see header comment.
-  "/scim/v2/Users/:userId": { action: "scim.user_updated", targetType: "user" },
+  "/scim/v2/Users/:userId": {
+    action: "scim.user_updated",
+    targetType: "user",
+    methods: ["PUT", "PATCH"],
+  },
   "/api-key/create": { action: "api_key.created", targetType: "api_key" },
   "/api-key/delete": { action: "api_key.revoked", targetType: "api_key" },
   "/enterprise/policy/set": { action: "policy.updated", targetType: "org_policy" },
 };
+
+// Per-method action overrides for a path already in `AUDITED_PATHS`, for the
+// rare case where the action genuinely depends on the HTTP method rather
+// than just whether the path is audited at all (`methods` above covers
+// that). Currently only SCIM user deletion, which shares
+// `/scim/v2/Users/:userId` with the PUT/PATCH update endpoints.
+const METHOD_ACTION_OVERRIDES: Record<
+  string,
+  Record<string, { action: string; targetType: string }>
+> = {
+  "/scim/v2/Users/:userId": {
+    DELETE: { action: "scim.user_deleted", targetType: "user" },
+  },
+};
+
+// Resolves the `{action, targetType}` to audit for a request, or `null` if
+// it shouldn't be audited at all — either the path isn't in `AUDITED_PATHS`,
+// or it is but `methods` excludes this request's HTTP method (e.g. a GET
+// read on a path whose mutating siblings share the same route pattern).
+function auditEntryFor(
+  path: string,
+  method: string | undefined,
+): { action: string; targetType: string } | null {
+  const override = method ? METHOD_ACTION_OVERRIDES[path]?.[method] : undefined;
+  if (override) return override;
+  const entry = AUDITED_PATHS[path];
+  if (!entry) return null;
+  if (entry.methods && (!method || !entry.methods.includes(method))) return null;
+  return { action: entry.action, targetType: entry.targetType };
+}
 
 // Endpoints an unauthenticated caller can hit (no session yet at hook time,
 // or the session existed only to be torn down): writeAudit failures here are
@@ -127,7 +170,11 @@ function resolveActorId(
   return extractId(asRecord?.user) ?? inviterId ?? userId ?? session?.user.id ?? null;
 }
 
-function resolveTargetId(returned: unknown, actorId: string | null): string | null {
+function resolveTargetId(
+  returned: unknown,
+  routeParamId: string | null,
+  actorId: string | null,
+): string | null {
   const asRecord = returned as
     { user?: unknown; member?: unknown; invitation?: unknown } | undefined;
   return (
@@ -135,8 +182,18 @@ function resolveTargetId(returned: unknown, actorId: string | null): string | nu
     extractId(asRecord?.user) ??
     extractId(asRecord?.member) ??
     extractId(asRecord?.invitation) ??
+    routeParamId ??
     actorId
   );
+}
+
+// A route param naming the resource a parameterised AUDITED_PATHS entry
+// acts on — e.g. SCIM user delete (`/scim/v2/Users/:userId`) returns no
+// body (204, no content) to extract an id from, so its target id has to
+// come from the URL instead.
+function resolveRouteParamId(ctx: GenericEndpointContext): string | null {
+  const params = ctx.params as Record<string, string | undefined> | undefined;
+  return params?.userId ?? params?.providerId ?? null;
 }
 
 function resolveOrgId(
@@ -330,7 +387,8 @@ export function auditLog(opts: EnterpriseOptions): BetterAuthPlugin {
       });
 
       const csv = [CSV_HEADER, ...rows.map(toCsvRow)].join("\r\n");
-      const filename = `audit-${orgId}-${from ?? ""}-${to ?? ""}.csv`;
+      const range = from === undefined && to === undefined ? "" : `-${from ?? ""}-${to ?? ""}`;
+      const filename = `audit-${orgId}${range}.csv`;
       return new Response(csv, {
         headers: {
           "content-type": "text/csv",
@@ -389,9 +447,9 @@ export function auditLog(opts: EnterpriseOptions): BetterAuthPlugin {
     hooks: {
       after: [
         {
-          matcher: (ctx) => !!ctx.path && ctx.path in AUDITED_PATHS,
+          matcher: (ctx) => !!ctx.path && auditEntryFor(ctx.path, ctx.request?.method) !== null,
           handler: createAuthMiddleware(async (ctx) => {
-            const entry = AUDITED_PATHS[ctx.path as string];
+            const entry = auditEntryFor(ctx.path as string, ctx.request?.method);
             if (!entry) return;
 
             const returned = ctx.context.returned;
@@ -416,7 +474,7 @@ export function auditLog(opts: EnterpriseOptions): BetterAuthPlugin {
               actorId,
               action: entry.action,
               targetType: entry.targetType,
-              targetId: resolveTargetId(returned, actorId),
+              targetId: resolveTargetId(returned, resolveRouteParamId(fullCtx), actorId),
               ip: ctx.request ? (getIp(ctx.request, ctx.context.options) ?? null) : null,
               userAgent: ctx.request?.headers.get("user-agent") ?? null,
               metadata: {},

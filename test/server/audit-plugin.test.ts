@@ -39,6 +39,7 @@ describe("AUDITED_PATHS", () => {
     expect(AUDITED_PATHS["/scim/v2/Users/:userId"]).toEqual({
       action: "scim.user_updated",
       targetType: "user",
+      methods: ["PUT", "PATCH"],
     });
     expect(AUDITED_PATHS["/scim/v2/Users/:id"]).toBeUndefined();
     expect(AUDITED_PATHS["/sso/callback/:providerId"]).toEqual({
@@ -62,14 +63,37 @@ describe("enterprise-audit hook matcher — parameterised path matching", () => 
   });
   const matcher = plugin.hooks!.after![0]!.matcher;
 
-  it("matches the exact registered pattern", () => {
-    expect(matcher({ path: "/scim/v2/Users/:userId" } as never)).toBe(true);
-    expect(matcher({ path: "/sso/callback/:providerId" } as never)).toBe(true);
+  it("matches the exact registered pattern (for a method the path is audited on)", () => {
+    expect(matcher({ path: "/scim/v2/Users/:userId", request: { method: "PATCH" } } as never)).toBe(
+      true,
+    );
+    expect(
+      matcher({ path: "/sso/callback/:providerId", request: { method: "POST" } } as never),
+    ).toBe(true);
   });
 
   it("does not match a concrete resolved path with a real id substituted in", () => {
-    expect(matcher({ path: "/scim/v2/Users/usr_abc123" } as never)).toBe(false);
-    expect(matcher({ path: "/sso/callback/okta-prod" } as never)).toBe(false);
+    expect(
+      matcher({ path: "/scim/v2/Users/usr_abc123", request: { method: "PATCH" } } as never),
+    ).toBe(false);
+    expect(matcher({ path: "/sso/callback/okta-prod", request: { method: "POST" } } as never)).toBe(
+      false,
+    );
+  });
+
+  it("does not match a read method on a path whose mutating siblings share the pattern", () => {
+    // /scim/v2/Users/:userId is also GET (read) and DELETE (audited as a
+    // different action, scim.user_deleted — see METHOD_ACTION_OVERRIDES);
+    // GET must not match at all.
+    expect(matcher({ path: "/scim/v2/Users/:userId", request: { method: "GET" } } as never)).toBe(
+      false,
+    );
+  });
+
+  it("matches DELETE on /scim/v2/Users/:userId via the method-action override, even though it's outside the base `methods` allow-list", () => {
+    expect(
+      matcher({ path: "/scim/v2/Users/:userId", request: { method: "DELETE" } } as never),
+    ).toBe(true);
   });
 });
 
@@ -106,6 +130,39 @@ describe("enterprise-audit hook — /organization/invite-member", () => {
 
     const rows = await t.client.execute(`SELECT * FROM audit_event`);
     expect(rows.rows.length).toBe(0);
+  });
+});
+
+describe("enterprise-audit hook — writeAudit failure handling (ruling e)", () => {
+  it("admin path: a writeAudit failure throws 500 AUDIT_WRITE_FAILED, failing the call", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    // Force writeAudit to fail without touching plugin code, by removing
+    // the table it writes to out from under it.
+    await t.client.execute(`DROP TABLE audit_event`);
+
+    const res = await t.api.post(
+      "/organization/invite-member",
+      { email: "invitee@acme.test", role: "member", organizationId: orgId },
+      { cookie },
+    );
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("AUDIT_WRITE_FAILED");
+  });
+
+  it("sign-in path: a writeAudit failure is logged and swallowed — sign-in still succeeds", async () => {
+    const t = await makeAuth();
+    const email = "owner@acme.test";
+    await signUpOwner(t, email);
+    await t.client.execute(`DROP TABLE audit_event`);
+
+    const res = await t.api.post("/sign-in/email", { email, password: "password1234" });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { user: { email: string } };
+    expect(body.user.email).toBe(email);
   });
 });
 
@@ -206,6 +263,46 @@ describe("GET /enterprise/audit/export", () => {
     );
     expect(lines.length).toBe(4); // header + 3 rows
   });
+
+  it("RFC 4180-escapes a field containing a quote, a comma, and a raw newline", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+
+    // `metadata` is always JSON round-tripped (`JSON.stringify` on export),
+    // so an embedded newline in a metadata *value* always comes back out as
+    // the two-character `\n` escape, never a raw newline byte — but its
+    // JSON syntax still carries plenty of literal `"` and `,` characters
+    // needing escaping (e.g. the comma inside the note text below, and the
+    // quotes JSON uses for strings). `user_agent` is stored and exported as
+    // a plain string with no such re-encoding, so a raw newline planted
+    // there (e.g. a malformed/hostile User-Agent header) survives into the
+    // CSV verbatim and is the one field here that genuinely needs
+    // newline-triggered quoting.
+    const metadata = { note: 'has "quotes", a comma, and a\nnewline (escaped in JSON)' };
+    const userAgent = "Mozilla/5.0\nInjected-Header: evil";
+    await t.client.execute({
+      sql: `INSERT INTO audit_event (id, org_id, seq, actor_type, actor_id, action, target_type, target_id, user_agent, metadata, created_at, prev_hash, hash) VALUES ('evt_csv', ?, 1, 'user', 'u1', 'member.invited', 'member', 't1', ?, ?, ?, 'GENESIS', 'deadbeef')`,
+      args: [orgId, userAgent, JSON.stringify(metadata), Date.now()],
+    });
+
+    const res = await t.api.get(`/enterprise/audit/export?orgId=${orgId}`, { cookie });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+
+    // The metadata field: wrapped in quotes, its own internal `"` doubled.
+    expect(text).toContain(`"${JSON.stringify(metadata).replace(/"/g, '""')}"`);
+    // The user_agent field: wrapped in quotes, the raw newline preserved
+    // verbatim inside them (not stripped, not escaped to `\n` text) — proven
+    // by there being more bare `\n` bytes than `\r\n` row separators (one
+    // header + one data row = exactly one `\r\n`; the extra bare `\n` can
+    // only be the one embedded inside the quoted user_agent field).
+    expect(text).toContain(`"${userAgent}"`);
+    const crlfCount = (text.match(/\r\n/g) ?? []).length;
+    const bareLfCount = (text.match(/\n/g) ?? []).length;
+    expect(crlfCount).toBe(1);
+    expect(bareLfCount).toBeGreaterThan(crlfCount);
+  });
 });
 
 describe("GET /enterprise/audit/verify", () => {
@@ -234,12 +331,8 @@ describe("GET /enterprise/audit/verify", () => {
   });
 });
 
-describe("enterprise-audit hook — SCIM bearer path (parameterised, live dispatch)", () => {
-  it("GET /scim/v2/Users/<concrete id> still matches the /scim/v2/Users/:userId pattern and is audited", async () => {
-    const t = await makeAuth();
-    const { cookie } = await signUpOwner(t);
-    const { orgId } = await createOrg(t, cookie);
-
+describe("enterprise-audit hook — SCIM bearer path (parameterised, live dispatch, method-aware)", () => {
+  async function setUpScimUser(t: TestAuth, cookie: string, orgId: string) {
     const tokenRes = await t.api.post(
       "/scim/generate-token",
       { providerId: "okta", organizationId: orgId },
@@ -259,16 +352,70 @@ describe("enterprise-audit hook — SCIM bearer path (parameterised, live dispat
     );
     expect(createRes.status).toBe(201);
     const created = (await createRes.json()) as { id: string };
+    return { bearer, userId: created.id };
+  }
 
-    const getRes = await t.api.get(`/scim/v2/Users/${created.id}`, bearer);
+  async function auditRowsFor(t: TestAuth, orgId: string, action: string) {
+    return t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE org_id = ? AND action = ?`,
+      args: [orgId, action],
+    });
+  }
+
+  it("GET /scim/v2/Users/<id> (a read) still matches the :userId pattern but writes no audit row", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { bearer, userId } = await setUpScimUser(t, cookie, orgId);
+
+    const getRes = await t.api.get(`/scim/v2/Users/${userId}`, bearer);
     expect(getRes.status).toBe(200);
 
-    const rows = await t.client.execute({
-      sql: `SELECT * FROM audit_event WHERE org_id = ? AND action = 'scim.user_updated'`,
-      args: [orgId],
+    const all = await t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE org_id = ? AND target_id = ?`,
+      args: [orgId, userId],
     });
+    // Only the create (scim.user_created) — the GET wrote nothing.
+    expect(all.rows.map((r) => r.action)).toEqual(["scim.user_created"]);
+  });
+
+  it("PATCH /scim/v2/Users/<id> {active:false} writes one scim.user_updated row", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { bearer, userId } = await setUpScimUser(t, cookie, orgId);
+
+    const patchRes = await t.api.patch(
+      `/scim/v2/Users/${userId}`,
+      {
+        schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        Operations: [{ op: "replace", path: "active", value: false }],
+      },
+      bearer,
+    );
+    expect(patchRes.status).toBe(204);
+
+    const rows = await auditRowsFor(t, orgId, "scim.user_updated");
     expect(rows.rows.length).toBe(1);
     expect(rows.rows[0]!.actor_type).toBe("scim");
-    expect(rows.rows[0]!.target_id).toBe(created.id);
+    expect(rows.rows[0]!.target_id).toBe(userId);
+  });
+
+  it("DELETE /scim/v2/Users/<id> writes one scim.user_deleted row (not scim.user_updated)", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { bearer, userId } = await setUpScimUser(t, cookie, orgId);
+
+    const deleteRes = await t.api.delete(`/scim/v2/Users/${userId}`, bearer);
+    expect(deleteRes.status).toBe(204);
+
+    const deleted = await auditRowsFor(t, orgId, "scim.user_deleted");
+    expect(deleted.rows.length).toBe(1);
+    expect(deleted.rows[0]!.actor_type).toBe("scim");
+    expect(deleted.rows[0]!.target_id).toBe(userId);
+
+    const updated = await auditRowsFor(t, orgId, "scim.user_updated");
+    expect(updated.rows.length).toBe(0);
   });
 });

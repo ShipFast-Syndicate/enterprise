@@ -201,11 +201,12 @@ export async function makeAuth(
   // and adds the two studio_ref columns, now that user/organization exist.
   await applyMigration(client);
 
-  const api = {
-    post: (path: string, body: unknown, headers: ApiHeaders = {}) =>
+  const withBody =
+    (method: string) =>
+    (path: string, body: unknown, headers: ApiHeaders = {}) =>
       auth.handler(
         new Request(`http://localhost:3000/api/auth${path}`, {
-          method: "POST",
+          method,
           headers: {
             "content-type": "application/json",
             origin: "http://localhost:3000",
@@ -213,10 +214,21 @@ export async function makeAuth(
           },
           body: JSON.stringify(body),
         }),
-      ),
+      );
+
+  const api = {
+    post: withBody("POST"),
+    patch: withBody("PATCH"),
     get: (path: string, headers: ApiHeaders = {}) =>
       auth.handler(
         new Request(`http://localhost:3000/api/auth${path}`, {
+          headers: { origin: "http://localhost:3000", ...headers },
+        }),
+      ),
+    delete: (path: string, headers: ApiHeaders = {}) =>
+      auth.handler(
+        new Request(`http://localhost:3000/api/auth${path}`, {
+          method: "DELETE",
           headers: { origin: "http://localhost:3000", ...headers },
         }),
       ),

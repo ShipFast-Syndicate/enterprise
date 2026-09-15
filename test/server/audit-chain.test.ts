@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { canonical, hashRow, verifyChain, type AuditRow } from "../../src/server/audit/chain";
+import type { GenericEndpointContext } from "better-auth";
+import {
+  canonical,
+  hashRow,
+  verifyChain,
+  writeAudit,
+  type AuditRow,
+} from "../../src/server/audit/chain";
+import { makeAuth } from "../helpers/auth";
 
 function row(overrides: Partial<AuditRow> = {}): AuditRow {
   return {
@@ -115,5 +123,30 @@ describe("verifyChain", () => {
 
   it("reports ok:true for an empty chain", async () => {
     await expect(verifyChain([])).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("writeAudit — per-org mutex", () => {
+  it("serializes two concurrent writes for the same org into a valid seq 1/2 chain", async () => {
+    const t = await makeAuth();
+    const ctx = { context: await t.auth.$context } as unknown as GenericEndpointContext;
+    const input = {
+      orgId: "org_concurrent",
+      actorType: "user" as const,
+      actorId: "user_1",
+      action: "member.invited",
+      targetType: "member",
+      targetId: "inv_1",
+    };
+
+    const [a, b] = await Promise.all([writeAudit(ctx, input), writeAudit(ctx, input)]);
+
+    const seqs = [a.seq, b.seq].sort((x, y) => x - y);
+    expect(seqs).toEqual([1, 2]);
+
+    const rows = [a, b].sort((x, y) => x.seq - y.seq);
+    expect(rows[0]!.prevHash).toBe("GENESIS");
+    expect(rows[1]!.prevHash).toBe(rows[0]!.hash);
+    await expect(verifyChain(rows)).resolves.toEqual({ ok: true });
   });
 });
