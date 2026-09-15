@@ -16,7 +16,7 @@
   "bugs": {
     "url": "https://github.com/ShipFast-Syndicate/enterprise/issues"
   },
-  "author": "Alpha Bros",
+  "author": "Alpha Bros (https://alphabros.eu)",
   "keywords": [
     "better-auth",
     "sso",
@@ -29,8 +29,7 @@
     "alphabros"
   ],
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "sideEffects": [
     "./dist/portal/*"

@@ -91,8 +91,14 @@ the organization) removes its `audit_event` rows along with everything else scop
 `NPM_TOKEN`. `.github/workflows/release.yml`'s `publish` job runs on a GitHub-hosted
 `ubuntu-latest` runner (npm's OIDC flow does not work on self-hosted runners) with
 `permissions: { id-token: write, contents: read }` and the `npm` deployment environment, then
-runs `npm publish --provenance --access public`. No npm token exists anywhere in this repo's
-secrets, workflows, or history.
+runs `npm publish --provenance --access public`. The `--provenance` flag is passed explicitly on
+that command line — `package.json`'s own `publishConfig` only sets `access: "public"`, nothing
+about provenance, since provenance is meaningful only from a CI OIDC identity and would be
+misleading (or simply ignored) on a manual publish. No npm token exists anywhere in this repo's
+secrets, workflows, or history. The `publish` job is also idempotent: before publishing it
+checks `npm view "@alphabros/enterprise@<version>"` for the version in the checked-out tag's
+`package.json`, and skips the publish step (with a notice) if that version already exists on the
+registry — so re-running the job by hand is a safe no-op.
 
 **Trusted publisher configuration** (set on npmjs.com against the `@alphabros/enterprise`
 package, by whoever holds publish rights — org-admin/Bastien, not code):
@@ -114,11 +120,12 @@ package. The 0.1.0 release is therefore published manually, once, by Bastien:
    to it (`npm org ls alphabros` or the npmjs.com org page).
 2. `npm login` (interactive; never pipe a token into this).
 3. From a clean checkout of the tagged `v0.1.0` commit: `pnpm install --frozen-lockfile && pnpm build`.
-4. `npm publish --access public` (no `--provenance` on a manual publish from a local machine —
-   provenance requires the CI OIDC identity; the first publish is the one exception).
+4. `npm publish --access public` — no `--provenance` flag on this manual step; provenance
+   requires the CI OIDC identity, which a local `npm login` session doesn't have. This is the
+   one and only manual, non-provenance publish this package ever gets.
 5. Configure the trusted publisher (table above) on the now-existing package.
-6. Every release after 0.1.0 goes through `release.yml`'s `publish` job automatically, with
-   provenance.
+6. CI adds provenance from the second release on: every release after 0.1.0 goes through
+   `release.yml`'s `publish` job automatically, which runs `npm publish --provenance --access public`.
 
 ### Before first publish — checklist
 
@@ -128,7 +135,9 @@ split by who does it:
 
 **Done in this task (Claude, code/config):**
 
-- [x] `publishConfig: { access: "public", provenance: true }` in `package.json`.
+- [x] `publishConfig: { access: "public" }` in `package.json` (provenance is not a
+  `publishConfig` setting here — `release.yml`'s `publish` job passes `--provenance` explicitly
+  on the command line, since it's only meaningful from CI's OIDC identity).
 - [x] `LICENSE` file (MIT, Alpha Bros, 2026).
 - [x] `repository`, `homepage`, `bugs`, `author`, `keywords` in `package.json`.
 - [x] README rewritten for a public npm landing page (no `.superpowers/` reference).
