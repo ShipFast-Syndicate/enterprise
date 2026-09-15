@@ -133,6 +133,26 @@ export async function runMigrations(
   await applyMigrations(ddl, client);
 }
 
+// The same "Task 2 preset mounted" base options `test/schema/verify.test.ts`
+// and `test/cli/cli.test.ts` both need to derive the upstream better-auth
+// schema (`getAuthTables`/`runMigrations`) without booting a full `makeAuth`
+// instance (which also folds in the real `applyMigration`, which those
+// tests want to apply — or not — themselves, explicitly). Kept minimal and
+// fixed (no per-test entitlements) since neither caller drives gated
+// endpoints through it.
+export function baseAuthOptions(): BetterAuthOptions {
+  return {
+    secret: "x".repeat(32),
+    baseURL: "http://localhost:3000",
+    emailAndPassword: { enabled: true },
+    plugins: enterprisePreset({
+      product: "test",
+      secretsKey: "s".repeat(32),
+      resolveEntitlements: async () => new Set(),
+    }),
+  };
+}
+
 type ApiHeaders = Record<string, string>;
 
 export async function makeAuth(

@@ -41,18 +41,79 @@ export function migrationFilePath(): string {
 
 const ADD_COLUMN_STATEMENT = /^ALTER TABLE\s+"?(\w+)"?\s+ADD COLUMN\s+"?(\w+)"?/i;
 
-function stripLineComments(sql: string): string {
-  return sql
-    .split("\n")
-    .filter((line) => !line.trim().startsWith("--"))
-    .join("\n");
-}
+type ScanState = "code" | "line-comment" | "block-comment" | "string";
 
-function splitStatements(sql: string): string[] {
-  return stripLineComments(sql)
-    .split(";")
-    .map((statement) => statement.trim())
-    .filter((statement) => statement.length > 0);
+// SQL-aware statement splitter: a small character scanner rather than
+// regex-and-split, so it isn't fooled by a `;` (or `--`/`/*`) that's really
+// inside a `--` line comment, a `/* ... */` block comment, or a
+// single-quoted string literal (including a `''`-escaped quote within one)
+// — all of which a future `NNNN_*.sql` migration could plausibly contain.
+// Comments are dropped entirely from the returned statement text (not just
+// ignored for splitting purposes) — cheap to do in the same pass, and it
+// keeps `applyMigration`'s `ADD_COLUMN_STATEMENT` regex match (which
+// assumes the statement starts with real SQL, not a comment) robust
+// regardless of where a comment appears in the source file.
+export function splitStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let buf = "";
+  let state: ScanState = "code";
+
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (state === "line-comment") {
+      if (ch === "\n") state = "code";
+      continue;
+    }
+    if (state === "block-comment") {
+      if (ch === "*" && next === "/") {
+        state = "code";
+        i++;
+      }
+      continue;
+    }
+    if (state === "string") {
+      buf += ch;
+      if (ch === "'") {
+        if (next === "'") {
+          buf += next;
+          i++;
+        } else {
+          state = "code";
+        }
+      }
+      continue;
+    }
+
+    // state === "code"
+    if (ch === "-" && next === "-") {
+      state = "line-comment";
+      i++;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      state = "block-comment";
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      state = "string";
+      buf += ch;
+      continue;
+    }
+    if (ch === ";") {
+      const trimmed = buf.trim();
+      if (trimmed.length > 0) statements.push(trimmed);
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+
+  const trailing = buf.trim();
+  if (trailing.length > 0) statements.push(trailing);
+  return statements;
 }
 
 async function tableInfo(client: Client, table: string) {

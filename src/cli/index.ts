@@ -102,8 +102,14 @@ async function main(): Promise<number> {
       return cmdVerify(rest);
     case "audit-verify":
       return cmdAuditVerify();
+    case undefined:
+      console.error("ab-enterprise: no command given");
+      console.error(
+        "usage: ab-enterprise migrate --out <dir> | verify [--url <url>] [--token <t>] | audit-verify",
+      );
+      return 1;
     default:
-      console.error(`ab-enterprise: unknown command "${command ?? ""}"`);
+      console.error(`ab-enterprise: unknown command "${command}"`);
       console.error(
         "usage: ab-enterprise migrate --out <dir> | verify [--url <url>] [--token <t>] | audit-verify",
       );

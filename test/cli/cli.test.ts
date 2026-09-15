@@ -9,27 +9,12 @@ import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { BetterAuthOptions } from "better-auth";
 import { createClient } from "@libsql/client";
 import { applyMigration } from "../../src/schema";
-import { enterprisePreset } from "../../src/server/preset";
-import { runMigrations } from "../helpers/auth";
+import { baseAuthOptions as baseOptions, runMigrations } from "../helpers/auth";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const cliPath = join(repoRoot, "dist", "cli", "index.js");
-
-function baseOptions(): BetterAuthOptions {
-  return {
-    secret: "x".repeat(32),
-    baseURL: "http://localhost:3000",
-    emailAndPassword: { enabled: true },
-    plugins: enterprisePreset({
-      product: "test",
-      secretsKey: "s".repeat(32),
-      resolveEntitlements: async () => new Set(),
-    }),
-  };
-}
 
 function runCli(args: string[]) {
   return spawnSync(process.execPath, [cliPath, ...args], { encoding: "utf8" });

@@ -3,30 +3,10 @@
 // live `getAuthTables()` derivation so a better-auth upgrade that adds,
 // removes, or renames a field fails CI instead of silently going stale).
 import { describe, it, expect } from "vitest";
-import type { BetterAuthOptions } from "better-auth";
 import { getAuthTables } from "better-auth/db";
 import { createClient } from "@libsql/client";
 import { verifyDatabase, applyMigration, EXPECTED_TABLES } from "../../src/schema";
-import { enterprisePreset } from "../../src/server/preset";
-import { runMigrations } from "../helpers/auth";
-
-// Same "Task 2 preset mounted" base options `test/helpers/auth.ts`'s
-// `makeAuth` builds — kept local (rather than importing `makeAuth` itself)
-// so tests here can apply upstream migrations *without* the real
-// `applyMigration` already folded in, which `makeAuth` now does per ruling
-// (a).
-function baseOptions(): BetterAuthOptions {
-  return {
-    secret: "x".repeat(32),
-    baseURL: "http://localhost:3000",
-    emailAndPassword: { enabled: true },
-    plugins: enterprisePreset({
-      product: "test",
-      secretsKey: "s".repeat(32),
-      resolveEntitlements: async () => new Set(),
-    }),
-  };
-}
+import { baseAuthOptions as baseOptions, runMigrations } from "../helpers/auth";
 
 describe("verifyDatabase", () => {
   it("reports every missing enterprise table/column on a fresh better-auth db", async () => {
