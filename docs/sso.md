@@ -42,12 +42,12 @@ Steps 1–4 are open to an org **owner or admin**. Step 5 is split, because
 `breakGlassUserId` names the one person who keeps signing in when SSO
 enforcement locks everyone else out:
 
-| Action | Owner | Admin |
-|---|---|---|
-| Register a provider, verify the domain, run the test login | yes | yes |
-| Set or change `breakGlassUserId` (including clearing it) | yes | **no** — `403 NOT_ORG_OWNER` |
-| Enable `ssoEnforced` while leaving `breakGlassUserId` alone | yes | yes |
-| Write `groupRoleMap` | yes | **no** — `403 NOT_ORG_OWNER` |
+| Action                                                      | Owner | Admin                        |
+| ----------------------------------------------------------- | ----- | ---------------------------- |
+| Register a provider, verify the domain, run the test login  | yes   | yes                          |
+| Set or change `breakGlassUserId` (including clearing it)    | yes   | **no** — `403 NOT_ORG_OWNER` |
+| Enable `ssoEnforced` while leaving `breakGlassUserId` alone | yes   | yes                          |
+| Write `groupRoleMap`                                        | yes   | **no** — `403 NOT_ORG_OWNER` |
 
 So the supported admin path through step 5 is: an owner sets the break-glass
 user once (`POST /enterprise/policy/set { orgId, breakGlassUserId }`), and an
@@ -91,11 +91,11 @@ has to re-derive it.
 For a SAML provider registered with `providerId`, against a better-auth
 instance mounted at `baseUrl` (e.g. `https://app.example.com/api/auth`):
 
-| Purpose | URL |
-| --- | --- |
-| SP entity ID | `{baseUrl}/sso/saml2/sp/{providerId}` |
-| Assertion Consumer Service (ACS) | `{baseUrl}/sso/saml2/sp/acs/{providerId}` |
-| SP metadata XML | `GET {baseUrl}/sso/saml2/sp/metadata?providerId={providerId}` |
+| Purpose                          | URL                                                           |
+| -------------------------------- | ------------------------------------------------------------- |
+| SP entity ID                     | `{baseUrl}/sso/saml2/sp/{providerId}`                         |
+| Assertion Consumer Service (ACS) | `{baseUrl}/sso/saml2/sp/acs/{providerId}`                     |
+| SP metadata XML                  | `GET {baseUrl}/sso/saml2/sp/metadata?providerId={providerId}` |
 
 Paste the SP metadata URL (or its downloaded XML) into the IdP when
 configuring the SAML application; the ACS URL is what the IdP posts signed
@@ -144,7 +144,7 @@ behaviour, unchanged).
 `POST /enterprise/home-realm { email }` endpoint and returns either
 `{ method: "sso", providerId }` or `{ method: "local" }`. The response never
 reveals whether the email belongs to an existing user — only whether its
-*domain* has a verified SSO provider, which is public information about an
+_domain_ has a verified SSO provider, which is public information about an
 organization, not an individual account. Wire your sign-in page to call this
 before rendering a password/magic-link field; see the README's client
 snippet.
@@ -157,7 +157,7 @@ the database at all.
 
 `@better-auth/sso@1.6.x`'s `sso()` constructor has no plugin-level slot for a
 default or shared SP (service provider) signing identity — the only place SP
-key material exists upstream is a *per-provider* `samlConfig.spMetadata`, set
+key material exists upstream is a _per-provider_ `samlConfig.spMetadata`, set
 at `/sso/register` time for that one organization's connection. There is
 therefore nothing for the preset to pass it to.
 

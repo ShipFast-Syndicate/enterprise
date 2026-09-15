@@ -8,9 +8,9 @@ the security portal.
 
 ## Users vs. Groups — two different implementations
 
-| Resource | Implemented by | Endpoints |
-| --- | --- | --- |
-| **Users** | upstream `@better-auth/scim` (peer dependency) | `GET/POST /scim/v2/Users`, `GET/PATCH/PUT/DELETE /scim/v2/Users/:id` |
+| Resource   | Implemented by                                                       | Endpoints                                                               |
+| ---------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| **Users**  | upstream `@better-auth/scim` (peer dependency)                       | `GET/POST /scim/v2/Users`, `GET/PATCH/PUT/DELETE /scim/v2/Users/:id`    |
 | **Groups** | this package's own `scimGroups()` plugin (`src/server/scim-groups/`) | `GET/POST /scim/v2/Groups`, `GET/PATCH/DELETE /scim/v2/Groups/:groupId` |
 
 `@better-auth/scim` 1.6 has no SCIM Groups support at all — `scimGroups()` is
@@ -43,7 +43,7 @@ themselves), so v0.1 does not offer it at all.
 ### What a group change actually does to a role
 
 On every group create/update/patch/delete, each affected user's role is
-recomputed from the groups they are *currently* in — the highest-ranked
+recomputed from the groups they are _currently_ in — the highest-ranked
 mapped role wins (`admin` > `member`), and a user in no mapped group
 computes to `member`. That result is then applied under these rules:
 
@@ -88,8 +88,8 @@ in-house Groups implementation are reconciled into one plugin.
 3. Paste the bearer token from `<ab-scim-tokens>` (or
    `POST /enterprise/scim/tokens/create`) as the **Bearer Token**
    authentication value.
-4. Under **Provisioning to App**, enable *Create Users*, *Update User
-   Attributes*, and *Deactivate Users*.
+4. Under **Provisioning to App**, enable _Create Users_, _Update User
+   Attributes_, and _Deactivate Users_.
 5. **Group push**: Okta's group-push UI does not gate on `ResourceTypes`
    advertising Groups — add the groups you want pushed under **Push
    Groups** and they provision against `/scim/v2/Groups` normally. Map the
@@ -99,14 +99,14 @@ in-house Groups implementation are reconciled into one plugin.
 ### Microsoft Entra ID (Azure AD)
 
 1. In the enterprise application's **Provisioning** blade, set **Provisioning
-   Mode** to *Automatic*.
+   Mode** to _Automatic_.
 2. **Tenant URL**: `https://<your-app>/api/auth/scim/v2`.
 3. **Secret Token**: the bearer token from the portal.
 4. Click **Test Connection** — it exercises `GET /scim/v2/Users` and
    `GET /scim/v2/ResourceTypes`; a green result only confirms Users support
    (see the limitation above), not Groups.
-5. Under **Mappings**, both *Provision Azure Active Directory Users* and
-   *Provision Azure Active Directory Groups* can be left enabled — Entra
+5. Under **Mappings**, both _Provision Azure Active Directory Users_ and
+   _Provision Azure Active Directory Groups_ can be left enabled — Entra
    does not require `ResourceTypes` to list `Group` before it will attempt
    `/scim/v2/Groups` calls; verify with a small pilot group first.
 

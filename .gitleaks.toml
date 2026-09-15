@@ -3,7 +3,7 @@ title = "ShipFast-Syndicate gitleaks config"
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "Repo-wide allowlist for known false positives"
 paths = [
   '''(^|/)dist/''',
@@ -22,3 +22,25 @@ stopwords = [
   "your-",
   "REDACTED",
 ]
+
+# The hub's gitleaks job scans git *history*, not just the working tree, so the
+# SAML test key pair that used to live in `test/helpers/fixtures/saml-keys.ts`
+# is still reachable at the commit that introduced it and still trips the
+# built-in `private-key` rule (two findings, both there).
+#
+# It is a self-signed key pair generated for this repo's own SAML end-to-end
+# fixtures. It was never a credential: no system, service or certificate
+# authority ever trusted it, it authenticated nothing, and it protected
+# nothing. It was replaced by runtime key generation in `cb6abea`
+# ("test: generate SAML test keys at runtime"), so no key material is in the
+# working tree; see `docs/security.md`. Rewriting history to excise it would
+# buy nothing and break every existing clone and commit reference.
+#
+# `condition = "AND"` so this allowlist covers exactly that path at exactly
+# that commit — a real private key committed to the same path later, or to a
+# different path in that commit, still fails the scan.
+[[allowlists]]
+description = "Historic self-signed SAML test key pair, removed in cb6abea"
+condition = "AND"
+commits = ["c8ec57eb400f35291b04203bd79d3b44c72c3ec7"]
+paths = ['''^test/helpers/fixtures/saml-keys\.ts$''']

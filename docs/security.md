@@ -7,7 +7,7 @@
 - **Affected versions:** `@better-auth/scim` `>=1.5.0 <1.7.0-beta.4`. This package is pinned
   exact to `1.6.33` (see the [better-auth version pin](../README.md)); the fix ships only in
   the `1.7` line, which this repo does not yet track.
-- **Why it does not apply here:** the advisory is that a SCIM provider created *without* an
+- **Why it does not apply here:** the advisory is that a SCIM provider created _without_ an
   `organizationId` (a "personal" provider) has no owner binding and can be taken over. This
   package never allows that state to exist:
   - `enterpriseGate` (`src/server/gate.ts`) requires `organizationId` explicitly in the request
@@ -26,7 +26,7 @@
   scimProvider row". If this test ever starts failing (or is removed), the advisory applies
   again and this acceptance must be revisited.
 - **Suppressed via:** `pnpm.auditConfig.ignoreGhsas` in `package.json`, so `pnpm audit` — and
-  the hub CI `quality / audit` gate — stay green without hiding any *other* finding.
+  the hub CI `quality / audit` gate — stay green without hiding any _other_ finding.
 - **Revisit trigger:** when the fleet moves its better-auth peer set off the `1.6.x` line onto
   `1.7.x` or later (which ships the fix), drop this entry and the `ignoreGhsas` suppression, and
   re-run `pnpm audit` to confirm it is clear on its own.
@@ -96,7 +96,7 @@
   happens, and note that `audit.retentionDays` is validated (`>= 1`) at construction so a `0`
   cannot compact a whole chain on the next read.
 - **What the anchor costs.** Within the limits already documented above, the anchor makes
-  *prefix* deletion cheaper for an attacker who can write the database directly: instead of
+  _prefix_ deletion cheaper for an attacker who can write the database directly: instead of
   recomputing every surviving row's hash, they can forge one anchor whose `prev_hash` and
   `metadata.lastHash` match the next row's `prev_hash`, and its `compactedCount` is
   unverifiable. That is weaker than the pre-C-02 chain for that one scenario and much stronger
@@ -139,12 +139,12 @@ registry — so re-running the job by hand is a safe no-op.
 **Trusted publisher configuration** (set on npmjs.com against the `@alphabros/enterprise`
 package, by whoever holds publish rights — org-admin/Bastien, not code):
 
-| Setting | Value |
-| --- | --- |
+| Setting              | Value                |
+| -------------------- | -------------------- |
 | Organization or user | `ShipFast-Syndicate` |
-| Repository | `enterprise` |
-| Workflow filename | `release.yml` |
-| Environment | `npm` |
+| Repository           | `enterprise`         |
+| Workflow filename    | `release.yml`        |
+| Environment          | `npm`                |
 
 ### Manual first publish (0.1.0)
 
@@ -172,39 +172,39 @@ split by who does it:
 **Done in this task (Claude, code/config):**
 
 - [x] `publishConfig: { access: "public" }` in `package.json` (provenance is not a
-  `publishConfig` setting here — `release.yml`'s `publish` job passes `--provenance` explicitly
-  on the command line, since it's only meaningful from CI's OIDC identity).
+      `publishConfig` setting here — `release.yml`'s `publish` job passes `--provenance` explicitly
+      on the command line, since it's only meaningful from CI's OIDC identity).
 - [x] `LICENSE` file (MIT, Alpha Bros, 2026).
 - [x] `repository`, `homepage`, `bugs`, `author`, `keywords` in `package.json`.
 - [x] README rewritten for a public npm landing page (no `.superpowers/` reference).
 - [x] Committed test SAML private key removed; keys generated at test runtime instead (see
-  below) — verified clean on the working tree.
+      below) — verified clean on the working tree.
 - [x] `sideEffects: ["./dist/portal/*"]`, `"./package.json"` added to `exports`,
-  `peerDependenciesMeta` marking `lit`/`drizzle-orm`/`@libsql/client` optional,
-  `@better-auth/core`/`better-call` promoted to `peerDependencies`.
+      `peerDependenciesMeta` marking `lit`/`drizzle-orm`/`@libsql/client` optional,
+      `@better-auth/core`/`better-call` promoted to `peerDependencies`.
 - [x] `release.yml`: trusted publishing (no `NPM_TOKEN`), explicit secrets (no
-  `secrets: inherit`), `concurrency` block added.
+      `secrets: inherit`), `concurrency` block added.
 - [x] `.releaserc.json`: `conventionalcommits` preset set (matches the already-present,
-  previously-unused `conventional-changelog-conventionalcommits` devDependency).
+      previously-unused `conventional-changelog-conventionalcommits` devDependency).
 - [x] `vitest.config.ts` coverage excludes `**/*.sql`.
 
 **Still needed — Bastien / org-admin, before the first publish:**
 
 - [ ] Grant `STUDIO_ARTIFACT_S3` (+ `REVIEWER_APP_*`, `AUDITS_TG_*`, `CF_ACCESS_*`) to this repo
-  so `ci / summary` can go green (R7).
+      so `ci / summary` can go green (R7).
 - [ ] Grant `RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY` to this repo's Actions secrets, and
-  confirm the release App is a bypass actor on the `main` branch ruleset (14754562) (P3, P7). No
-  `NPM_TOKEN` is needed — publishing is trusted-publishing/OIDC only.
+      confirm the release App is a bypass actor on the `main` branch ruleset (14754562) (P3, P7). No
+      `NPM_TOKEN` is needed — publishing is trusted-publishing/OIDC only.
 - [ ] Confirm the `@alphabros` npm scope exists and perform the manual 0.1.0 publish (above),
-  then configure the trusted publisher on the now-existing package.
+      then configure the trusted publisher on the now-existing package.
 - [ ] Flip the repo to public — after every item above, and after deciding R6 below.
 - [ ] Enable secret scanning + push protection, Dependabot alerts + security updates, and CodeQL
-  default setup (R1).
+      default setup (R1).
 - [ ] Decide whether `docs/superpowers/plans/2026-09-15-enterprise-v0.1.md` (internal design doc,
-  no secrets, but exposes internal architecture/fleet conventions) stays committed once the repo
-  goes public, or moves under the git-ignored `.superpowers/` path (R6).
+      no secrets, but exposes internal architecture/fleet conventions) stays committed once the repo
+      goes public, or moves under the git-ignored `.superpowers/` path (R6).
 - [ ] Turn off "Allow GitHub Actions to approve pull requests"; require ≥ 1 approval on `main`;
-  add `non_fast_forward` to the `develop` ruleset; set `sha_pinning_required: true` (R4, R3, R2).
+      add `non_fast_forward` to the `develop` ruleset; set `sha_pinning_required: true` (R4, R3, R2).
 
 ## Test key history note
 
@@ -238,25 +238,25 @@ audit's own exploit (failing before the fix, passing after).
 
 ### High
 
-| id | finding | fix | test |
-| --- | --- | --- | --- |
-| C-01 | Any authenticated user could append rows to **any other tenant's** audit chain with `?orgId=<victim>`, with attacker-controlled `user_agent`, and `verify` still said `ok` | `resolveOrgId` (`src/server/audit/plugin.ts`) resolves the org from the SCIM bearer's own provider row, then the SSO provider row, then the session — a body/query org id is honoured **only** when the resolved actor holds a `member` row in it. Anything else skips the write with a warning. A `hooks.before` captures the caller's session so `/sign-out` (which deletes it) stays audited | `test/security/c01-audit-org-injection.test.ts` |
-| C-02 | Retention deleted rows out from under the hash chain, so `verify` reported `{"ok":false,"brokenAtSeq":…}` **permanently** after any row aged out — during entirely normal operation | Retention is archival **compaction** now (`compactChain`, `src/server/audit/chain.ts`): the expired prefix is replaced by one `audit.retention_compacted` anchor row carrying `{compactedThroughSeq, compactedCount, lastHash}`, whose `prev_hash` is that `lastHash`; `verifyChain` re-anchors on it. Tampering *inside* the surviving window is still caught. Compaction still runs from `GET /enterprise/audit/list` (owner/admin, feature-gated) and is now also available deliberately as `POST /enterprise/audit/compact` | `test/security/c02-retention-compaction.test.ts` |
-| C-03 | A SCIM group change rewrote `member.role` wholesale, so adding an existing **owner** or **admin** to any group demoted them to `member` (with two owners, either could be stripped) and multi-role values were flattened | `recomputeRoleForUser` (`src/server/scim-groups/plugin.ts`) never touches an `owner`, never overwrites a multi-role value, never touches a role outside `owner`/`admin`/`member`, always allows a *raise*, and only *lowers* a role the effective `groupRoleMap` itself grants somewhere. Every skip is audited as `scim.role_change_skipped` with a reason | `test/security/c03-scim-role-demotion.test.ts` |
-| C-04 | `secretsKey` was declared, documented (spec §7.4) and **never read** — IdP `clientSecret` and SAML private keys sat in the database in plaintext | `src/server/secrets.ts` wraps `context.adapter` from `enterpriseGate`'s `init()` and transparently encrypts/decrypts `ssoProvider.oidcConfig.clientSecret` plus the `samlConfig` private-key fields with AES-256-GCM (Web Crypto; key = SHA-256 of `secretsKey`; random 12-byte IV; **AAD = the provider's `providerId`**, so a ciphertext copied onto another provider row fails to decrypt instead of silently re-pointing a live IdP credential; `enc:v1:<base64url>`). Values without the prefix are read back untouched, so existing rows migrate on next write. `enterpriseGate` validates the options too, so a hand-composed plugin list is covered | `test/security/c04-secrets-at-rest.test.ts` (ciphertext asserted with raw SQL; `test/e2e/oidc.test.ts` proves the real OIDC callback still gets plaintext) |
+| id   | finding                                                                                                                                                                                                                  | fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | test                                                                                                                                                       |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C-01 | Any authenticated user could append rows to **any other tenant's** audit chain with `?orgId=<victim>`, with attacker-controlled `user_agent`, and `verify` still said `ok`                                               | `resolveOrgId` (`src/server/audit/plugin.ts`) resolves the org from the SCIM bearer's own provider row, then the SSO provider row, then the session — a body/query org id is honoured **only** when the resolved actor holds a `member` row in it. Anything else skips the write with a warning. A `hooks.before` captures the caller's session so `/sign-out` (which deletes it) stays audited                                                                                                                                                                                                                                                             | `test/security/c01-audit-org-injection.test.ts`                                                                                                            |
+| C-02 | Retention deleted rows out from under the hash chain, so `verify` reported `{"ok":false,"brokenAtSeq":…}` **permanently** after any row aged out — during entirely normal operation                                      | Retention is archival **compaction** now (`compactChain`, `src/server/audit/chain.ts`): the expired prefix is replaced by one `audit.retention_compacted` anchor row carrying `{compactedThroughSeq, compactedCount, lastHash}`, whose `prev_hash` is that `lastHash`; `verifyChain` re-anchors on it. Tampering _inside_ the surviving window is still caught. Compaction still runs from `GET /enterprise/audit/list` (owner/admin, feature-gated) and is now also available deliberately as `POST /enterprise/audit/compact`                                                                                                                             | `test/security/c02-retention-compaction.test.ts`                                                                                                           |
+| C-03 | A SCIM group change rewrote `member.role` wholesale, so adding an existing **owner** or **admin** to any group demoted them to `member` (with two owners, either could be stripped) and multi-role values were flattened | `recomputeRoleForUser` (`src/server/scim-groups/plugin.ts`) never touches an `owner`, never overwrites a multi-role value, never touches a role outside `owner`/`admin`/`member`, always allows a _raise_, and only _lowers_ a role the effective `groupRoleMap` itself grants somewhere. Every skip is audited as `scim.role_change_skipped` with a reason                                                                                                                                                                                                                                                                                                 | `test/security/c03-scim-role-demotion.test.ts`                                                                                                             |
+| C-04 | `secretsKey` was declared, documented (spec §7.4) and **never read** — IdP `clientSecret` and SAML private keys sat in the database in plaintext                                                                         | `src/server/secrets.ts` wraps `context.adapter` from `enterpriseGate`'s `init()` and transparently encrypts/decrypts `ssoProvider.oidcConfig.clientSecret` plus the `samlConfig` private-key fields with AES-256-GCM (Web Crypto; key = SHA-256 of `secretsKey`; random 12-byte IV; **AAD = the provider's `providerId`**, so a ciphertext copied onto another provider row fails to decrypt instead of silently re-pointing a live IdP credential; `enc:v1:<base64url>`). Values without the prefix are read back untouched, so existing rows migrate on next write. `enterpriseGate` validates the options too, so a hand-composed plugin list is covered | `test/security/c04-secrets-at-rest.test.ts` (ciphertext asserted with raw SQL; `test/e2e/oidc.test.ts` proves the real OIDC callback still gets plaintext) |
 
 ### Medium
 
-| id | fix | test |
-| --- | --- | --- |
-| M-01 | `groupRoleMap` may target `admin`/`member` only — refused by the type, by `POST /enterprise/policy/set` (400 `GROUP_ROLE_MAP_OWNER_FORBIDDEN`), and at runtime in `resolveGroupRoleMap`, which drops an `owner` entry arriving from a stale policy row or the static `EnterpriseOptions.scim.groupRoleMap` with a warning; only an **owner** may write `groupRoleMap`/`breakGlassUserId` or mint a SCIM token (enforced on both `/enterprise/scim/tokens/create` and upstream `/scim/generate-token`). Admins keep list/revoke | `test/security/m01-privilege-escalation.test.ts` |
-| M-02 | Every exported CSV cell starting with `= + - @ TAB CR` is prefixed with `'`, RFC 4180 quoting unchanged | `test/security/m02-csv-injection.test.ts` |
-| M-03 | A global `hooks.before` on `/scim/v2/*` resolves the org from the bearer (`authenticateScimBearer`) and requires the `scim` feature, covering our Groups endpoints *and* upstream's Users endpoints; refusal is a SCIM-shaped 403 body. An unauthenticated call still gets the endpoint's own 401 | `test/security/m03-scim-entitlement-gate.test.ts` |
-| M-04 | `parseFilter` and the `members[value eq "…"]` patch-path parser are hand-written linear tokenizers behind a 512-character cap; `members`/`Operations` arrays are capped at the schema boundary. The audit's 64 000-space input went from **9.3 s** to under 1 ms | `test/security/m04-filter-redos.test.ts` |
-| M-05 | `/enterprise/audit/export` is capped (`audit.exportMaxRows`, default 100 000) and answers `413 AUDIT_EXPORT_TOO_LARGE` past it, pointing at `from`/`to` | `test/security/m05-m08-hardening.test.ts` |
-| M-06 | `breakGlassUserId` must be an owner of the org on **every** write, not only when `ssoEnforced` is being turned on (`400 BREAK_GLASS_NOT_OWNER`) | same file |
-| M-07 | Membership/role is checked **before** entitlement everywhere (gate hook and each endpoint), so a non-member never reaches the product's `resolveEntitlements` and cannot distinguish a real org from an invented one | same file |
-| M-08 | `GET /enterprise/sso/providers`, `GET /enterprise/scim/tokens` and `GET /enterprise/policy` are owner/admin only | same file |
+| id   | fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | test                                              |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| M-01 | `groupRoleMap` may target `admin`/`member` only — refused by the type, by `POST /enterprise/policy/set` (400 `GROUP_ROLE_MAP_OWNER_FORBIDDEN`), and at runtime in `resolveGroupRoleMap`, which drops an `owner` entry arriving from a stale policy row or the static `EnterpriseOptions.scim.groupRoleMap` with a warning; only an **owner** may write `groupRoleMap`/`breakGlassUserId` or mint a SCIM token (enforced on both `/enterprise/scim/tokens/create` and upstream `/scim/generate-token`). Admins keep list/revoke | `test/security/m01-privilege-escalation.test.ts`  |
+| M-02 | Every exported CSV cell starting with `= + - @ TAB CR` is prefixed with `'`, RFC 4180 quoting unchanged                                                                                                                                                                                                                                                                                                                                                                                                                        | `test/security/m02-csv-injection.test.ts`         |
+| M-03 | A global `hooks.before` on `/scim/v2/*` resolves the org from the bearer (`authenticateScimBearer`) and requires the `scim` feature, covering our Groups endpoints _and_ upstream's Users endpoints; refusal is a SCIM-shaped 403 body. An unauthenticated call still gets the endpoint's own 401                                                                                                                                                                                                                              | `test/security/m03-scim-entitlement-gate.test.ts` |
+| M-04 | `parseFilter` and the `members[value eq "…"]` patch-path parser are hand-written linear tokenizers behind a 512-character cap; `members`/`Operations` arrays are capped at the schema boundary. The audit's 64 000-space input went from **9.3 s** to under 1 ms                                                                                                                                                                                                                                                               | `test/security/m04-filter-redos.test.ts`          |
+| M-05 | `/enterprise/audit/export` is capped (`audit.exportMaxRows`, default 100 000) and answers `413 AUDIT_EXPORT_TOO_LARGE` past it, pointing at `from`/`to`                                                                                                                                                                                                                                                                                                                                                                        | `test/security/m05-m08-hardening.test.ts`         |
+| M-06 | `breakGlassUserId` must be an owner of the org on **every** write, not only when `ssoEnforced` is being turned on (`400 BREAK_GLASS_NOT_OWNER`)                                                                                                                                                                                                                                                                                                                                                                                | same file                                         |
+| M-07 | Membership/role is checked **before** entitlement everywhere (gate hook and each endpoint), so a non-member never reaches the product's `resolveEntitlements` and cannot distinguish a real org from an invented one                                                                                                                                                                                                                                                                                                           | same file                                         |
+| M-08 | `GET /enterprise/sso/providers`, `GET /enterprise/scim/tokens` and `GET /enterprise/policy` are owner/admin only                                                                                                                                                                                                                                                                                                                                                                                                               | same file                                         |
 
 **Deviation from the audit's M-07 remediation, recorded per the controller ruling.** The audit
 asked for "one indistinguishable `403` for both" membership and entitlement failures. This
@@ -302,7 +302,7 @@ org can tell the two apart, and for them the plan is not a secret.
 - **L-09 — `ab-sso-test-ok:<providerId>` survives provider reconfiguration.** Needs a config
   fingerprint keyed alongside the provider and invalidation on every `/sso/register` update — a
   design change to the test-login precondition, deferred to P2. Mitigation: the row can only be
-  written by an owner/admin who completed a real SSO login against a *verified* domain.
+  written by an owner/admin who completed a real SSO login against a _verified_ domain.
 - **L-10 — `findOrgByEmailDomain` is first-match-wins across providers claiming one domain.**
   Requires a uniqueness constraint on `(domain)` among `domainVerified` providers plus a
   migration; deferred to P2. Mitigation: a domain can only become `domainVerified` by proving
