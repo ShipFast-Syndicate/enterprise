@@ -73,20 +73,82 @@ export function scimJson(
 
 const FILTER_ATTRS = new Set(["displayName", "externalId", "id"]);
 
-// Mirrors `@better-auth/scim`'s own `SCIMFilterRegex`
-// (`node_modules/@better-auth/scim/dist/index.mjs`) shape — attribute, a
-// SCIM comparison operator, and a quoted-or-bare value — but this plugin
-// only ever supports `eq` on the 3 named attributes (ruling (g)); every
-// other operator (`co`, `ne`, `sw`, ...) or attribute is rejected, not
-// silently ignored.
-const FILTER_REGEX =
-  /^\s*(?<attr>[^\s]+)\s+(?<op>eq|ne|co|sw|ew|pr|gt|ge|lt|le)\s*(?<value>"(?:[^"\\]|\\.)*"|[^\s]+)?\s*$/i;
+const FILTER_OPS = new Set(["eq", "ne", "co", "sw", "ew", "pr", "gt", "ge", "lt", "le"]);
 
-function unquote(raw: string): string {
-  if (raw.startsWith('"') && raw.endsWith('"')) {
-    return raw.slice(1, -1).replace(/\\(.)/g, "$1");
+/**
+ * Hard ceiling on a `filter` query parameter (M-04). Every filter this
+ * plugin supports is `<attr> eq "<value>"`, so 512 characters is far more
+ * than any real IdP sends, and it bounds the parser's work by construction.
+ */
+export const MAX_FILTER_LENGTH = 512;
+
+const WHITESPACE = new Set([" ", "\t", "\n", "\r", "\f", "\v"]);
+
+/**
+ * Hand-written, single-pass tokenizer replacing the previous
+ * `FILTER_REGEX` (M-04). That regex had two ambiguous `\s*` groups around an
+ * optional capture, which made it catastrophically backtracking on trailing
+ * whitespace: `displayName eq <64 000 spaces>x y` blocked the event loop for
+ * **7.6 s** on a single request (8 k → 125 ms, 32 k → 2.3 s — quadratic).
+ *
+ * This scanner is strictly linear: it walks the string once, never re-reads
+ * a character, and allocates only the three substrings it returns. A bare
+ * value ends at the first whitespace; a quoted value consumes `\`-escapes
+ * and must be terminated. Anything left over after the value (the `y` in the
+ * example above) is a parse error, exactly as before.
+ */
+function tokenizeFilter(filter: string): { attr: string; op: string; value?: string } | null {
+  let i = 0;
+  const len = filter.length;
+  const skipSpace = (): void => {
+    while (i < len && WHITESPACE.has(filter[i]!)) i++;
+  };
+  const readBare = (): string => {
+    const start = i;
+    while (i < len && !WHITESPACE.has(filter[i]!)) i++;
+    return filter.slice(start, i);
+  };
+
+  skipSpace();
+  const attr = readBare();
+  if (!attr) return null;
+
+  skipSpace();
+  const op = readBare();
+  if (!op) return null;
+
+  skipSpace();
+  let value: string | undefined;
+  if (i < len) {
+    if (filter[i] === '"') {
+      i++;
+      let out = "";
+      let closed = false;
+      while (i < len) {
+        const ch = filter[i]!;
+        i++;
+        if (ch === "\\") {
+          if (i >= len) return null; // dangling escape
+          out += filter[i]!;
+          i++;
+          continue;
+        }
+        if (ch === '"') {
+          closed = true;
+          break;
+        }
+        out += ch;
+      }
+      if (!closed) return null;
+      value = out;
+    } else {
+      value = readBare();
+    }
   }
-  return raw;
+
+  skipSpace();
+  if (i !== len) return null; // trailing junk after the value
+  return { attr, op, value };
 }
 
 /**
@@ -101,12 +163,19 @@ export function parseFilter(
   filter: string | undefined,
 ): { attr: "displayName" | "externalId" | "id"; op: "eq"; value: string } | null {
   if (filter === undefined) return null;
+  if (filter.length > MAX_FILTER_LENGTH) {
+    throw new ScimHttpError(
+      400,
+      "invalidFilter",
+      `SCIM filter expression exceeds ${MAX_FILTER_LENGTH} characters.`,
+    );
+  }
 
-  const match = filter.match(FILTER_REGEX);
-  const attr = match?.groups?.attr;
-  const op = match?.groups?.op?.toLowerCase();
-  const rawValue = match?.groups?.value;
-  if (!match || !attr || !op || rawValue === undefined) {
+  const parsed = tokenizeFilter(filter);
+  const attr = parsed?.attr;
+  const op = parsed?.op.toLowerCase();
+  const rawValue = parsed?.value;
+  if (!parsed || !attr || !op || rawValue === undefined || !FILTER_OPS.has(op)) {
     throw new ScimHttpError(400, "invalidFilter", `Invalid SCIM filter expression: ${filter}`);
   }
   if (op !== "eq") {
@@ -116,14 +185,75 @@ export function parseFilter(
     throw new ScimHttpError(400, "invalidFilter", `Unsupported SCIM filter attribute: ${attr}`);
   }
 
-  return { attr: attr as "displayName" | "externalId" | "id", op: "eq", value: unquote(rawValue) };
+  return { attr: attr as "displayName" | "externalId" | "id", op: "eq", value: rawValue };
 }
 
 // --- PATCH application (controller ruling (f)) ------------------------------
 
 export type PatchOp = { op: "add" | "remove" | "replace"; path?: string; value?: unknown };
 
-const MEMBERS_FILTER_PATH = /^members\[\s*value\s+eq\s+"((?:[^"\\]|\\.)*)"\s*\]$/i;
+/**
+ * Hard ceiling on a PATCH `path` (M-04, same rationale as
+ * `MAX_FILTER_LENGTH`): the only paths this plugin supports are
+ * `displayName`, `members` and `members[value eq "<id>"]`.
+ */
+export const MAX_PATCH_PATH_LENGTH = 512;
+
+/**
+ * `members[value eq "<id>"]` → `<id>`, or `null` if `path` isn't that shape
+ * (M-04). Hand-written for the same reason `tokenizeFilter` is: the previous
+ * regex nested a quantified alternation inside another quantifier, which is
+ * the shape that backtracks. This walks the string once.
+ */
+export function parseMembersFilterPath(path: string | undefined): string | null {
+  if (!path || path.length > MAX_PATCH_PATH_LENGTH) return null;
+  const lower = path.toLowerCase();
+  if (!lower.startsWith("members[") || !path.endsWith("]")) return null;
+
+  let i = "members[".length;
+  const end = path.length - 1;
+  const skipSpace = (): void => {
+    while (i < end && WHITESPACE.has(path[i]!)) i++;
+  };
+  const expectWord = (word: string): boolean => {
+    if (lower.startsWith(word, i)) {
+      i += word.length;
+      return true;
+    }
+    return false;
+  };
+
+  skipSpace();
+  if (!expectWord("value")) return null;
+  if (i >= end || !WHITESPACE.has(path[i]!)) return null;
+  skipSpace();
+  if (!expectWord("eq")) return null;
+  if (i >= end || !WHITESPACE.has(path[i]!)) return null;
+  skipSpace();
+  if (path[i] !== '"') return null;
+  i++;
+
+  let value = "";
+  let closed = false;
+  while (i < end) {
+    const ch = path[i]!;
+    i++;
+    if (ch === "\\") {
+      if (i >= end) return null;
+      value += path[i]!;
+      i++;
+      continue;
+    }
+    if (ch === '"') {
+      closed = true;
+      break;
+    }
+    value += ch;
+  }
+  if (!closed) return null;
+  skipSpace();
+  return i === end ? value : null;
+}
 
 function extractMemberIds(value: unknown): string[] {
   if (value === undefined || value === null) return [];
@@ -201,9 +331,8 @@ export function applyGroupPatch(
       continue;
     }
 
-    const filterMatch = path?.match(MEMBERS_FILTER_PATH);
-    if (filterMatch) {
-      const targetId = filterMatch[1]!.replace(/\\(.)/g, "$1");
+    const targetId = parseMembersFilterPath(path);
+    if (targetId !== null) {
       members =
         op === "remove" ? members.filter((id) => id !== targetId) : dedupe([...members, targetId]);
       continue;
@@ -217,7 +346,14 @@ export function applyGroupPatch(
 
 // --- role mapping (controller ruling (d)) -----------------------------------
 
-const ROLE_RANK: Record<"owner" | "admin" | "member", number> = { owner: 3, admin: 2, member: 1 };
+export type MappedRole = "owner" | "admin" | "member";
+
+export const ROLE_RANK: Record<MappedRole, number> = { owner: 3, admin: 2, member: 1 };
+
+/** Whether `role` is one of the three roles this package's role model knows about. */
+export function isMappedRole(role: string): role is MappedRole {
+  return role === "owner" || role === "admin" || role === "member";
+}
 
 /**
  * The highest-ranked role (`owner` > `admin` > `member`) any of `groupNames`

@@ -33,10 +33,11 @@
 // shared handler branching on whether a groupId segment is present.
 
 import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
-import { createAuthEndpoint } from "better-auth/api";
+import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/api";
 import type { Where } from "@better-auth/core/db/adapter";
 import * as z from "zod";
 import { writeAudit } from "../audit/chain";
+import { requireFeature } from "../entitlements";
 import { getOrgPolicy } from "../policy/store";
 import type { EnterpriseOptions } from "../types";
 import { authenticateScimBearer } from "./auth";
@@ -44,11 +45,14 @@ import {
   applyGroupPatch,
   buildGroupResource,
   effectiveRole,
+  isMappedRole,
   locationFor,
   parseFilter,
+  ROLE_RANK,
   scimError,
   scimJson,
   ScimHttpError,
+  type MappedRole,
   type PatchOp,
   type ScimGroupResource,
 } from "./scim";
@@ -300,11 +304,72 @@ async function auditMembershipChanges(
 }
 
 /**
+ * The group→role map actually in force for an org: the policy row's map when
+ * it has any entries, else the static `EnterpriseOptions.scim.groupRoleMap`.
+ *
+ * The previous `policy.groupRoleMap ?? opts.scim?.groupRoleMap ?? {}` could
+ * never reach the second operand — `defaultPolicy` returns `{}`, which is
+ * not nullish — so a product configuring `scim.groupRoleMap` silently got no
+ * mapping at all (flagged in the audit's Area 4 alongside C-03).
+ */
+function resolveGroupRoleMap(
+  policyMap: Record<string, MappedRole>,
+  opts: EnterpriseOptions,
+): Record<string, MappedRole> {
+  if (Object.keys(policyMap).length > 0) return policyMap;
+  return opts.scim?.groupRoleMap ?? {};
+}
+
+async function auditRoleChangeSkipped(
+  ctx: GenericEndpointContext,
+  orgId: string,
+  providerId: string,
+  userId: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  await writeAudit(ctx, {
+    orgId,
+    actorType: "scim",
+    actorId: providerId,
+    action: "scim.role_change_skipped",
+    targetType: "member",
+    targetId: userId,
+    metadata,
+  });
+}
+
+/**
  * Recomputes one user's effective org role from their current team
- * memberships (ruling (d)): `effectiveRole(groupNames, policy.groupRoleMap
- * ?? opts.scim?.groupRoleMap ?? {})`. Never demotes the org's only owner —
- * skips the write and audits `scim.role_change_skipped` instead. A no-op
- * (role already correct) writes nothing at all, not even a skip row.
+ * memberships (ruling (d)) — but only ever in the directions a SCIM client
+ * is allowed to move it (C-03).
+ *
+ * Before the fix this wrote `effectiveRole(...)` over `member.role`
+ * wholesale, which is `"member"` whenever no group maps the user: adding an
+ * existing **owner** or **admin** to *any* SCIM group silently demoted them
+ * (reproduced in the audit: a second org owner became `member` on one
+ * `POST /scim/v2/Groups`), and a multi-role value was flattened to one role.
+ *
+ * The rules now, in order:
+ *
+ * 1. **An owner is never touched.** Not demoted, not rewritten — whatever
+ *    the map says. (The old sole-owner special case only protected the
+ *    *last* owner; with two owners either could be stripped.)
+ * 2. **A multi-role `member.role` is never overwritten**, since this
+ *    function has no way to express the other roles it would destroy.
+ * 3. **A role outside `owner`/`admin`/`member` is never touched** — it
+ *    belongs to a role model this package doesn't own.
+ * 4. **Raising is always allowed**: if the map grants a strictly higher role
+ *    than the user currently holds, apply it.
+ * 5. **Lowering only applies to a role the mapping itself could have
+ *    granted** — i.e. the current role appears as a value somewhere in the
+ *    effective `groupRoleMap`. That is the (deliberately minimal, no extra
+ *    schema) provenance proxy for "this role was SCIM-assigned": a user who
+ *    leaves every mapped group falls back to `member`, while a manually
+ *    assigned admin in an org whose map grants no `admin` anywhere is left
+ *    alone.
+ *
+ * Every skipped change is audited as `scim.role_change_skipped` with the
+ * reason; a genuine no-op (role already correct) writes nothing at all.
  */
 async function recomputeRoleForUser(
   ctx: GenericEndpointContext,
@@ -339,34 +404,37 @@ async function recomputeRoleForUser(
   const groupNames = teams.map((t) => t.name);
 
   const policy = await getOrgPolicy(ctx, orgId);
-  const role = effectiveRole(groupNames, policy.groupRoleMap ?? opts.scim?.groupRoleMap ?? {});
+  const map = resolveGroupRoleMap(policy.groupRoleMap, opts);
+  const role = effectiveRole(groupNames, map);
 
   if (member.role === role) return; // already correct — no write, no audit
 
-  const currentRoles = member.role.split(",").map((r) => r.trim());
-  if (currentRoles.includes("owner") && role !== "owner") {
-    const orgMembers = await ctx.context.adapter.findMany<MemberRow>({
-      model: "member",
-      where: [{ field: "organizationId", value: orgId }],
+  const currentRoles = member.role
+    .split(",")
+    .map((r) => r.trim())
+    .filter(Boolean);
+  const skip = (reason: string): Promise<void> =>
+    auditRoleChangeSkipped(ctx, orgId, providerId, userId, {
+      attemptedRole: role,
+      currentRole: member.role,
+      reason,
     });
-    const ownerCount = orgMembers.filter((m) =>
-      m.role
-        .split(",")
-        .map((r) => r.trim())
-        .includes("owner"),
-    ).length;
-    if (ownerCount <= 1) {
-      await writeAudit(ctx, {
-        orgId,
-        actorType: "scim",
-        actorId: providerId,
-        action: "scim.role_change_skipped",
-        targetType: "member",
-        targetId: userId,
-        metadata: { attemptedRole: role, currentRole: member.role, reason: "sole_owner" },
-      });
-      return;
-    }
+
+  // (1) owners are untouchable by a SCIM client — including when the map
+  // would *raise* them, since they are already at the top of the ranking.
+  if (currentRoles.includes("owner")) return skip("owner_protected");
+  // (2) never flatten a multi-role value.
+  if (currentRoles.length > 1) return skip("multi_role");
+
+  const currentRole = currentRoles[0] ?? "member";
+  // (3) a role from some other role model isn't ours to rewrite.
+  if (!isMappedRole(currentRole)) return skip("unmanaged_role");
+
+  const isRaise = ROLE_RANK[role] > ROLE_RANK[currentRole];
+  // (5) lowering requires the current role to be one the mapping grants —
+  // the minimal provenance proxy for "SCIM assigned this".
+  if (!isRaise && !Object.values(map).includes(currentRole)) {
+    return skip("not_scim_managed");
   }
 
   await ctx.context.adapter.update({
@@ -401,10 +469,18 @@ async function recomputeAffected(
 
 const memberInputSchema = z.object({ value: z.string() });
 
+// Array bounds at the schema boundary (folded into M-04's remediation): a
+// `members`/`Operations` array was previously unbounded, and each *valid*
+// member id costs several sequential adapter calls plus an audit append and
+// a role recompute. The practical ceiling was the org's real member count,
+// but there is no reason to let a SCIM client submit more than this.
+const MAX_MEMBERS_PER_REQUEST = 2_000;
+const MAX_PATCH_OPERATIONS = 1_000;
+
 const createGroupBodySchema = z.object({
   displayName: z.string().min(1),
   externalId: z.string().optional(),
-  members: z.array(memberInputSchema).optional(),
+  members: z.array(memberInputSchema).max(MAX_MEMBERS_PER_REQUEST).optional(),
 });
 
 const replaceGroupBodySchema = createGroupBodySchema;
@@ -421,7 +497,7 @@ const patchOpSchema = z.object({
 
 const patchGroupBodySchema = z.object({
   schemas: z.array(z.string()).optional(),
-  Operations: z.array(patchOpSchema),
+  Operations: z.array(patchOpSchema).max(MAX_PATCH_OPERATIONS),
 });
 
 const listGroupsQuerySchema = z
@@ -748,6 +824,52 @@ function buildDeleteGroup(opts: EnterpriseOptions) {
   );
 }
 
+// --- entitlement gate for the whole SCIM v2 surface (M-03) ----------------
+
+/**
+ * `GATED_PATHS` (`../gate.ts`) covers `/scim/generate-token` — minting a SCIM
+ * token needs the `scim` feature — but nothing covered `/scim/v2/*` itself,
+ * so a token minted while entitled kept working forever: after an org was
+ * downgraded to zero features, an existing bearer still created (201) and
+ * listed (200) Groups, and still drove the role recompute. The same held for
+ * upstream's `/scim/v2/Users` endpoints.
+ *
+ * This global `hooks.before` closes that for every SCIM v2 path, ours and
+ * upstream's alike. The org comes from the bearer itself (`authenticateScimBearer`,
+ * which resolves the `scimProvider` row's `organizationId`) — never from the
+ * request body. A bearer that doesn't authenticate is *not* rejected here:
+ * the endpoint's own authentication answers 401 in its own SCIM error shape,
+ * and duplicating that would only change which layer says so.
+ */
+function buildScimFeatureGateHook() {
+  return {
+    matcher: (ctx: { path?: string }) => !!ctx.path && ctx.path.startsWith("/scim/v2/"),
+    handler: createAuthMiddleware(async (ctx) => {
+      const fullCtx = ctx as unknown as GenericEndpointContext;
+      let organizationId: string;
+      try {
+        ({ organizationId } = await authenticateScimBearer(fullCtx));
+      } catch {
+        return; // unauthenticated — the endpoint's own bearer check answers
+      }
+      try {
+        await requireFeature(fullCtx, organizationId, "scim");
+      } catch {
+        // SCIM-shaped body (RFC 7644 §3.12) so an IdP connector surfaces
+        // something it understands, with the better-auth `code` kept
+        // alongside for products that inspect it.
+        throw new APIError("FORBIDDEN", {
+          schemas: ["urn:ietf:params:scim:api:messages:2.0:Error"],
+          status: "403",
+          detail: "This organization is not entitled to SCIM provisioning.",
+          code: "FEATURE_NOT_ENTITLED",
+          message: "This organization is not entitled to SCIM provisioning.",
+        });
+      }
+    }),
+  };
+}
+
 // --- plugin -------------------------------------------------------------
 
 // No explicit `: BetterAuthPlugin` return-type annotation (client task-9 fix
@@ -779,6 +901,9 @@ export function scimGroups(opts: EnterpriseOptions) {
       scimReplaceGroup: buildReplaceGroup(opts),
       scimPatchGroup: buildPatchGroup(opts),
       scimDeleteGroup: buildDeleteGroup(opts),
+    },
+    hooks: {
+      before: [buildScimFeatureGateHook()],
     },
   } satisfies BetterAuthPlugin;
 }

@@ -399,19 +399,23 @@ describe("scimGroups plugin", () => {
     expect(deletedAudit.rows.length).toBe(1);
   });
 
+  // M-01 (security audit 2026-09-15): `groupRoleMap` may no longer map a
+  // group to "owner" (that was half of the admin→owner escalation), so this
+  // exercises the same "highest mapped role wins, and falls back rather than
+  // dropping straight to member" behaviour with admin/member.
   it("a user in two mapped groups keeps the higher role when removed from just one", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t);
     const { orgId } = await createOrg(t, cookie);
-    await setGroupRoleMap(t, cookie, orgId, { Admins: "admin", Owners: "owner" });
+    await setGroupRoleMap(t, cookie, orgId, { Admins: "admin", Everyone: "member" });
     const bearer = await mintScimToken(t, cookie, orgId);
     const userId = await createScimUser(t, bearer, "twogroups@acme.test");
 
     const admins = (await (
       await t.api.post("/scim/v2/Groups", { displayName: "Admins" }, bearer)
     ).json()) as { id: string };
-    const owners = (await (
-      await t.api.post("/scim/v2/Groups", { displayName: "Owners" }, bearer)
+    const everyone = (await (
+      await t.api.post("/scim/v2/Groups", { displayName: "Everyone" }, bearer)
     ).json()) as { id: string };
 
     const patchAdd = (groupId: string) =>
@@ -442,17 +446,15 @@ describe("scimGroups plugin", () => {
       return res.rows[0]!.role;
     };
 
+    expect((await patchAdd(everyone.id)).status).toBe(200);
+    expect(await roleOf()).toBe("member");
     expect((await patchAdd(admins.id)).status).toBe(200);
-    expect(await roleOf()).toBe("admin");
-    expect((await patchAdd(owners.id)).status).toBe(200);
-    expect(await roleOf()).toBe("owner"); // highest of {admin, owner} wins, still in both groups
+    expect(await roleOf()).toBe("admin"); // highest of {member, admin} wins, still in both groups
 
-    // Removing from "Owners" while still in "Admins" -> falls back to
-    // "admin", not all the way to "member". (This user isn't the org's sole
-    // owner at this point — the human org creator also holds "owner" — so
-    // the sole-owner guard doesn't block this demotion.)
-    const removeOwnersRes = await patchRemove(owners.id);
-    expect(removeOwnersRes.status).toBe(200);
+    // Removing from "Everyone" while still in "Admins" keeps "admin" — the
+    // role the *remaining* mapped group grants, not a blanket reset.
+    const removeEveryoneRes = await patchRemove(everyone.id);
+    expect(removeEveryoneRes.status).toBe(200);
     expect(await roleOf()).toBe("admin");
 
     const removeAdminsRes = await patchRemove(admins.id);
