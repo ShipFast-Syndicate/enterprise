@@ -255,6 +255,32 @@ describe("SSO test login (start + finish)", () => {
     expect(rows.rows.length).toBe(1);
   });
 
+  it("finish: the pending row is consumed — a replay with the same session fails with no_pending, and only one audit row ever exists", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    await registerProvider(t, cookie, orgId);
+    await verifyProviderDomain(t);
+    await startTestLogin(t, cookie, orgId);
+
+    const first = await t.api.get("/enterprise/sso/test-login/finish?providerId=okta", {
+      cookie,
+    });
+    expect(first.status).toBe(302);
+    expect(first.headers.get("location")).toBe("/?ab_sso_test=ok");
+
+    const replay = await t.api.get("/enterprise/sso/test-login/finish?providerId=okta", {
+      cookie,
+    });
+    expect(replay.status).toBe(302);
+    expect(redirectReason(replay)).toBe("no_pending");
+
+    const rows = await t.client.execute(
+      `SELECT * FROM audit_event WHERE action='sso.test_login_passed'`,
+    );
+    expect(rows.rows.length).toBe(1);
+  });
+
   it("finish: no session -> redirects with reason=no_session", async () => {
     const t = await makeAuth();
     const res = await t.api.get("/enterprise/sso/test-login/finish?providerId=okta");

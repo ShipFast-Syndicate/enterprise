@@ -61,11 +61,15 @@ async function upsertVerification(
   value: string,
   expiresAt: Date,
 ): Promise<void> {
+  await deleteVerification(ctx, identifier);
+  await ctx.context.internalAdapter.createVerificationValue({ identifier, value, expiresAt });
+}
+
+async function deleteVerification(ctx: GenericEndpointContext, identifier: string): Promise<void> {
   await ctx.context.adapter.deleteMany({
     model: "verification",
     where: [{ field: "identifier", value: identifier }],
   });
-  await ctx.context.internalAdapter.createVerificationValue({ identifier, value, expiresAt });
 }
 
 /**
@@ -93,6 +97,33 @@ interface SsoProviderRow {
   domain: string;
   domainVerified: boolean;
   samlConfig: string | null;
+}
+
+/**
+ * The ACS (assertion consumer service) URL for a SAML provider: the custom
+ * `samlConfig.callbackUrl` a caller registered with, if any — the same
+ * override upstream's own SAML flows honor (e.g. `${ctx.context.baseURL}/
+ * sso/saml2/sp/acs/${providerId}` is only ever the *fallback*,
+ * `node_modules/@better-auth/sso/dist/index.mjs`'s several `Location:
+ * parsedSamlConfig.callbackUrl || \`...sp/acs/${provider.providerId}\``
+ * sites) — else that default. `row.samlConfig` is the raw JSON string
+ * column (see `../types.ts`'s note on `ssoProvider`'s field types); parsed
+ * defensively since a malformed/legacy row should fall back rather than
+ * throw. Only ever reads `callbackUrl` (a plain URL, never secret
+ * material) off it — never returns the parsed object itself.
+ */
+function acsUrl(ctx: GenericEndpointContext, row: SsoProviderRow): string {
+  if (row.samlConfig) {
+    try {
+      const parsed = JSON.parse(row.samlConfig) as { callbackUrl?: unknown };
+      if (typeof parsed.callbackUrl === "string" && parsed.callbackUrl) {
+        return parsed.callbackUrl;
+      }
+    } catch {
+      // Malformed samlConfig JSON — fall through to the default below.
+    }
+  }
+  return `${ctx.context.baseURL}/sso/saml2/sp/acs/${row.providerId}`;
 }
 
 const providersQuerySchema = z.object({ orgId: z.string() });
@@ -131,7 +162,7 @@ function buildProvidersEndpoint() {
               value: verification?.value ?? null,
             },
             spMetadataUrl: `${ctx.context.baseURL}/sso/saml2/sp/metadata?providerId=${encodeURIComponent(row.providerId)}`,
-            acsUrl: `${ctx.context.baseURL}/sso/saml2/sp/acs/${row.providerId}`,
+            acsUrl: acsUrl(fullCtx, row),
             redirectUri: oidcRedirectUri(fullCtx, row.providerId),
             testLoginPassedAt: testLoginOk?.value ?? null,
             enforced: policy.ssoEnforced,
@@ -290,8 +321,17 @@ function buildTestLoginFinishEndpoint() {
       const session = await getSessionFromCtx(fullCtx).catch(() => null);
       if (!session) throw fail("no_session");
 
-      const pending = await findLiveVerification(fullCtx, `ab-sso-test:${providerId}`);
+      const pendingIdentifier = `ab-sso-test:${providerId}`;
+      const pending = await findLiveVerification(fullCtx, pendingIdentifier);
       if (!pending || pending.value !== session.user.id) throw fail("no_pending");
+
+      // Consumed the moment it's confirmed valid — on *both* the success
+      // path below and the `domain_mismatch` failure path, not only on
+      // success: a pending test-login row is single-use regardless of
+      // outcome, so it can't be replayed within its 10-minute TTL (e.g.
+      // retried after a domain fix) and can't produce a second
+      // `sso.test_login_passed` audit row for the same login attempt.
+      await deleteVerification(fullCtx, pendingIdentifier);
 
       const provider = await ctx.context.adapter.findOne<{
         domain: string;

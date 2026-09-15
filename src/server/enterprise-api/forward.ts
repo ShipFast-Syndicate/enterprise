@@ -46,6 +46,51 @@ import { router } from "better-auth/api";
 import type { GenericEndpointContext } from "better-auth";
 import type { Status } from "better-call";
 
+type ForwardingRouter = ReturnType<typeof router>;
+
+// Cached per `ctx.context.options` — the one piece of `AuthContext` that's
+// the exact same object reference across *every* request this auth instance
+// ever handles, as long as `baseURL` is a plain string (every consumer of
+// this package, and every test in this repo): `node_modules/better-auth/
+// dist/auth/base.mjs`'s `handler` only ever replaces `ctx.options` with a
+// new object when `baseURL` is a *dynamic* config. Building `router(...)`
+// re-derives the entire merged endpoint table (every plugin's endpoints,
+// each wrapped by `toAuthEndpoints`) and `better-call`'s route matcher from
+// scratch — real, repeated work otherwise done on every forwarded call.
+const routerCache = new WeakMap<object, ForwardingRouter>();
+
+/**
+ * Builds (once per auth instance) and reuses a `router()` for forwarding —
+ * *never* keyed to, or built from, the current request's own `ctx.context`
+ * object directly. That distinction is a correctness requirement, not just
+ * style: by the time our endpoint runs, `sessionMiddleware` has already
+ * written *this* caller's resolved session onto `ctx.context.session`, and
+ * `getSessionFromCtx` (`node_modules/better-auth/dist/api/routes/
+ * session.mjs`) short-circuits on it — `if (ctx.context.session) return
+ * ctx.context.session;` — for *any* dispatch seeded from that object.
+ * Caching a router bound to one request's `ctx.context` and reusing it for
+ * a *different* real request later would silently leak the first caller's
+ * session into the second caller's forwarded call. The snapshot below
+ * strips `session`/`returned`/`responseHeaders` before the router is ever
+ * cached, so every forwarded call instead re-derives its session fresh from
+ * the `cookie` header `forwardToAuth` already carries on every call
+ * regardless of caching — which is what we want either way.
+ */
+function getForwardingRouter(ctx: GenericEndpointContext): ForwardingRouter {
+  const options = ctx.context.options;
+  const cached = routerCache.get(options);
+  if (cached) return cached;
+  const snapshot = {
+    ...ctx.context,
+    session: null,
+    returned: undefined,
+    responseHeaders: undefined,
+  } as GenericEndpointContext["context"];
+  const built = router(snapshot, options);
+  routerCache.set(options, built);
+  return built;
+}
+
 /** Forwards `method path` through the same auth instance's own dispatch pipeline, carrying the caller's headers (cookie, origin). */
 export async function forwardToAuth(
   ctx: GenericEndpointContext,
@@ -53,7 +98,7 @@ export async function forwardToAuth(
   path: string,
   body?: unknown,
 ): Promise<Response> {
-  const { handler } = router(ctx.context, ctx.context.options);
+  const { handler } = getForwardingRouter(ctx);
   const headers = new Headers(ctx.headers ?? undefined);
   if (body !== undefined) headers.set("content-type", "application/json");
   const request = new Request(`${ctx.context.baseURL}${path}`, {
