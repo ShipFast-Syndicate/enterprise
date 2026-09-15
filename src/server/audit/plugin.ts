@@ -57,6 +57,12 @@ export const AUDITED_PATHS: Record<
   "/sign-in/social": { action: "auth.sign_in", targetType: "user" },
   "/sign-in/magic-link": { action: "auth.magic_link_requested", targetType: "user" },
   "/magic-link/verify": { action: "auth.sign_in", targetType: "user" },
+  // The action recorded here is the *successful*-sign-in one; the
+  // `hooks.after` handler below overrides both `action`/`targetType` at
+  // write time to `auth.sso_sign_in_failed`/`sso_provider` when the request
+  // didn't actually create a session (see `isSsoSignInSuccess` and its call
+  // site) — both paths redirect on *every* outcome (success and failure
+  // alike), so the static entry here can't distinguish them on its own.
   "/sso/callback/:providerId": { action: "auth.sso_sign_in", targetType: "user" },
   "/sso/saml2/sp/acs/:providerId": { action: "auth.sso_sign_in", targetType: "user" },
   "/sign-out": { action: "auth.sign_out", targetType: "user" },
@@ -213,22 +219,35 @@ function resolveRouteParamId(ctx: GenericEndpointContext): string | null {
   return params?.userId ?? params?.providerId ?? null;
 }
 
-// `/sso/callback/:providerId`/`/sso/saml2/sp/acs/:providerId` (Task 8): an
-// SSO sign-in callback carries no `organizationId` of its own in its body or
-// query — the caller isn't authenticated yet when the request starts, and a
-// freshly created session has no `activeOrganizationId` set on creation
-// either (only `/organization/set-active`/`/organization/create` do that).
+// `/sso/callback/:providerId`/`/sso/saml2/sp/acs/:providerId` (Task 8) share
+// this path-prefix test for two unrelated reasons: (1) `resolveOrgId` below
+// needs it because these callbacks carry no `organizationId` of their own in
+// body/query, and (2) the `hooks.after` handler needs it to know when to
+// apply the success/failure action split (see `isSsoSignInSuccess`). Both
+// patterns are matched with `startsWith` rather than an exact `in` check —
+// unlike `AUDITED_PATHS`'s own lookup — because `resolveRouteParamId`/this
+// prefix test also has to work against a *concrete* resolved path
+// (`/sso/callback/okta`), not only the registered pattern; see
+// `./enforcement.ts`'s header comment for the identical ambiguity.
+const SSO_CALLBACK_PATH_PREFIXES = ["/sso/callback/", "/sso/saml2/sp/acs"];
+
+function isSsoCallbackPath(path: string): boolean {
+  return SSO_CALLBACK_PATH_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
 // The org this audit entry belongs to is the one the *provider itself* is
 // bound to (`ssoProvider.organizationId`, set at `/sso/register` time),
 // resolved via the `providerId` route param both patterns share with the
-// generic `resolveRouteParamId` helper below.
-const SSO_CALLBACK_ORG_LOOKUP_PATHS = ["/sso/callback/", "/sso/saml2/sp/acs"];
-
+// generic `resolveRouteParamId` helper below — the caller isn't
+// authenticated yet when the request starts, and a freshly created session
+// has no `activeOrganizationId` set on creation either (only
+// `/organization/set-active`/`/organization/create` do that), so neither of
+// `resolveOrgId`'s other signals can find it.
 async function resolveSsoProviderOrgId(
   ctx: GenericEndpointContext,
   path: string,
 ): Promise<string | null> {
-  if (!SSO_CALLBACK_ORG_LOOKUP_PATHS.some((prefix) => path.startsWith(prefix))) return null;
+  if (!isSsoCallbackPath(path)) return null;
   const providerId = resolveRouteParamId(ctx);
   if (!providerId) return null;
   const provider = await ctx.context.adapter.findOne<{ organizationId: string | null }>({
@@ -257,6 +276,44 @@ async function resolveOrgId(
     null;
   if (direct) return direct;
   return resolveSsoProviderOrgId(ctx, ctx.path ?? "");
+}
+
+// Whether an SSO callback actually created a session — the one reliable
+// success/failure signal for these two paths, since both `processSAMLResponse`
+// and `handleOIDCCallback` (`@better-auth/sso@1.6.33`) finish via
+// `throw ctx.redirect(...)` on *every* outcome, success included
+// (`ctx.redirect` is itself `new APIError("FOUND", ...)`,
+// `node_modules/better-call/dist/error.mjs` — see the header comment on the
+// `newSession` fallback below for the full trace). A session is only ever
+// created just before that final redirect, via `setSessionCookie(ctx,
+// {session, user})`, which synchronously sets `ctx.context.newSession`
+// (`context.setNewSession`, `node_modules/better-auth/dist/cookies/
+// index.mjs`) — so its presence is a stronger signal than trying to parse
+// the redirect target itself (a successful redirect's target is caller
+// -supplied `callbackURL`/`idpInitiatedCallbackUrl`, which is free-form and
+// not guaranteed to omit an `error` key of its own).
+function isSsoSignInSuccess(ctx: { context: unknown }): boolean {
+  return !!(ctx.context as { newSession?: unknown }).newSession;
+}
+
+// The `error` query param off a failed callback's redirect `Location`
+// header, for `auth.sso_sign_in_failed`'s `metadata.error`. Only
+// `ctx.redirect(url)` populates `.headers` with a real `Headers` instance
+// (`headers.set("location", url)`, then `new APIError("FOUND", void 0,
+// headers)`) — a plain `new APIError("BAD_REQUEST", {...})` thrown directly
+// (no `redirect`) defaults `headers` to a plain `{}` object with no `.get`,
+// hence the `instanceof Headers` guard.
+function extractRedirectError(returned: unknown): string | null {
+  if (!isAPIError(returned)) return null;
+  const headers = (returned as { headers?: unknown }).headers;
+  if (!(headers instanceof Headers)) return null;
+  const location = headers.get("location");
+  if (!location) return null;
+  try {
+    return new URL(location, "http://localhost").searchParams.get("error");
+  } catch {
+    return null;
+  }
 }
 
 async function requireOwnerOrAdmin(ctx: GenericEndpointContext, orgId: string): Promise<void> {
@@ -492,21 +549,22 @@ export function auditLog(opts: EnterpriseOptions): BetterAuthPlugin {
         {
           matcher: (ctx) => !!ctx.path && auditEntryFor(ctx.path, ctx.request?.method) !== null,
           handler: createAuthMiddleware(async (ctx) => {
-            const entry = auditEntryFor(ctx.path as string, ctx.request?.method);
+            const path = ctx.path as string;
+            const entry = auditEntryFor(path, ctx.request?.method);
             if (!entry) return;
 
             const returned = ctx.context.returned;
-            // `ctx.redirect(...)` (`node_modules/better-call/dist/error.mjs`)
-            // is implemented as `new APIError("FOUND", ...)` — a *successful*
-            // 302 represented as an `APIError` instance under the hood, the
-            // same as a genuine 4xx/5xx failure. `isAPIError(returned)` alone
-            // can't tell them apart, and both `/sso/callback/:providerId` and
-            // `/sso/saml2/sp/acs/:providerId` (Task 8) always finish via
-            // `ctx.redirect(...)` on their success path — so a bare
-            // `isAPIError` check here would skip auditing every successful
-            // SSO sign-in, not just failed ones. Only `statusCode >= 400` is
-            // an actual failure; 3xx is audited like any other success.
-            if (isAPIError(returned) && returned.statusCode >= 400) return;
+            const ssoCallback = isSsoCallbackPath(path);
+            // Every other audited path returns its normal JSON/Response
+            // shape on success and only ever produces an `APIError` on a
+            // genuine failure — `isAPIError` alone is the right "did this
+            // fail" test for them, same as before Task 8. The two SSO
+            // callback paths are the sole exception (see
+            // `isSsoSignInSuccess`'s header comment): they route success
+            // *and* failure through `ctx.redirect(...)`, itself an
+            // `APIError`, so they're excluded from this check and handled
+            // by the success/failure branch below instead.
+            if (!ssoCallback && isAPIError(returned)) return;
 
             const fullCtx = ctx as unknown as GenericEndpointContext;
             // `getSessionFromCtx` re-derives the session from the *inbound*
@@ -531,24 +589,37 @@ export function auditLog(opts: EnterpriseOptions): BetterAuthPlugin {
             const orgId = await resolveOrgId(fullCtx, session);
             if (!orgId) {
               ctx.context.logger.warn(
-                `enterprise-audit: no organization id resolvable for ${ctx.path}; skipping audit write`,
+                `enterprise-audit: no organization id resolvable for ${path}; skipping audit write`,
               );
               return;
             }
 
+            // A failed SSO sign-in (tampered/wrong-key SAML response, the
+            // SCIM-required JIT gate, an unknown provider, ...) is audited
+            // as its own `auth.sso_sign_in_failed` action rather than either
+            // silently dropped or mis-recorded as `auth.sso_sign_in` with a
+            // fabricated actor — a null-actor "successful" sign-in row would
+            // both under-report real attacks in the log and be
+            // indistinguishable from a data-integrity bug.
+            const ssoFailed = ssoCallback && !isSsoSignInSuccess(ctx);
+            const action = ssoFailed ? "auth.sso_sign_in_failed" : entry.action;
+            const targetType = ssoFailed ? "sso_provider" : entry.targetType;
+
             const scimProvider = (ctx.context as unknown as { scimProvider?: unknown })
               .scimProvider;
-            const actorId = resolveActorId(returned, session);
+            const actorId = ssoFailed ? null : resolveActorId(returned, session);
             const input: AuditInput = {
               orgId,
-              actorType: scimProvider ? "scim" : "user",
+              actorType: ssoFailed ? "system" : scimProvider ? "scim" : "user",
               actorId,
-              action: entry.action,
-              targetType: entry.targetType,
-              targetId: resolveTargetId(returned, resolveRouteParamId(fullCtx), actorId),
+              action,
+              targetType,
+              targetId: ssoFailed
+                ? resolveRouteParamId(fullCtx)
+                : resolveTargetId(returned, resolveRouteParamId(fullCtx), actorId),
               ip: ctx.request ? (getIp(ctx.request, ctx.context.options) ?? null) : null,
               userAgent: ctx.request?.headers.get("user-agent") ?? null,
-              metadata: {},
+              metadata: ssoFailed ? { error: extractRedirectError(returned) } : {},
             };
 
             try {

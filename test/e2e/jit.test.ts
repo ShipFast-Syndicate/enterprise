@@ -14,40 +14,8 @@
 // (e) "SSO only for SCIM-active users" (`src/server/policy/scim-required.ts`).
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getNoRedirect, startOidcIssuer, type OidcIssuer } from "../helpers/oidc-issuer";
+import { registerOidcProvider } from "../helpers/sso";
 import { createOrg, extractCookie, makeAuth, signUpOwner, type TestAuth } from "../helpers/auth";
-
-async function registerOidcProvider(
-  t: TestAuth,
-  cookie: string,
-  orgId: string,
-  issuer: OidcIssuer,
-  providerId: string,
-  domain = "acme.test",
-) {
-  const res = await t.api.post(
-    "/sso/register",
-    {
-      providerId,
-      issuer: issuer.issuerUrl,
-      domain,
-      organizationId: orgId,
-      oidcConfig: {
-        clientId: issuer.clientId,
-        clientSecret: issuer.clientSecret,
-        skipDiscovery: true,
-        authorizationEndpoint: issuer.authorizationEndpoint,
-        tokenEndpoint: issuer.tokenEndpoint,
-        jwksEndpoint: issuer.jwksEndpoint,
-      },
-    },
-    { cookie },
-  );
-  if (!res.ok) throw new Error(`register failed: ${res.status} ${await res.text()}`);
-  await t.client.execute({
-    sql: `UPDATE "ssoProvider" SET domainVerified = 1 WHERE providerId = ?`,
-    args: [providerId],
-  });
-}
 
 /** Drives `/sign-in/sso` -> issuer `/authorize` -> `/sso/callback/:providerId`, returning the callback's raw Response (never asserts success — the SCIM-required test needs to inspect a failure redirect). */
 async function driveSsoSignIn(t: TestAuth, issuer: OidcIssuer, providerId: string) {
@@ -162,6 +130,31 @@ describe("SSO only for SCIM-active users (SCIM_PROVISIONING_REQUIRED)", () => {
       args: [email],
     });
     expect(userRows.rows.length).toBe(0);
+
+    // A blocked JIT is audited as a failed sign-in, never as a successful
+    // one — no session was created, so there's no user to (mis)attribute a
+    // `auth.sso_sign_in` row to.
+    const signInRows = await t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE action = 'auth.sso_sign_in' AND org_id = ?`,
+      args: [orgId],
+    });
+    expect(signInRows.rows.length).toBe(0);
+    const failedRows = await t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE action = 'auth.sso_sign_in_failed' AND org_id = ?`,
+      args: [orgId],
+    });
+    expect(failedRows.rows.length).toBe(1);
+    expect(failedRows.rows[0]!.actor_type).toBe("system");
+    expect(failedRows.rows[0]!.actor_id).toBeNull();
+    expect(failedRows.rows[0]!.target_type).toBe("sso_provider");
+    expect(failedRows.rows[0]!.target_id).toBe("oidc-scim-gate");
+    // `handleOAuthUserInfo` (`node_modules/better-auth/dist/oauth2/
+    // link-account.mjs`) catches our hook's thrown `APIError` and surfaces
+    // `e.message` (the human-readable `message`, not `code`) as `linked.
+    // error`, which `handleOIDCCallback` then puts straight into the
+    // redirect's `error=` query param — so that's what ends up here too.
+    const metadata = JSON.parse(failedRows.rows[0]!.metadata as string) as { error?: string };
+    expect(metadata.error).toBe("Your account was not provisioned by your IT admin");
   });
 
   it("does not block JIT for an org with no SCIM provider (control case)", async () => {

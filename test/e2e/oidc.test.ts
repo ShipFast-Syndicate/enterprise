@@ -2,9 +2,10 @@
 // in-process issuer (`test/helpers/oidc-issuer.ts`), driven through real
 // upstream `@better-auth/sso` code paths (`/sign-in/sso`, `/sso/callback/
 // :providerId`) — no mocking of better-auth itself. Controller ruling (b).
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getNoRedirect, startOidcIssuer, type OidcIssuer } from "../helpers/oidc-issuer";
-import { createOrg, extractCookie, makeAuth, signUpOwner, type TestAuth } from "../helpers/auth";
+import { registerOidcProvider } from "../helpers/sso";
+import { createOrg, extractCookie, makeAuth, signUpOwner } from "../helpers/auth";
 
 describe("OIDC end-to-end sign-in", () => {
   let issuer: OidcIssuer;
@@ -17,42 +18,12 @@ describe("OIDC end-to-end sign-in", () => {
     await issuer.close();
   });
 
-  async function registerProvider(
-    t: TestAuth,
-    cookie: string,
-    orgId: string,
-    providerId = "oidc-e2e",
-  ) {
-    const res = await t.api.post(
-      "/sso/register",
-      {
-        providerId,
-        issuer: issuer.issuerUrl,
-        domain: "acme.test",
-        organizationId: orgId,
-        oidcConfig: {
-          clientId: issuer.clientId,
-          clientSecret: issuer.clientSecret,
-          skipDiscovery: true,
-          authorizationEndpoint: issuer.authorizationEndpoint,
-          tokenEndpoint: issuer.tokenEndpoint,
-          jwksEndpoint: issuer.jwksEndpoint,
-        },
-      },
-      { cookie },
-    );
-    if (!res.ok) throw new Error(`register failed: ${res.status} ${await res.text()}`);
-    await t.client.execute({
-      sql: `UPDATE "ssoProvider" SET domainVerified = 1 WHERE providerId = ?`,
-      args: [providerId],
-    });
-  }
-
-  it("full code flow: sign-in -> issuer -> callback -> session -> member(role=member) -> audit row", async () => {
-    const t = await makeAuth({ trustedOrigins: [issuer.issuerUrl] });
+  it("full code flow: sign-in -> issuer -> callback -> session -> member(role=member) -> audit row -> provisionUser called", async () => {
+    const provisionUser = vi.fn();
+    const t = await makeAuth({ trustedOrigins: [issuer.issuerUrl], provisionUser });
     const { cookie: ownerCookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, ownerCookie);
-    await registerProvider(t, ownerCookie, orgId);
+    await registerOidcProvider(t, ownerCookie, orgId, issuer, "oidc-e2e");
 
     const email = "newemployee@acme.test";
     issuer.setUser({ sub: "employee-1", email });
@@ -100,5 +71,14 @@ describe("OIDC end-to-end sign-in", () => {
       args: [session.user.id],
     });
     expect(auditRows.rows.length).toBe(1);
+
+    // `enterprisePreset` forwards `opts.provisionUser` verbatim into
+    // `sso({ provisionUser })` — it must fire once, for this new user, on
+    // the SSO-driven signup (`processOIDCCallback` calls it when
+    // `linked.isRegister` is true, `node_modules/@better-auth/sso/dist/
+    // index.mjs`).
+    expect(provisionUser).toHaveBeenCalledTimes(1);
+    const call = provisionUser.mock.calls[0]![0] as { user: { email: string } };
+    expect(call.user.email).toBe(email);
   });
 });

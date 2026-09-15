@@ -3,44 +3,10 @@
 // upstream ACS (`/sso/saml2/sp/acs/:providerId`) — no mocking of
 // `@better-auth/sso`/samlify. Controller ruling (c).
 import { describe, expect, it } from "vitest";
-import { IDP_CERT, SP_KEY } from "../helpers/fixtures/saml-keys";
-import { mintSamlResponse, tamperSamlResponse, TEST_IDP_ENTITY_ID } from "../helpers/saml-idp";
-import { createOrg, extractCookie, makeAuth, signUpOwner, type TestAuth } from "../helpers/auth";
-
-const BASE_URL = "http://localhost:3000/api/auth";
-
-async function registerSamlProvider(
-  t: TestAuth,
-  cookie: string,
-  orgId: string,
-  providerId: string,
-) {
-  const acsUrl = `${BASE_URL}/sso/saml2/sp/acs/${providerId}`;
-  const spEntityID = `${BASE_URL}/sso/saml2/sp/${providerId}`;
-
-  const res = await t.api.post(
-    "/sso/register",
-    {
-      providerId,
-      issuer: TEST_IDP_ENTITY_ID,
-      domain: "acme.test",
-      organizationId: orgId,
-      samlConfig: {
-        entryPoint: `${TEST_IDP_ENTITY_ID}/sso`,
-        cert: IDP_CERT,
-        callbackUrl: acsUrl,
-        spMetadata: { entityID: spEntityID },
-      },
-    },
-    { cookie },
-  );
-  if (!res.ok) throw new Error(`register failed: ${res.status} ${await res.text()}`);
-  await t.client.execute({
-    sql: `UPDATE "ssoProvider" SET domainVerified = 1 WHERE providerId = ?`,
-    args: [providerId],
-  });
-  return { acsUrl, spEntityID };
-}
+import { SP_KEY } from "../helpers/fixtures/saml-keys";
+import { mintSamlResponse, tamperSamlResponse } from "../helpers/saml-idp";
+import { registerSamlProvider } from "../helpers/sso";
+import { createOrg, extractCookie, makeAuth, signUpOwner } from "../helpers/auth";
 
 describe("SAML end-to-end (IdP-initiated)", () => {
   it("register -> SP metadata -> signed response -> 302 + session -> member(role=member) -> audit row", async () => {
@@ -86,7 +52,7 @@ describe("SAML end-to-end (IdP-initiated)", () => {
     expect(auditRows.rows.length).toBe(1);
   });
 
-  it("a tampered response is rejected: redirects with error= and creates no session", async () => {
+  it("a tampered response is rejected: redirects with error=, no session, and an auth.sso_sign_in_failed row (not auth.sso_sign_in)", async () => {
     const t = await makeAuth();
     const { cookie: ownerCookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, ownerCookie);
@@ -110,9 +76,24 @@ describe("SAML end-to-end (IdP-initiated)", () => {
       args: [email, "attacker@acme.test"],
     });
     expect(userRows.rows.length).toBe(0);
+
+    const signInRows = await t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE action = 'auth.sso_sign_in' AND org_id = ?`,
+      args: [orgId],
+    });
+    expect(signInRows.rows.length).toBe(0);
+    const failedRows = await t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE action = 'auth.sso_sign_in_failed' AND org_id = ?`,
+      args: [orgId],
+    });
+    expect(failedRows.rows.length).toBe(1);
+    expect(failedRows.rows[0]!.actor_type).toBe("system");
+    expect(failedRows.rows[0]!.actor_id).toBeNull();
+    expect(failedRows.rows[0]!.target_type).toBe("sso_provider");
+    expect(failedRows.rows[0]!.target_id).toBe(providerId);
   });
 
-  it("a response signed with the wrong key is rejected: redirects with error=", async () => {
+  it("a response signed with the wrong key is rejected: redirects with error=, no session, and an auth.sso_sign_in_failed row (not auth.sso_sign_in)", async () => {
     const t = await makeAuth();
     const { cookie: ownerCookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, ownerCookie);
@@ -140,5 +121,20 @@ describe("SAML end-to-end (IdP-initiated)", () => {
       args: [email],
     });
     expect(userRows.rows.length).toBe(0);
+
+    const signInRows = await t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE action = 'auth.sso_sign_in' AND org_id = ?`,
+      args: [orgId],
+    });
+    expect(signInRows.rows.length).toBe(0);
+    const failedRows = await t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE action = 'auth.sso_sign_in_failed' AND org_id = ?`,
+      args: [orgId],
+    });
+    expect(failedRows.rows.length).toBe(1);
+    expect(failedRows.rows[0]!.actor_type).toBe("system");
+    expect(failedRows.rows[0]!.actor_id).toBeNull();
+    expect(failedRows.rows[0]!.target_type).toBe("sso_provider");
+    expect(failedRows.rows[0]!.target_id).toBe(providerId);
   });
 });
