@@ -265,6 +265,7 @@ export async function makeAuth(
   const api = {
     post: withBody("POST"),
     patch: withBody("PATCH"),
+    put: withBody("PUT"),
     get: (path: string, headers: ApiHeaders = {}) =>
       auth.handler(
         new Request(`http://localhost:3000/api/auth${path}`, {
@@ -276,6 +277,25 @@ export async function makeAuth(
         new Request(`http://localhost:3000/api/auth${path}`, {
           method: "DELETE",
           headers: { origin: "http://localhost:3000", ...headers },
+        }),
+      ),
+    // Raw-`Request` escape hatch for Task 6's scimGroups tests: a method
+    // not covered by a dedicated helper above, and/or a content type other
+    // than the `withBody`/`get`/`delete` helpers' hardcoded
+    // `application/json` (`@better-auth/scim`'s own
+    // `supportedMediaTypes` accepts `application/scim+json` too, and this
+    // plugin's every *response* uses it — ruling (b) — so tests want to be
+    // able to send it as a request content type as well).
+    request: (method: string, path: string, body?: unknown, headers: ApiHeaders = {}) =>
+      auth.handler(
+        new Request(`http://localhost:3000/api/auth${path}`, {
+          method,
+          headers: {
+            ...(body !== undefined ? { "content-type": "application/json" } : {}),
+            origin: "http://localhost:3000",
+            ...headers,
+          },
+          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         }),
       ),
   };

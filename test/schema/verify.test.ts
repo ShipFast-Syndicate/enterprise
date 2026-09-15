@@ -17,20 +17,20 @@ describe("verifyDatabase", () => {
 
     expect(ok).toBe(false);
     const keys = missing.map((m) => (m.column ? `${m.table}.${m.column}` : m.table));
-    // `audit_event` and (as of Task 5) `org_policy` are *not* expected here
-    // (unlike `scim_group`, still plugin-less): Task 4's `auditLog` plugin
-    // and Task 5's `orgPolicy` plugin each declare a `schema` for their own
-    // table (`src/server/audit/plugin.ts`, `src/server/policy/plugin.ts`),
-    // so `runMigrations` above — which derives its DDL from
-    // `getAuthTables()`, the same introspection a real `better-auth
-    // generate`/migration run uses — already creates both, the same way it
-    // already creates `user`/`organization` before this package's own
-    // migration adds `studio_ref`.
-    expect(keys).toEqual(
-      expect.arrayContaining(["scim_group", "user.studio_ref", "organization.studio_ref"]),
-    );
+    // `audit_event`, (as of Task 5) `org_policy`, and (as of Task 6)
+    // `scim_group` are *not* expected here: Task 4's `auditLog` plugin,
+    // Task 5's `orgPolicy` plugin, and Task 6's `scimGroups` plugin each
+    // declare a `schema` for their own table (`src/server/audit/plugin.ts`,
+    // `src/server/policy/plugin.ts`, `src/server/scim-groups/plugin.ts`), so
+    // `runMigrations` above — which derives its DDL from `getAuthTables()`,
+    // the same introspection a real `better-auth generate`/migration run
+    // uses — already creates all three, the same way it already creates
+    // `user`/`organization` before this package's own migration adds
+    // `studio_ref`.
+    expect(keys).toEqual(expect.arrayContaining(["user.studio_ref", "organization.studio_ref"]));
     expect(keys).not.toContain("audit_event");
     expect(keys).not.toContain("org_policy");
+    expect(keys).not.toContain("scim_group");
     // and nothing else besides studio_ref is missing off `user`/`organization`
     // — the base upstream DDL already has every other tracked column.
     expect(missing.filter((m) => m.table === "user")).toEqual([
