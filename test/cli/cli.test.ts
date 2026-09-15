@@ -5,11 +5,13 @@
 // end to end, not just the TS source.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient } from "@libsql/client";
+import { drizzle } from "drizzle-orm/libsql";
+import { migrate } from "drizzle-orm/libsql/migrator";
 import { applyMigration } from "../../src/schema";
 import { baseAuthOptions as baseOptions, runMigrations } from "../helpers/auth";
 import { hashRow, type AuditRowForHash } from "../../src/server/audit/chain";
@@ -150,7 +152,7 @@ describe("ab-enterprise CLI (built binary)", () => {
     client.close();
   });
 
-  it("migrate --out copies the SQL as the next-numbered migration file", () => {
+  it("migrate --out writes the SQL as the next-numbered migration file", () => {
     const outDir = join(workDir, "migrations");
     const first = runCli(["migrate", "--out", outDir]);
     expect(first.status).toBe(0);
@@ -163,5 +165,100 @@ describe("ab-enterprise CLI (built binary)", () => {
     const copied = readFileSync(join(outDir, "0000_enterprise.sql"), "utf8");
     expect(copied).toMatch(/CREATE TABLE IF NOT EXISTS org_policy/);
     expect(copied).toMatch(/ALTER TABLE user ADD COLUMN studio_ref TEXT/);
+    // The source file's own header survives — the markers are inserted, the
+    // file is not regenerated from stripped statements.
+    expect(copied).toMatch(/Alpha Bros enterprise layer — migration 0001/);
+    // One `--> statement-breakpoint` between statements, none trailing (a
+    // trailing one leaves drizzle with an empty statement to run).
+    expect(copied.trimEnd().endsWith("--> statement-breakpoint")).toBe(false);
+    expect(copied.split("--> statement-breakpoint").length - 1).toBe(copied.split(";").length - 2);
+
+    // With no journal in the target dir, the command says how to apply it.
+    expect(first.stdout).toMatch(/no drizzle meta\/_journal\.json/);
+  });
+
+  // I-6 — `migrate` used to drop a `.sql` file into the product's migrations
+  // folder and write nothing to `meta/_journal.json`, which is the only thing
+  // `drizzle-kit migrate` reads to decide what to apply. The file was silently
+  // skipped. This drives the real drizzle migrator over a real journal to
+  // prove the output is picked up and applied, rather than asserting on the
+  // journal's shape alone.
+  describe("migrate into a drizzle migrations folder", () => {
+    function seedJournalDir(name: string): string {
+      const dir = join(workDir, name);
+      mkdirSync(join(dir, "meta"), { recursive: true });
+      // A stand-in for the product's own first migration. `IF NOT EXISTS`
+      // because the apply test below creates the full upstream better-auth
+      // schema on the same database first (so `ab-enterprise verify` has
+      // something complete to check) and this entry then no-ops.
+      writeFileSync(
+        join(dir, "0000_base.sql"),
+        `CREATE TABLE IF NOT EXISTS user (id TEXT PRIMARY KEY);\n--> statement-breakpoint\nCREATE TABLE IF NOT EXISTS organization (id TEXT PRIMARY KEY);\n`,
+      );
+      writeFileSync(
+        join(dir, "meta", "_journal.json"),
+        `${JSON.stringify(
+          {
+            version: "7",
+            dialect: "sqlite",
+            entries: [
+              {
+                idx: 0,
+                version: "6",
+                when: 1_700_000_000_000,
+                tag: "0000_base",
+                breakpoints: true,
+              },
+            ],
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      return dir;
+    }
+
+    it("appends a journal entry (and no snapshot, which migrate never reads)", () => {
+      const dir = seedJournalDir("drizzle-journal");
+
+      const result = runCli(["migrate", "--out", dir]);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/registered 0001_enterprise in/);
+
+      const journal = JSON.parse(readFileSync(join(dir, "meta", "_journal.json"), "utf8")) as {
+        entries: Array<Record<string, unknown>>;
+      };
+      expect(journal.entries.length).toBe(2);
+      expect(journal.entries[1]).toMatchObject({
+        idx: 1,
+        version: "6",
+        tag: "0001_enterprise",
+        breakpoints: true,
+      });
+      expect(typeof journal.entries[1]!.when).toBe("number");
+      expect(Number(journal.entries[1]!.when)).toBeGreaterThan(1_700_000_000_000);
+      expect(existsSync(join(dir, "meta", "0001_snapshot.json"))).toBe(false);
+    });
+
+    it("the real drizzle migrator then applies it — ab-enterprise verify exits 0", async () => {
+      const dir = seedJournalDir("drizzle-apply");
+      expect(runCli(["migrate", "--out", dir]).status).toBe(0);
+
+      // The product's own better-auth schema first — `ab-enterprise verify`
+      // checks every EXPECTED_TABLES entry, upstream ones included, so this is
+      // what makes its exit code a statement about *our* migration.
+      const dbPath = join(workDir, "drizzle-apply.db");
+      const client = createClient({ url: `file:${dbPath}` });
+      await runMigrations({ options: baseOptions() }, client);
+      // The real drizzle migrator, reading the journal `migrate` just wrote.
+      await migrate(drizzle(client), { migrationsFolder: dir });
+      const columns = await client.execute(`PRAGMA table_info("user")`);
+      expect(columns.rows.some((row) => String(row.name) === "studio_ref")).toBe(true);
+      client.close();
+
+      const result = runCli(["verify", "--url", `file:${dbPath}`]);
+      expect(result.stdout.trim()).toBe("");
+      expect(result.status).toBe(0);
+    });
   });
 });

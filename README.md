@@ -283,9 +283,19 @@ Node-only (reads/writes the local filesystem and talks to libSQL directly) — r
 deploy step or locally, not from an edge/Workers runtime:
 
 ```sh
-# Copy this package's SQL migration into your product's drizzle migrations
-# folder, numbered to follow whatever's already there.
+# Write this package's SQL migration into your product's drizzle migrations
+# folder, numbered to follow whatever's already there. If the folder has a
+# drizzle `meta/_journal.json`, the new file is registered in it too — that
+# journal is the only thing `drizzle-kit migrate` reads to decide what to
+# apply, so a file dropped in without an entry is silently skipped. Statements
+# are separated by `--> statement-breakpoint`, which is what lets drizzle run
+# them one at a time; it is an ordinary SQL comment everywhere else.
 ab-enterprise migrate --out ./drizzle/migrations
+
+# No journal in the target folder? The command says so, and the supported
+# application paths are `applyMigration()` from `@alphabros/enterprise/schema`
+# or `turso db shell <db> < ./drizzle/migrations/NNNN_enterprise.sql`. Either
+# way, `ab-enterprise verify` below is the backstop that proves it landed.
 
 # Check a LIVE database has every table/column this package expects.
 # Exits 1 and prints one line per gap if anything is missing.
