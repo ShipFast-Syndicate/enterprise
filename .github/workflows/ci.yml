@@ -1,7 +1,10 @@
 name: CI
 on:
+  push:
+    branches: [main, develop]
   pull_request:
-  push: { branches: [develop, main] }
+    branches: [main, develop]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,6 +13,10 @@ permissions:
   issues: write
   actions: read
   statuses: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   ci:
@@ -24,4 +31,14 @@ jobs:
       build-matrix: '[{"target":"npm","command":"pnpm build","env":"","allow-failure":false}]'
       run-e2e: false
       run-migration-dry-run: false
-    secrets: inherit
+    secrets:
+      STUDIO_ARTIFACT_S3: ${{ secrets.STUDIO_ARTIFACT_S3 }}
+      REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
+      REVIEWER_APP_PRIVATE_KEY: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+      AUDITS_TG_BOT_TOKEN: ${{ secrets.AUDITS_TG_BOT_TOKEN }}
+      AUDITS_TG_CHAT_ID: ${{ secrets.AUDITS_TG_CHAT_ID }}
+      AUDITS_TG_TOPIC_ID: ${{ secrets.AUDITS_TG_TOPIC_ID }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+      VERCEL_PROTECTION_BYPASS: ${{ secrets.VERCEL_PROTECTION_BYPASS }}
