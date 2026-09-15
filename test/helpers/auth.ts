@@ -211,7 +211,19 @@ export function baseAuthOptions(): BetterAuthOptions {
 type ApiHeaders = Record<string, string>;
 
 export async function makeAuth(
-  overrides: Partial<EnterpriseOptions> & { plugins?: BetterAuthPlugin[] } = {},
+  overrides: Partial<EnterpriseOptions> & {
+    plugins?: BetterAuthPlugin[];
+    // Task 8's SAML/OIDC e2e tests run a real in-process OIDC issuer
+    // (`test/helpers/oidc-issuer.ts`) on a loopback origin.
+    // `@better-auth/sso`'s own SSRF guard (`assertOIDCEndpointsResolvePublic`/
+    // `validateSkipDiscoveryEndpoint`) re-validates every OIDC endpoint as a
+    // "publicly routable host" on every `/sign-in/sso` call and callback —
+    // a loopback origin fails that check unless it's in `trustedOrigins`, so
+    // those tests pass `[issuer.issuerUrl]` here. Unused by every other
+    // caller (better-auth defaults `trustedOrigins` to just the configured
+    // `baseURL` when this is omitted).
+    trustedOrigins?: string[];
+  } = {},
 ) {
   const entitled = new Set<Feature>([
     "sso",
@@ -233,6 +245,7 @@ export async function makeAuth(
     emailAndPassword: { enabled: true },
     rateLimit: TEST_RATE_LIMIT,
     plugins: [...enterprisePreset(opts), ...(overrides.plugins ?? [])],
+    ...(overrides.trustedOrigins ? { trustedOrigins: overrides.trustedOrigins } : {}),
   };
 
   const { drizzleSchema, ddl } = buildDynamicSchema(baseOptions);
@@ -298,6 +311,22 @@ export async function makeAuth(
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         }),
       ),
+    // `application/x-www-form-urlencoded` POST — Task 8's SAML ACS
+    // (`/sso/saml2/sp/acs/:providerId`) is posted a `SAMLResponse`/
+    // `RelayState` form body the way a real IdP's browser-redirect POST
+    // binding would, not JSON.
+    postForm: (path: string, form: Record<string, string>, headers: ApiHeaders = {}) =>
+      auth.handler(
+        new Request(`http://localhost:3000/api/auth${path}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            origin: "http://localhost:3000",
+            ...headers,
+          },
+          body: new URLSearchParams(form).toString(),
+        }),
+      ),
   };
 
   return { auth, db, client, api, entitled };
@@ -305,7 +334,7 @@ export async function makeAuth(
 
 export type TestAuth = Awaited<ReturnType<typeof makeAuth>>;
 
-function extractCookie(res: Response): string {
+export function extractCookie(res: Response): string {
   const setCookies = res.headers.getSetCookie();
   return setCookies.map((raw) => raw.split(";")[0]).join("; ");
 }

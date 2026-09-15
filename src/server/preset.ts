@@ -21,10 +21,34 @@
 // `emailAndPassword` is a core `betterAuth()` option rather than something
 // this preset turns on.
 //
-// `EnterpriseOptions.provisionUser` is plumbed onto the type in this task
-// (see `./types.ts`) for a later task to wire into the `sso()` call below;
-// per the controller ruling for this task, the `sso()` options here are
-// exactly `domainVerification` + `organizationProvisioning`, nothing more.
+// Task 8 finalises the `sso()` call: `disableImplicitSignUp: false` (JIT
+// account creation is on — paired with `organizationProvisioning` below, a
+// user signing in through a verified SSO provider both gets an account *and*
+// joins the provider's org in one step) and `provisionUser: opts.provisionUser`
+// (forwarded verbatim so a product's own provisioning hook — CRM sync,
+// welcome email, whatever — runs on every SSO-driven signup, per `./types.ts`'s
+// header comment on why this field is plumbed through `EnterpriseOptions`
+// rather than configured directly). `saml: { allowIdpInitiated: true }` is
+// upstream's *default* already (`options?.saml?.allowIdpInitiated !== false`,
+// verified against the pinned `@better-auth/sso@1.6.33`) — set explicitly so
+// the intent (this preset accepts unsolicited, IdP-initiated SAML responses,
+// not only SP-initiated ones) is visible here rather than relying on a
+// default that could change upstream, and so the SAML e2e test
+// (`test/e2e/saml.test.ts`) that exercises exactly that flow doesn't depend
+// on an implicit default.
+//
+// `opts.samlSpKeys` is deliberately NOT threaded into this `sso()` call:
+// `SSOOptions.saml` (`@better-auth/sso@1.6.33`) has no `spMetadata` (or any
+// other SP-identity) field at all — verified directly against
+// `node_modules/@better-auth/sso/dist/index-CMcY1z4e.d.mts`'s `SSOOptions`
+// interface — only a *per-provider* `samlConfig.spMetadata` exists, set at
+// `/sso/register` time for that one org's connection, not at the plugin
+// level for every org at once. `samlSpKeys` therefore stays exactly where an
+// earlier task left it: a value on `EnterpriseOptions` (`./types.ts`) a
+// product can read when it builds its own `/sso/register` (or
+// `/enterprise/sso/register`, `./enterprise-api/sso.ts`) request body, to
+// reuse one shared SP signing identity across every org's SAML connection
+// instead of generating a fresh key pair per org.
 //
 // `scim({ providerOwnership: { enabled: true } })`: `@better-auth/scim`
 // below 1.7 has an unpatched HIGH advisory (GHSA-j8v8-g9cx-5qf4) — a SCIM
@@ -59,6 +83,9 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
     sso({
       domainVerification: { enabled: true },
       organizationProvisioning: { disabled: false, defaultRole: "member" },
+      disableImplicitSignUp: false,
+      provisionUser: opts.provisionUser,
+      saml: { allowIdpInitiated: true },
     }),
     scim({ storeSCIMToken: "hashed", providerOwnership: { enabled: true } }),
     enterpriseGate(opts),

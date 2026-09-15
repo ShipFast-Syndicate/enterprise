@@ -40,6 +40,7 @@ import type { EnterpriseOptions } from "../types";
 import { buildDeprovisionAfterHook } from "./deprovision";
 import { buildSessionCreateBeforeHook, buildSignInBeforeHook } from "./enforcement";
 import { findOrgByEmailDomain, HOME_REALM_RATE_LIMIT, homeRealmEndpoint } from "./home-realm";
+import { buildScimRequiredUserCreateBeforeHook } from "./scim-required";
 import {
   ALLOWED_METHOD_VALUES,
   findPolicyRow,
@@ -290,6 +291,13 @@ export function orgPolicy(opts: EnterpriseOptions): BetterAuthPlugin {
             session: {
               create: {
                 before: buildSessionCreateBeforeHook(),
+              },
+            },
+            // Task 8, controller ruling (e): "SSO only for SCIM-active
+            // users" — see `./scim-required.ts`'s header comment.
+            user: {
+              create: {
+                before: buildScimRequiredUserCreateBeforeHook(),
               },
             },
           },

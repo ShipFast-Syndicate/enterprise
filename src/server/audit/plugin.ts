@@ -213,24 +213,50 @@ function resolveRouteParamId(ctx: GenericEndpointContext): string | null {
   return params?.userId ?? params?.providerId ?? null;
 }
 
-function resolveOrgId(
+// `/sso/callback/:providerId`/`/sso/saml2/sp/acs/:providerId` (Task 8): an
+// SSO sign-in callback carries no `organizationId` of its own in its body or
+// query — the caller isn't authenticated yet when the request starts, and a
+// freshly created session has no `activeOrganizationId` set on creation
+// either (only `/organization/set-active`/`/organization/create` do that).
+// The org this audit entry belongs to is the one the *provider itself* is
+// bound to (`ssoProvider.organizationId`, set at `/sso/register` time),
+// resolved via the `providerId` route param both patterns share with the
+// generic `resolveRouteParamId` helper below.
+const SSO_CALLBACK_ORG_LOOKUP_PATHS = ["/sso/callback/", "/sso/saml2/sp/acs"];
+
+async function resolveSsoProviderOrgId(
+  ctx: GenericEndpointContext,
+  path: string,
+): Promise<string | null> {
+  if (!SSO_CALLBACK_ORG_LOOKUP_PATHS.some((prefix) => path.startsWith(prefix))) return null;
+  const providerId = resolveRouteParamId(ctx);
+  if (!providerId) return null;
+  const provider = await ctx.context.adapter.findOne<{ organizationId: string | null }>({
+    model: "ssoProvider",
+    where: [{ field: "providerId", value: providerId }],
+  });
+  return provider?.organizationId ?? null;
+}
+
+async function resolveOrgId(
   ctx: GenericEndpointContext,
   session: { session: object } | null,
-): string | null {
+): Promise<string | null> {
   const body = ctx.body as { organizationId?: string; orgId?: string } | undefined;
   const query = ctx.query as { orgId?: string } | undefined;
   const activeOrganizationId = (session?.session as { activeOrganizationId?: string } | undefined)
     ?.activeOrganizationId;
   const scimProvider = (ctx.context as unknown as { scimProvider?: { organizationId?: string } })
     .scimProvider;
-  return (
+  const direct =
     body?.organizationId ??
     body?.orgId ??
     query?.orgId ??
     activeOrganizationId ??
     scimProvider?.organizationId ??
-    null
-  );
+    null;
+  if (direct) return direct;
+  return resolveSsoProviderOrgId(ctx, ctx.path ?? "");
 }
 
 async function requireOwnerOrAdmin(ctx: GenericEndpointContext, orgId: string): Promise<void> {
@@ -470,11 +496,39 @@ export function auditLog(opts: EnterpriseOptions): BetterAuthPlugin {
             if (!entry) return;
 
             const returned = ctx.context.returned;
-            if (isAPIError(returned)) return; // only audit successful calls
+            // `ctx.redirect(...)` (`node_modules/better-call/dist/error.mjs`)
+            // is implemented as `new APIError("FOUND", ...)` — a *successful*
+            // 302 represented as an `APIError` instance under the hood, the
+            // same as a genuine 4xx/5xx failure. `isAPIError(returned)` alone
+            // can't tell them apart, and both `/sso/callback/:providerId` and
+            // `/sso/saml2/sp/acs/:providerId` (Task 8) always finish via
+            // `ctx.redirect(...)` on their success path — so a bare
+            // `isAPIError` check here would skip auditing every successful
+            // SSO sign-in, not just failed ones. Only `statusCode >= 400` is
+            // an actual failure; 3xx is audited like any other success.
+            if (isAPIError(returned) && returned.statusCode >= 400) return;
 
             const fullCtx = ctx as unknown as GenericEndpointContext;
-            const session = await getSessionFromCtx(fullCtx).catch(() => null);
-            const orgId = resolveOrgId(fullCtx, session);
+            // `getSessionFromCtx` re-derives the session from the *inbound*
+            // request's cookies (`getSession()` reads `ctx.headers`) — it
+            // never sees a session this same request just created. Both SSO
+            // callback paths (Task 8) sign the caller in and redirect within
+            // one request, so for them `ctx.context.session` is still
+            // whatever it was on the way in (typically `null`, anonymous)
+            // while the fresh session lives only in `ctx.context.newSession`
+            // (set synchronously by `setSessionCookie` -> `context.
+            // setNewSession`, `node_modules/better-auth/dist/cookies/
+            // index.mjs`). Falling back to it covers exactly that case
+            // without changing behavior for every other audited path (whose
+            // endpoints don't create a session mid-request).
+            const session =
+              (await getSessionFromCtx(fullCtx).catch(() => null)) ??
+              (
+                ctx.context as unknown as {
+                  newSession: { session: object; user: { id: string } } | null;
+                }
+              ).newSession;
+            const orgId = await resolveOrgId(fullCtx, session);
             if (!orgId) {
               ctx.context.logger.warn(
                 `enterprise-audit: no organization id resolvable for ${ctx.path}; skipping audit write`,
