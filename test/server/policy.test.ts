@@ -39,6 +39,29 @@ async function insertMemberRow(t: TestAuth, orgId: string, userId: string, role:
   });
 }
 
+// Task 7 (`../../src/server/enterprise-api/plugin.ts`, ruling (g)) added a
+// further precondition to `ssoEnforced:true`: a passed admin test login for
+// a verified provider (`ab-sso-test-ok:<providerId>` in `verification`,
+// normally written by `POST /enterprise/sso/test-login/finish`). Every test
+// below that successfully flips `ssoEnforced` on now seeds that row directly
+// rather than driving the full test-login round trip, the same way
+// `insertVerifiedProvider` above bypasses `/sso/register` — this file is
+// about policy enforcement, not the SSO wizard (covered by
+// `test/server/enterprise-api.test.ts`).
+async function insertTestLoginPassed(t: TestAuth, providerId = "okta") {
+  await t.client.execute({
+    sql: `INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [
+      `verif_test_ok_${providerId}`,
+      `ab-sso-test-ok:${providerId}`,
+      new Date().toISOString(),
+      Date.now() + 1000 * 60 * 60 * 24 * 365,
+      Date.now(),
+      Date.now(),
+    ],
+  });
+}
+
 describe("GET /enterprise/policy", () => {
   it("returns defaults when no row exists", async () => {
     const t = await makeAuth();
@@ -208,6 +231,7 @@ describe("POST /enterprise/policy/set", () => {
     const { cookie, userId: ownerId } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, cookie);
     await insertVerifiedProvider(t, orgId, "acme.test");
+    await insertTestLoginPassed(t);
 
     const res = await t.api.post(
       "/enterprise/policy/set",
@@ -275,6 +299,7 @@ describe("sign-in enforcement + session-creation backstop", () => {
       await signUpOwner(t, email);
     }
     await insertVerifiedProvider(t, orgId, "acme.test");
+    await insertTestLoginPassed(t);
     const setRes = await t.api.post(
       "/enterprise/policy/set",
       { orgId, ssoEnforced: true, breakGlassUserId: ownerId },
@@ -347,6 +372,7 @@ describe("sign-in enforcement + session-creation backstop", () => {
     expect(sent).toHaveLength(1);
 
     await insertVerifiedProvider(t, orgId, "acme.test");
+    await insertTestLoginPassed(t);
     await t.api.post(
       "/enterprise/policy/set",
       { orgId, ssoEnforced: true, breakGlassUserId: ownerId },
@@ -363,8 +389,13 @@ describe("sign-in enforcement + session-creation backstop", () => {
     // the real `magicLinkVerify` handler would have run far enough to
     // consume (delete) the verification row before the backstop rejected
     // the resulting session — so the row still existing here proves the
-    // request was rejected before the real endpoint ever ran.
-    const rows = await t.client.execute(`SELECT * FROM verification`);
+    // request was rejected before the real endpoint ever ran. Filtered to
+    // the magic-link identifier specifically: `insertTestLoginPassed` above
+    // leaves its own, unrelated `ab-sso-test-ok:*` row in the table too.
+    const rows = await t.client.execute({
+      sql: `SELECT * FROM verification WHERE identifier NOT LIKE 'ab-sso-test-ok:%'`,
+      args: [],
+    });
     expect(rows.rows.length).toBe(1);
   });
 

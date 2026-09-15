@@ -26,3 +26,4 @@ export {
   type ScimGroupResource,
   type PatchOp,
 } from "./scim-groups/scim";
+export { enterpriseApi } from "./enterprise-api/plugin";

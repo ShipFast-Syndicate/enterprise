@@ -1,10 +1,17 @@
 // Alpha Bros enterprise layer — better-auth plugin preset.
 //
 // v0.1: the upstream plugins the enterprise layer always needs, plus
-// `enterpriseGate`, (Task 4) `auditLog`, (Task 5) `orgPolicy`, and (Task 6)
-// our own `scimGroups` — better-auth 1.6's `@better-auth/scim` has no SCIM
+// `enterpriseGate`, (Task 4) `auditLog`, (Task 5) `orgPolicy`, (Task 6) our
+// own `scimGroups` — better-auth 1.6's `@better-auth/scim` has no SCIM
 // Groups support, so this preset replaces just that gap in-house
-// (FDR-enterprise-0001) rather than waiting on 1.7.
+// (FDR-enterprise-0001) rather than waiting on 1.7 — and (Task 7)
+// `enterpriseApi`, the portal-facing wrapper endpoints. `enterpriseApi` is
+// appended *last*: its own `hooks.before` (the mandatory-test-login
+// precondition on `/enterprise/policy/set`, ruling (g)) only needs to run
+// before that path's endpoint handler, which every plugin's `hooks.before`
+// already does regardless of registration order — appended last purely by
+// convention, matching how each task's plugin lands after the ones before
+// it.
 //
 // `orgPolicy` deliberately does NOT bring its own `magicLink()` plugin —
 // `/sign-in/magic-link`/`/magic-link/verify` sign-in enforcement is generic
@@ -40,6 +47,7 @@ import { enterpriseGate } from "./gate";
 import { auditLog } from "./audit/plugin";
 import { orgPolicy } from "./policy/plugin";
 import { scimGroups } from "./scim-groups/plugin";
+import { enterpriseApi } from "./enterprise-api/plugin";
 
 export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
   return [
@@ -57,5 +65,6 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
     auditLog(opts),
     orgPolicy(opts),
     scimGroups(opts),
+    enterpriseApi(opts),
   ];
 }

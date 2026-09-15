@@ -86,6 +86,23 @@ export const AUDITED_PATHS: Record<
   "/enterprise/policy/set": { action: "policy.updated", targetType: "org_policy" },
 };
 
+// `../enterprise-api/plugin.ts` (Task 7) deliberately has NO entries here
+// for its own `/enterprise/sso/register`, `/enterprise/scim/tokens/create`,
+// `/enterprise/scim/tokens/revoke` paths, even though each one performs
+// exactly the mutating action the matching upstream entry above already
+// describes (`sso.provider_registered`/`sso_provider`,
+// `scim.token_created`/`scim_provider`, `scim.token_revoked`/
+// `scim_provider`). Those wrapper endpoints forward the *real* request
+// through this same auth instance's own dispatch pipeline (`../enterprise-
+// api/forward.ts`'s `forwardToAuth`, via `better-auth/api`'s `router` — not
+// a plain internal function call) to `/sso/register`/`/scim/generate-token`/
+// `/scim/delete-provider-connection`, which already run through this exact
+// `hooks.after` and get audited by the entries above. Adding a second entry
+// for the wrapper's own path would audit the same action twice (confirmed
+// empirically: a wrapper-path entry plus the upstream entry both firing,
+// vs. only the upstream one firing once forwarding is the *only* audit
+// trigger — see `forward.ts`'s header comment for the full trace).
+
 // Per-method action overrides for a path already in `AUDITED_PATHS`, for the
 // rare case where the action genuinely depends on the HTTP method rather
 // than just whether the path is audited at all (`methods` above covers

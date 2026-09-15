@@ -25,6 +25,17 @@ export const GATED_PATHS: Record<string, Feature> = {
   "/enterprise/audit/list": "audit_log",
   "/enterprise/audit/export": "audit_log",
   "/enterprise/policy/set": "enforce_2fa", // any policy write needs the top tier
+  // Task 7 (`./enterprise-api/plugin.ts`) portal wrappers. `/enterprise/
+  // members` and `/enterprise/features` are deliberately absent — basic org
+  // membership/entitlement reads, session + membership only (see that
+  // plugin's own file headers).
+  "/enterprise/sso/providers": "sso",
+  "/enterprise/sso/register": "sso",
+  "/enterprise/sso/test-login/start": "sso",
+  "/enterprise/sso/test-login/finish": "sso",
+  "/enterprise/scim/tokens": "scim",
+  "/enterprise/scim/tokens/create": "scim",
+  "/enterprise/scim/tokens/revoke": "scim",
 };
 
 // `@better-auth/scim` below 1.7 has an unpatched HIGH advisory
