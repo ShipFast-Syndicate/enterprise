@@ -209,7 +209,13 @@ describe("GET /enterprise/audit/list", () => {
     expect(body.nextCursor).toBeNull();
   });
 
-  it("lazily purges rows older than audit.retentionDays on list (ruling g)", async () => {
+  // C-02 (security audit 2026-09-15): retention is archival *compaction*
+  // now, not a bare delete — the expired rows are replaced by one
+  // `audit.retention_compacted` anchor row so `verifyChain` keeps reporting
+  // `ok`. `test/security/c02-retention-compaction.test.ts` covers the
+  // verify-still-ok property; this one keeps asserting the retention
+  // behaviour itself.
+  it("lazily compacts rows older than audit.retentionDays on list (ruling g)", async () => {
     const t = await makeAuth({ audit: { retentionDays: 30 } });
     const { cookie } = await signUpOwner(t);
     const { orgId } = await createOrg(t, cookie);
@@ -233,11 +239,19 @@ describe("GET /enterprise/audit/list", () => {
     expect(body.items.map((i) => i.id)).not.toContain("evt_old");
 
     const after = await t.client.execute({
-      sql: `SELECT * FROM audit_event WHERE org_id = ?`,
+      sql: `SELECT * FROM audit_event WHERE org_id = ? ORDER BY seq ASC`,
       args: [orgId],
     });
-    expect(after.rows.length).toBe(1);
-    expect(after.rows[0]!.id).not.toBe("evt_old");
+    // The expired row is gone and replaced by the compaction anchor that
+    // stands in for it, so the fresh row still has something to chain back to.
+    expect(after.rows.map((r) => r.id)).not.toContain("evt_old");
+    expect(after.rows.length).toBe(2);
+    expect(after.rows[0]!.action).toBe("audit.retention_compacted");
+    expect(JSON.parse(String(after.rows[0]!.metadata)) as Record<string, unknown>).toMatchObject({
+      compactedThroughSeq: 1,
+      compactedCount: 1,
+      lastHash: "deadbeef",
+    });
   });
 });
 

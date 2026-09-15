@@ -46,8 +46,19 @@ import {
 } from "better-auth/api";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
+// One shared implementation of the owner/admin check (it used to be
+// duplicated here), so the `NOT_ORG_MEMBER` vs `NOT_ORG_ADMIN` distinction
+// M-07 depends on is made in exactly one place.
+import { requireOwnerOrAdmin } from "../policy/store";
 import type { EnterpriseOptions } from "../types";
-import { verifyChain, writeAudit, type AuditInput, type AuditRow } from "./chain";
+import {
+  compactChain,
+  verifyChain,
+  writeAudit,
+  type AuditInput,
+  type AuditRow,
+  type CompactionResult,
+} from "./chain";
 
 export const AUDITED_PATHS: Record<
   string,
@@ -153,6 +164,13 @@ const SIGN_IN_PATHS = new Set<string>([
   "/sign-out",
 ]);
 
+// Where the `hooks.before` below stashes the caller's pre-request session for
+// the matching `hooks.after` to read (see that hook's comment). Kept on the
+// per-request `ctx.context` object (better-auth builds a fresh one per
+// dispatch — `node_modules/better-auth/dist/api/dispatch.mjs`'s
+// `internalContext`), never on anything shared between requests.
+const AUDIT_ACTOR_KEY = "enterpriseAuditActor";
+
 function extractId(value: unknown): string | null {
   if (value && typeof value === "object" && "id" in value) {
     const id = (value as { id?: unknown }).id;
@@ -257,25 +275,71 @@ async function resolveSsoProviderOrgId(
   return provider?.organizationId ?? null;
 }
 
+async function isOrgMember(
+  ctx: GenericEndpointContext,
+  orgId: string,
+  userId: string,
+): Promise<boolean> {
+  const member = await ctx.context.adapter.findOne<{ id: string }>({
+    model: "member",
+    where: [
+      { field: "organizationId", value: orgId },
+      { field: "userId", value: userId },
+    ],
+  });
+  return !!member;
+}
+
+/**
+ * Which org's chain this request appends to — **never** a caller-supplied id
+ * on trust (C-01). Before the fix, `body.organizationId`/`body.orgId`/
+ * `query.orgId` were taken verbatim, so any signed-up user could append rows
+ * to any other tenant's chain with `POST /sign-out?orgId=<victim>` (and
+ * attacker-controlled `ip`/`user_agent`), with `verify` still reporting
+ * `ok:true` — the forgeries being cryptographically indistinguishable from
+ * genuine entries.
+ *
+ * The resolution order is now strictly "most trustworthy source first", and
+ * every remaining caller-supplied value has to be *proved*:
+ *
+ * 1. **SCIM bearer** — `ctx.context.scimProvider` is set by SCIM bearer
+ *    authentication from the token row itself; a SCIM request may only ever
+ *    write to its own token's org, whatever its body says.
+ * 2. **SSO callbacks** — the org comes from the `ssoProvider` row named by
+ *    the `:providerId` route param (server-side state, set at registration).
+ * 3. **Session** — the session's own `activeOrganizationId` is trusted as-is
+ *    (better-auth only ever sets it through `/organization/set-active` /
+ *    `/organization/create`, both of which check membership). Any *other*
+ *    org id in the body/query is honoured only if the resolved actor holds a
+ *    `member` row in it.
+ *
+ * Anything else resolves to `null`, and the caller (`hooks.after` below)
+ * skips the write with a warning rather than guessing.
+ */
 async function resolveOrgId(
   ctx: GenericEndpointContext,
-  session: { session: object } | null,
+  session: { session: object; user?: { id?: string } } | null,
 ): Promise<string | null> {
-  const body = ctx.body as { organizationId?: string; orgId?: string } | undefined;
-  const query = ctx.query as { orgId?: string } | undefined;
-  const activeOrganizationId = (session?.session as { activeOrganizationId?: string } | undefined)
-    ?.activeOrganizationId;
   const scimProvider = (ctx.context as unknown as { scimProvider?: { organizationId?: string } })
     .scimProvider;
-  const direct =
-    body?.organizationId ??
-    body?.orgId ??
-    query?.orgId ??
-    activeOrganizationId ??
-    scimProvider?.organizationId ??
+  if (scimProvider?.organizationId) return scimProvider.organizationId;
+
+  const providerOrgId = await resolveSsoProviderOrgId(ctx, ctx.path ?? "");
+  if (providerOrgId) return providerOrgId;
+
+  const body = ctx.body as { organizationId?: string; orgId?: string } | undefined;
+  const query = ctx.query as { orgId?: string } | undefined;
+  const activeOrganizationId =
+    (session?.session as { activeOrganizationId?: string } | undefined)?.activeOrganizationId ??
     null;
-  if (direct) return direct;
-  return resolveSsoProviderOrgId(ctx, ctx.path ?? "");
+  const claimed = body?.organizationId ?? body?.orgId ?? query?.orgId ?? null;
+
+  if (!claimed) return activeOrganizationId;
+  if (claimed === activeOrganizationId) return claimed;
+
+  const actorId = session?.user?.id;
+  if (!actorId) return null;
+  return (await isOrgMember(ctx, claimed, actorId)) ? claimed : null;
 }
 
 // Whether an SSO callback actually created a session — the one reliable
@@ -316,41 +380,26 @@ function extractRedirectError(returned: unknown): string | null {
   }
 }
 
-async function requireOwnerOrAdmin(ctx: GenericEndpointContext, orgId: string): Promise<void> {
-  const userId = ctx.context.session?.user.id;
-  if (!userId) {
-    throw new APIError("UNAUTHORIZED");
-  }
-  const member = await ctx.context.adapter.findOne<{ role: string }>({
-    model: "member",
-    where: [
-      { field: "organizationId", value: orgId },
-      { field: "userId", value: userId },
-    ],
-  });
-  const roles = member?.role.split(",").map((r) => r.trim()) ?? [];
-  if (!roles.includes("owner") && !roles.includes("admin")) {
-    throw new APIError("FORBIDDEN", {
-      code: "NOT_ORG_ADMIN",
-      message: "Owner or admin role required.",
-    });
-  }
-}
-
-async function purgeExpired(
+/**
+ * Applies `audit.retentionDays` to one org's chain as archival compaction
+ * (C-02) — `compactChain` deletes the expired prefix *and* leaves the signed
+ * anchor row `verifyChain` re-anchors on, so retention no longer flips the
+ * compliance verdict to "tampered" during normal operation.
+ *
+ * Still invoked from `GET /enterprise/audit/list` (which is already
+ * owner/admin-only and feature-gated), deliberately and explicitly: on a
+ * deployment with no scheduler, the admin opening the log is the only
+ * reliable trigger. `POST /enterprise/audit/compact` exposes the same
+ * operation to operators who want to run it on purpose.
+ */
+async function compactExpired(
   ctx: GenericEndpointContext,
   orgId: string,
   opts: EnterpriseOptions,
-): Promise<void> {
+): Promise<CompactionResult | null> {
   const retentionDays = opts.audit?.retentionDays ?? 365;
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
-  await ctx.context.adapter.deleteMany({
-    model: "auditEvent",
-    where: [
-      { field: "orgId", value: orgId },
-      { field: "createdAt", value: cutoff, operator: "lt" },
-    ],
-  });
+  return compactChain(ctx, orgId, cutoff);
 }
 
 interface AuditEventRow {
@@ -385,10 +434,27 @@ function serializeRow(row: AuditEventRow) {
 const CSV_HEADER =
   "id,seq,created_at,actor_type,actor_id,action,target_type,target_id,ip,user_agent,metadata,prev_hash,hash";
 
+// Cells whose first character makes Excel/Sheets/LibreOffice treat the value
+// as a formula rather than text (M-02). An attacker only needs a field that
+// lands in the export verbatim — `user_agent` is the obvious one — to get
+// `=cmd|'/C calc'!A0` executed on the machine of the admin who opens the
+// CSV they just handed their auditor.
+const CSV_FORMULA_PREFIX = /^[=+\-@\t\r]/;
+
+/**
+ * RFC 4180 quoting *plus* formula-injection neutralisation (M-02): a leading
+ * `= + - @ TAB CR` is prefixed with a single quote, which every spreadsheet
+ * treats as "the rest of this cell is literal text". Applied to every cell,
+ * `metadata` JSON included.
+ */
 function csvField(value: unknown): string {
-  const s = value === null || value === undefined ? "" : String(value);
+  const raw = value === null || value === undefined ? "" : String(value);
+  const s = CSV_FORMULA_PREFIX.test(raw) ? `'${raw}` : raw;
   return /["\n\r,]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
+
+/** `csvField` under test (`test/security/m02-csv-injection.test.ts`) — not part of the public API. */
+export const toCsvRowForTest = csvField;
 
 function toCsvRow(row: AuditEventRow): string {
   return [
@@ -430,6 +496,13 @@ const verifyQuerySchema = z.object({
   orgId: z.string(),
 });
 
+const compactBodySchema = z.object({
+  orgId: z.string(),
+});
+
+/** Default ceiling on one `/enterprise/audit/export` call (M-05); override with `audit.exportMaxRows`. */
+export const DEFAULT_EXPORT_ROW_CAP = 100_000;
+
 function buildWhere(
   orgId: string,
   filters: { action?: string; actorId?: string; from?: number; to?: number },
@@ -451,15 +524,20 @@ function buildWhere(
 // as an annotation would — the whole reason `satisfies` exists) while
 // keeping literal endpoint `path`s intact in `ReturnType<typeof auditLog>`.
 export function auditLog(opts: EnterpriseOptions) {
+  const exportCap = opts.audit?.exportMaxRows ?? DEFAULT_EXPORT_ROW_CAP;
+
   const listEndpoint = createAuthEndpoint(
     "/enterprise/audit/list",
     { method: "GET", use: [sessionMiddleware], query: listQuerySchema },
     async (ctx) => {
       const { orgId, action, actorId, from, to, cursor } = ctx.query;
       const limit = ctx.query.limit ?? 50;
-      await requireFeature(ctx as unknown as GenericEndpointContext, orgId, "audit_log");
+      // Membership/role first, entitlement second (M-07): a non-member must
+      // never reach `resolveEntitlements` with an org id they made up, since
+      // the two distinct 403s would otherwise be a tenant/plan oracle.
       await requireOwnerOrAdmin(ctx as unknown as GenericEndpointContext, orgId);
-      await purgeExpired(ctx as unknown as GenericEndpointContext, orgId, opts);
+      await requireFeature(ctx as unknown as GenericEndpointContext, orgId, "audit_log");
+      await compactExpired(ctx as unknown as GenericEndpointContext, orgId, opts);
 
       const where = buildWhere(orgId, { action, actorId, from, to });
       if (cursor) where.push({ field: "seq", value: Number(cursor), operator: "lt" });
@@ -483,18 +561,33 @@ export function auditLog(opts: EnterpriseOptions) {
     { method: "GET", use: [sessionMiddleware], query: exportQuerySchema },
     async (ctx) => {
       const { orgId, from, to } = ctx.query;
-      await requireFeature(ctx as unknown as GenericEndpointContext, orgId, "audit_log");
       await requireOwnerOrAdmin(ctx as unknown as GenericEndpointContext, orgId);
+      await requireFeature(ctx as unknown as GenericEndpointContext, orgId, "audit_log");
 
       const rows = await ctx.context.adapter.findMany<AuditEventRow>({
         model: "auditEvent",
         where: buildWhere(orgId, { from, to }),
         sortBy: { field: "seq", direction: "asc" },
+        // Bounded (M-05): the whole result set is joined into one in-memory
+        // string, so an org with millions of rows would otherwise materialise
+        // the table twice per click. One row over the cap is fetched purely
+        // to detect "there is more" without a second count query.
+        limit: exportCap + 1,
       });
+      if (rows.length > exportCap) {
+        throw new APIError("PAYLOAD_TOO_LARGE", {
+          code: "AUDIT_EXPORT_TOO_LARGE",
+          message: `This export exceeds ${exportCap} rows. Narrow it with the "from"/"to" query parameters and export in ranges.`,
+          limit: exportCap,
+        });
+      }
 
       const csv = [CSV_HEADER, ...rows.map(toCsvRow)].join("\r\n");
       const range = from === undefined && to === undefined ? "" : `-${from ?? ""}-${to ?? ""}`;
-      const filename = `audit-${orgId}${range}.csv`;
+      // `orgId` is caller-supplied (any org they admin), so it is sanitised
+      // before it is interpolated into a header value (L-05) rather than
+      // trusted to be free of `"`/CR/LF.
+      const filename = `audit-${orgId.replace(/[^A-Za-z0-9_-]/g, "_")}${range}.csv`;
       return new Response(csv, {
         headers: {
           "content-type": "text/csv",
@@ -509,8 +602,8 @@ export function auditLog(opts: EnterpriseOptions) {
     { method: "GET", use: [sessionMiddleware], query: verifyQuerySchema },
     async (ctx) => {
       const { orgId } = ctx.query;
-      await requireFeature(ctx as unknown as GenericEndpointContext, orgId, "audit_log");
       await requireOwnerOrAdmin(ctx as unknown as GenericEndpointContext, orgId);
+      await requireFeature(ctx as unknown as GenericEndpointContext, orgId, "audit_log");
 
       const rows = await ctx.context.adapter.findMany<AuditEventRow>({
         model: "auditEvent",
@@ -520,6 +613,26 @@ export function auditLog(opts: EnterpriseOptions) {
 
       const result = await verifyChain(rows.map(toAuditRow));
       return ctx.json(result);
+    },
+  );
+
+  // Retention on purpose rather than as a side effect of a read (C-02):
+  // owner/admin only, feature-gated like every other audit endpoint, and
+  // reporting exactly what it removed.
+  const compactEndpoint = createAuthEndpoint(
+    "/enterprise/audit/compact",
+    { method: "POST", use: [sessionMiddleware], body: compactBodySchema },
+    async (ctx) => {
+      const { orgId } = ctx.body;
+      await requireOwnerOrAdmin(ctx as unknown as GenericEndpointContext, orgId);
+      await requireFeature(ctx as unknown as GenericEndpointContext, orgId, "audit_log");
+
+      const result = await compactExpired(ctx as unknown as GenericEndpointContext, orgId, opts);
+      return ctx.json({
+        compacted: result !== null,
+        compactedThroughSeq: result?.compactedThroughSeq ?? null,
+        compactedCount: result?.compactedCount ?? 0,
+      });
     },
   );
 
@@ -549,8 +662,30 @@ export function auditLog(opts: EnterpriseOptions) {
       enterpriseAuditList: listEndpoint,
       enterpriseAuditExport: exportEndpoint,
       enterpriseAuditVerify: verifyEndpoint,
+      enterpriseAuditCompact: compactEndpoint,
     },
     hooks: {
+      // The actor is resolved *before* the endpoint runs as well as after
+      // (C-01). `getSessionFromCtx` re-reads the inbound cookie against the
+      // database, so on `/sign-out` — which has just deleted that session
+      // row — the after-hook can no longer tell who the caller was, and
+      // without a proven actor the org check below can only skip the write.
+      // Capturing the session on the way in keeps sign-out audited *and*
+      // keeps the proof requirement: this value comes from the caller's own
+      // cookie, never from their body or query string.
+      before: [
+        {
+          matcher: (ctx) => !!ctx.path && auditEntryFor(ctx.path, ctx.request?.method) !== null,
+          handler: createAuthMiddleware(async (ctx) => {
+            const session = await getSessionFromCtx(ctx as unknown as GenericEndpointContext).catch(
+              () => null,
+            );
+            if (session) {
+              (ctx.context as unknown as Record<string, unknown>)[AUDIT_ACTOR_KEY] = session;
+            }
+          }),
+        },
+      ],
       after: [
         {
           matcher: (ctx) => !!ctx.path && auditEntryFor(ctx.path, ctx.request?.method) !== null,
@@ -586,6 +721,10 @@ export function auditLog(opts: EnterpriseOptions) {
             // without changing behavior for every other audited path (whose
             // endpoints don't create a session mid-request).
             const session =
+              ((ctx.context as unknown as Record<string, unknown>)[AUDIT_ACTOR_KEY] as {
+                session: object;
+                user: { id: string };
+              } | null) ??
               (await getSessionFromCtx(fullCtx).catch(() => null)) ??
               (
                 ctx.context as unknown as {

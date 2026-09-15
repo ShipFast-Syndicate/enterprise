@@ -63,6 +63,17 @@ export interface AuditRow extends AuditRowForHash {
 const GENESIS = "GENESIS";
 
 /**
+ * The action of the single anchor row retention compaction leaves behind in
+ * place of the rows it removed (C-02). Its `metadata` carries
+ * `{compactedThroughSeq, compactedCount, lastHash}` and its `prevHash` is
+ * that same `lastHash` — the hash of the last row that was compacted away —
+ * so `verifyChain` can re-anchor the surviving chain on it instead of
+ * reporting the (expected, operator-initiated) gap as tampering. See
+ * `compactChain` below.
+ */
+export const RETENTION_COMPACTED_ACTION = "audit.retention_compacted";
+
+/**
  * Deterministic JSON serialization of the hashed fields, in the fixed key
  * order `{orgId,seq,actorType,actorId,action,targetType,targetId,ip,
  * userAgent,metadata,createdAt}` — written out explicitly (rather than
@@ -109,12 +120,41 @@ export async function hashRow(prevHash: string, row: AuditRowForHash): Promise<s
  * it. Deleting an *earlier* row is caught: the row after the gap still
  * carries the deleted row's hash as its `prevHash`, which no longer matches
  * the hash of the row now immediately before it in `rows`.
+ *
+ * The one sanctioned exception is retention compaction (C-02): when the
+ * first present row is a `RETENTION_COMPACTED_ACTION` anchor, the chain is
+ * re-anchored on its `metadata.lastHash` — the hash of the last row
+ * compaction removed — instead of `GENESIS`. The anchor itself still has to
+ * hash correctly (`prevHash` = `metadata.lastHash`, `hash` =
+ * `hashRow(prevHash, row)`), so an attacker cannot forge a gap by dropping
+ * rows and inventing an anchor unless they already know the hash the
+ * surviving rows chain back to — which is exactly the hash the row after
+ * the anchor carries in its own `prevHash`, i.e. tail truncation and prefix
+ * rewriting stay exactly as (un)detectable as they were before. What this
+ * buys is that *normal operation* no longer reports `ok: false`.
  */
 export async function verifyChain(
   rows: AuditRow[],
 ): Promise<{ ok: true } | { ok: false; brokenAtSeq: number }> {
   const sorted = [...rows].sort((a, b) => a.seq - b.seq);
   let prevHash = GENESIS;
+
+  const anchor = sorted[0];
+  if (anchor && anchor.action === RETENTION_COMPACTED_ACTION) {
+    const lastHash = (anchor.metadata as { lastHash?: unknown } | undefined)?.lastHash;
+    if (typeof lastHash !== "string" || anchor.prevHash !== lastHash) {
+      return { ok: false, brokenAtSeq: anchor.seq };
+    }
+    if ((await hashRow(anchor.prevHash, anchor)) !== anchor.hash) {
+      return { ok: false, brokenAtSeq: anchor.seq };
+    }
+    // The surviving rows chain back to the *compacted-away* tail, not to the
+    // anchor's own hash — that's what makes the anchor a stand-in for the
+    // prefix rather than a link in the chain.
+    sorted.shift();
+    prevHash = lastHash;
+  }
+
   for (const row of sorted) {
     if (row.prevHash !== prevHash) {
       return { ok: false, brokenAtSeq: row.seq };
@@ -128,7 +168,31 @@ export async function verifyChain(
   return { ok: true };
 }
 
-function isUniqueViolation(err: unknown): boolean {
+// Driver error codes that mean "a row with this unique key already exists"
+// (L-03): libsql/sqlite (`SQLITE_CONSTRAINT_UNIQUE`/`…_PRIMARYKEY`),
+// postgres (`23505`), mysql (`ER_DUP_ENTRY`/1062). Checked *in addition to*
+// — not instead of — the message heuristic: adapters differ in whether they
+// preserve the driver's code at all (the drizzle/libsql path this package is
+// tested on frequently rewraps the error), so dropping the regex would turn
+// a real race into a hard failure on those. The code check is what makes the
+// common cases exact rather than wording-dependent.
+const UNIQUE_VIOLATION_CODES = new Set([
+  "SQLITE_CONSTRAINT_UNIQUE",
+  "SQLITE_CONSTRAINT_PRIMARYKEY",
+  "SQLITE_CONSTRAINT",
+  "23505",
+  "ER_DUP_ENTRY",
+  "1062",
+]);
+
+export function isUniqueViolation(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (
+    (typeof code === "string" || typeof code === "number") &&
+    UNIQUE_VIOLATION_CODES.has(String(code))
+  ) {
+    return true;
+  }
   const message = err instanceof Error ? err.message : String(err);
   return /unique/i.test(message);
 }
@@ -143,11 +207,26 @@ const orgLocks = new Map<string, Promise<unknown>>();
 function withOrgLock<T>(orgId: string, task: () => Promise<T>): Promise<T> {
   const previous = orgLocks.get(orgId) ?? Promise.resolve();
   const result = previous.then(task, task);
-  orgLocks.set(
-    orgId,
-    result.catch(() => undefined),
-  );
+  const settled = result.catch(() => undefined);
+  orgLocks.set(orgId, settled);
+  // Evict once this org's chain has settled and nothing newer has queued
+  // behind it (L-02) — without this the map grows one permanent entry per
+  // distinct org ever audited in the process. Note (documented, unchanged):
+  // this mutex is per *process*; on workerd or any multi-instance deployment
+  // the `audit_event_org_seq` unique index plus the retry below is the real
+  // guard.
+  void settled.then(() => {
+    if (orgLocks.get(orgId) === settled) orgLocks.delete(orgId);
+  });
   return result;
+}
+
+/**
+ * Number of orgs currently holding an in-flight audit-chain lock — exported
+ * for `test/server/audit-chain.test.ts`'s eviction assertion (L-02) only.
+ */
+export function pendingOrgLockCount(): number {
+  return orgLocks.size;
 }
 
 // The row shape as the adapter sees it — `createdAt` is a real `Date` here
@@ -238,5 +317,105 @@ export async function writeAudit(
       if (!isUniqueViolation(err)) throw err;
       return await insertNextRow(adapter, input);
     }
+  });
+}
+
+export interface CompactionResult {
+  /** The highest `seq` that was compacted away; also the anchor row's own `seq`. */
+  compactedThroughSeq: number;
+  /** How many rows were removed (the anchor row itself replaces them all). */
+  compactedCount: number;
+  /** The `hash` of the last compacted row — the anchor's `prevHash`, and where the surviving chain resumes. */
+  lastHash: string;
+}
+
+/**
+ * Retention as **archival compaction** rather than a bare delete (C-02).
+ *
+ * Every row of `orgId`'s chain at or below the highest `seq` older than
+ * `cutoff` is removed and replaced by a single anchor row occupying that
+ * same `seq`, carrying `{compactedThroughSeq, compactedCount, lastHash}` in
+ * its metadata and the removed tail's hash as its `prevHash`. `verifyChain`
+ * knows how to re-anchor on it, so a chain that has been compacted still
+ * verifies `ok` — where the pre-C-02 hard delete left it permanently
+ * reporting `ok:false, brokenAtSeq:<first surviving row>`.
+ *
+ * Rows are selected by `seq <= <highest expired seq>` rather than by
+ * `createdAt` alone so that a *previous* anchor row (whose `createdAt` is
+ * its own compaction time, i.e. much newer than the rows it stands for) is
+ * always swept up by the next compaction instead of being stranded before
+ * newer rows and breaking the re-anchoring invariant.
+ *
+ * Returns `null` when nothing was old enough to compact. Runs under the same
+ * per-org lock as `writeAudit`, so it can never interleave with an append.
+ */
+export async function compactChain(
+  ctx: { context: Pick<AuthContext, "adapter"> },
+  orgId: string,
+  cutoff: Date,
+): Promise<CompactionResult | null> {
+  const adapter = ctx.context.adapter as unknown as AuditAdapter;
+  return withOrgLock(orgId, async () => {
+    const expired = await adapter.findMany<{ seq: number; hash: string }>({
+      model: "auditEvent",
+      where: [
+        { field: "orgId", value: orgId },
+        { field: "createdAt", value: cutoff, operator: "lt" },
+      ],
+      sortBy: { field: "seq", direction: "desc" },
+      limit: 1,
+    });
+    const through = expired[0];
+    if (!through) return null;
+
+    const doomed = await adapter.findMany<{ seq: number }>({
+      model: "auditEvent",
+      where: [
+        { field: "orgId", value: orgId },
+        { field: "seq", value: through.seq, operator: "lte" },
+      ],
+    });
+    await adapter.deleteMany({
+      model: "auditEvent",
+      where: [
+        { field: "orgId", value: orgId },
+        { field: "seq", value: through.seq, operator: "lte" },
+      ],
+    });
+
+    const createdAt = Date.now();
+    const rowForHash: AuditRowForHash = {
+      orgId,
+      seq: through.seq,
+      actorType: "system",
+      actorId: null,
+      action: RETENTION_COMPACTED_ACTION,
+      targetType: "organization",
+      targetId: orgId,
+      ip: null,
+      userAgent: null,
+      metadata: {
+        compactedThroughSeq: through.seq,
+        compactedCount: doomed.length,
+        lastHash: through.hash,
+      },
+      createdAt,
+    };
+    const hash = await hashRow(through.hash, rowForHash);
+    await adapter.create<AuditEventDbRow>({
+      model: "auditEvent",
+      data: {
+        ...rowForHash,
+        createdAt: new Date(createdAt),
+        prevHash: through.hash,
+        hash,
+      },
+    });
+
+    return {
+      compactedThroughSeq: through.seq,
+      compactedCount: doomed.length,
+      lastHash: through.hash,
+    };
   });
 }

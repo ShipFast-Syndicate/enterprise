@@ -33,8 +33,17 @@ export interface EnterpriseOptions {
   samlSpKeys?: { cert: string; privateKey: string };
   /** Symmetric key used to encrypt stored secrets. Must be >= 32 chars. */
   secretsKey: string;
-  /** Audit log retention. @default retentionDays 365 */
-  audit?: { retentionDays?: number };
+  /**
+   * Audit log retention and export bounds.
+   *
+   * `retentionDays` (default 365) drives archival compaction: rows older
+   * than the window are replaced by a single signed
+   * `audit.retention_compacted` anchor row, so the chain still verifies
+   * (C-02). `exportMaxRows` (default 100 000) caps one
+   * `/enterprise/audit/export` call — past it the endpoint answers `413`
+   * and asks the caller to narrow the range (M-05).
+   */
+  audit?: { retentionDays?: number; exportMaxRows?: number };
   /** SCIM Groups behavior. @default groupRoleMap {} */
   scim?: { groupRoleMap?: Record<string, "owner" | "admin" | "member"> };
   /**

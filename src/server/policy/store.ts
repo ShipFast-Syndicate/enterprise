@@ -135,6 +135,22 @@ export async function requireOrgMember(ctx: GenericEndpointContext, orgId: strin
   }
 }
 
+/**
+ * A caller who holds no `member` row at all always gets `NOT_ORG_MEMBER`,
+ * never `NOT_ORG_ADMIN` — one answer for "this org is none of your business",
+ * whatever role the endpoint wanted (M-07: the codes must not let an
+ * outsider tell orgs apart). Role-based refusals for *actual* members keep
+ * their specific code, which is what the portal renders.
+ */
+function notAMemberOr(roles: string[], code: string, message: string): APIError {
+  return roles.length === 0
+    ? new APIError("FORBIDDEN", {
+        code: "NOT_ORG_MEMBER",
+        message: "You are not a member of this organization.",
+      })
+    : new APIError("FORBIDDEN", { code, message });
+}
+
 export async function requireOwnerOrAdmin(
   ctx: GenericEndpointContext,
   orgId: string,
@@ -143,10 +159,22 @@ export async function requireOwnerOrAdmin(
   if (!userId) throw new APIError("UNAUTHORIZED");
   const roles = await getMemberRoles(ctx, orgId, userId);
   if (!roles.includes("owner") && !roles.includes("admin")) {
-    throw new APIError("FORBIDDEN", {
-      code: "NOT_ORG_ADMIN",
-      message: "Owner or admin role required.",
-    });
+    throw notAMemberOr(roles, "NOT_ORG_ADMIN", "Owner or admin role required.");
+  }
+}
+
+/**
+ * Owner-only gate, for the two knobs that can mint owners (M-01):
+ * `groupRoleMap`/`breakGlassUserId` writes and SCIM token creation.
+ * `requireOwnerOrAdmin` is too weak for those — an admin who can point a
+ * group at `owner` and then mint a SCIM token can promote themselves.
+ */
+export async function requireOwner(ctx: GenericEndpointContext, orgId: string): Promise<void> {
+  const userId = ctx.context.session?.user.id;
+  if (!userId) throw new APIError("UNAUTHORIZED");
+  const roles = await getMemberRoles(ctx, orgId, userId);
+  if (!roles.includes("owner")) {
+    throw notAMemberOr(roles, "NOT_ORG_OWNER", "Owner role required.");
   }
 }
 
