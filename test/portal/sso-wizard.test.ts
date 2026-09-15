@@ -271,6 +271,20 @@ describe("<ab-sso-wizard>", () => {
     expect(calls).toBe(3);
   });
 
+  // L-04 (security audit 2026-09-15): the default `openWindow` must pass
+  // `noopener,noreferrer` — the page it opens is the org-registered IdP's own
+  // authorization endpoint, and without it that page gets a live
+  // `window.opener` handle on the admin portal tab (reverse tabnabbing).
+  it("the default openWindow passes noopener,noreferrer", async () => {
+    const el = document.createElement("ab-sso-wizard") as HTMLElement & {
+      openWindow: (url: string) => unknown;
+    };
+    const spy = vi.spyOn(window, "open").mockReturnValue(null);
+    el.openWindow("https://idp.test/authorize");
+    expect(spy).toHaveBeenCalledWith("https://idp.test/authorize", "_blank", "noopener,noreferrer");
+    spy.mockRestore();
+  });
+
   it("test-login start opens the URL via openWindow and shows raw diagnostics on failure", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);

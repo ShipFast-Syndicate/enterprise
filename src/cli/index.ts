@@ -1,7 +1,11 @@
-// Alpha Bros enterprise layer — CLI entry point (ab-enterprise bin). tsup
-// injects the `#!/usr/bin/env node` banner for this entry only (see
-// tsup.config.ts). No CLI framework — `node:util`'s `parseArgs` per ruling
-// (e).
+#!/usr/bin/env node
+// Alpha Bros enterprise layer — CLI entry point (ab-enterprise bin). The
+// `#!/usr/bin/env node` line above is part of this source file (esbuild
+// preserves an entry point's hashbang verbatim) rather than a tsup `banner`,
+// because `banner` is per-config and having a second tsup config object just
+// for this entry raced with the first one's DTS pass — `dist/cli/index.d.ts`
+// went missing from finished builds at random (see tsup.config.ts). No CLI
+// framework — `node:util`'s `parseArgs` per ruling (e).
 //
 // Commands:
 //   ab-enterprise migrate --out <dir>   copy 0001_enterprise.sql into a
@@ -40,6 +44,20 @@ function nextMigrationNumber(dir: string): string {
   return String(highest + 1).padStart(4, "0");
 }
 
+// `--token` is visible in `ps` output and in shell history on any shared or
+// CI host (L-06). It stays supported (some environments genuinely cannot set
+// an env var), but every use now says so once, on stderr, so it never passes
+// unnoticed in a CI log.
+function resolveAuthToken(flagToken: string | undefined): string | undefined {
+  if (flagToken) {
+    console.error(
+      "ab-enterprise: warning — --token is visible to other processes (ps) and in shell history; prefer TURSO_AUTH_TOKEN.",
+    );
+    return flagToken;
+  }
+  return process.env.TURSO_AUTH_TOKEN;
+}
+
 function cmdMigrate(argv: string[]): number {
   const { values } = parseArgs({
     args: argv,
@@ -66,7 +84,7 @@ async function cmdVerify(argv: string[]): Promise<number> {
     },
   });
   const url = values.url ?? process.env.TURSO_DATABASE_URL;
-  const token = values.token ?? process.env.TURSO_AUTH_TOKEN;
+  const token = resolveAuthToken(values.token);
   if (!url) {
     console.error(
       "ab-enterprise verify: --url or TURSO_DATABASE_URL is required (auth token: --token or TURSO_AUTH_TOKEN)",
@@ -123,7 +141,7 @@ async function cmdAuditVerify(argv: string[]): Promise<number> {
     return 1;
   }
   const url = values.url ?? process.env.TURSO_DATABASE_URL;
-  const token = values.token ?? process.env.TURSO_AUTH_TOKEN;
+  const token = resolveAuthToken(values.token);
   if (!url) {
     console.error(
       "ab-enterprise audit-verify: --url or TURSO_DATABASE_URL is required (auth token: --token or TURSO_AUTH_TOKEN)",

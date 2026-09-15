@@ -112,7 +112,11 @@ export class AbSsoWizard extends AbElement {
   /** Total time to auto-poll before giving up (manual "Check DNS" still works after). @default 300000 (5min) */
   maxPollMs = 300000;
   /** Opens the test-login URL. Defaults to `window.open`; overridable for tests/embedders. */
-  openWindow: (url: string) => unknown = (url) => window.open(url, "_blank");
+  // `noopener,noreferrer` (L-04): the URL is the org-registered IdP's own
+  // authorization endpoint, so without it that page gets a live
+  // `window.opener` handle on the admin portal tab and can navigate it
+  // somewhere of its choosing (reverse tabnabbing).
+  openWindow: (url: string) => unknown = (url) => window.open(url, "_blank", "noopener,noreferrer");
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private pollElapsedMs = 0;

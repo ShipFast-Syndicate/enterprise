@@ -36,6 +36,30 @@ describe("ab-enterprise CLI (built binary)", () => {
     if (workDir) rmSync(workDir, { recursive: true, force: true });
   });
 
+  // Task 13 leftover: two sibling tsup config objects raced on one `dist/`
+  // and `dist/cli/index.d.ts` went missing from finished builds at random,
+  // breaking `exports`-resolution for consumers non-deterministically. One
+  // config with all five entries fixed it; this asserts the build output the
+  // `beforeAll` above just produced actually contains every published entry,
+  // types included.
+  it("pnpm build emits every dist entry, including dist/cli/index.d.ts", () => {
+    for (const entry of [
+      "cli/index.js",
+      "cli/index.d.ts",
+      "server/index.js",
+      "server/index.d.ts",
+      "schema/index.js",
+      "schema/index.d.ts",
+      "client/index.js",
+      "client/index.d.ts",
+      "portal/index.js",
+      "portal/index.d.ts",
+    ]) {
+      expect(existsSync(join(repoRoot, "dist", entry)), entry).toBe(true);
+    }
+    expect(readFileSync(cliPath, "utf8").startsWith("#!/usr/bin/env node")).toBe(true);
+  });
+
   it("verify exits 1 against an empty database and prints missing items", () => {
     const dbPath = join(workDir, "empty.db");
     const result = runCli(["verify", "--url", `file:${dbPath}`]);
