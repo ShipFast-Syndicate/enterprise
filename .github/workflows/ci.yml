@@ -1,0 +1,27 @@
+name: CI
+on:
+  pull_request:
+  push: { branches: [develop, main] }
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+  issues: write
+  actions: read
+  statuses: read
+
+jobs:
+  ci:
+    uses: ShipFast-Syndicate/.github/.github/workflows/reusable-ci-app.yml@78bee37c6546003297a5740bbbc16a29f0832480 # v1
+    with:
+      project-name: enterprise
+      eslint-command: "pnpm lint"
+      typecheck-command: "pnpm typecheck"
+      prettier-command: "pnpm format:check"
+      coverage-command: "pnpm test:coverage"
+      gitleaks-config-path: ".gitleaks.toml"
+      build-matrix: '[{"target":"npm","command":"pnpm build","env":"","allow-failure":false}]'
+      run-e2e: false
+      run-migration-dry-run: false
+    secrets: inherit
