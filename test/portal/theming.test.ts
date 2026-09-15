@@ -28,8 +28,13 @@ describe("portal theming contract (src/portal/*.ts)", () => {
   it("scans every known component/helper file (sanity check on the scan itself)", () => {
     expect(files).toEqual(
       expect.arrayContaining([
+        "ab-api-keys.ts",
+        "ab-audit-log.ts",
         "ab-members.ts",
+        "ab-scim-tokens.ts",
+        "ab-security-policy.ts",
         "ab-security-settings.ts",
+        "ab-sso-wizard.ts",
         "api.ts",
         "base.ts",
         "index.ts",
@@ -57,6 +62,16 @@ describe("portal theming contract (src/portal/*.ts)", () => {
       const declarations = [...src.matchAll(/font-family\s*:\s*([^;]+);/g)];
       for (const [, value] of declarations) {
         expect(value!.trim()).toBe("var(--ab-font-family)");
+      }
+    });
+
+    it(`${file}: the font shorthand (font:) is always "inherit", never a literal`, () => {
+      // \b before "font" already excludes "font-family:"/"font-size:" (no
+      // word boundary between "font" and the "-family"/"-size" that
+      // immediately follows in those) — no negative lookahead needed.
+      const declarations = [...src.matchAll(/\bfont\s*:\s*([^;]+);/g)];
+      for (const [, value] of declarations) {
+        expect(value!.trim()).toBe("inherit");
       }
     });
 

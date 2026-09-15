@@ -1,6 +1,6 @@
 // Alpha Bros enterprise layer — admin portal entry point (Task 10; the
-// Task 11 elements' own `define()` calls were added here alongside them —
-// Task 12 adds the remaining three).
+// Task 11/12 elements' own `define()` calls were added here alongside
+// them).
 //
 // Registers every `<ab-*>` element this package defines and re-exports the
 // classes/types a consumer might want directly (e.g. `PortalError` to
@@ -17,6 +17,9 @@ import { AbMembers } from "./ab-members";
 import { AbSecuritySettings } from "./ab-security-settings";
 import { AbSsoWizard } from "./ab-sso-wizard";
 import { AbScimTokens } from "./ab-scim-tokens";
+import { AbSecurityPolicy } from "./ab-security-policy";
+import { AbApiKeys } from "./ab-api-keys";
+import { AbAuditLog } from "./ab-audit-log";
 
 function define(name: string, ctor: CustomElementConstructor): void {
   if (!customElements.get(name)) {
@@ -28,6 +31,9 @@ define("ab-members", AbMembers);
 define("ab-security-settings", AbSecuritySettings);
 define("ab-sso-wizard", AbSsoWizard);
 define("ab-scim-tokens", AbScimTokens);
+define("ab-security-policy", AbSecurityPolicy);
+define("ab-api-keys", AbApiKeys);
+define("ab-audit-log", AbAuditLog);
 
 export { AbElement } from "./base";
 export { PortalApi, PortalError, type PortalErrorShape } from "./api";
@@ -35,3 +41,6 @@ export { AbMembers } from "./ab-members";
 export { AbSecuritySettings } from "./ab-security-settings";
 export { AbSsoWizard, type WizardStep } from "./ab-sso-wizard";
 export { AbScimTokens } from "./ab-scim-tokens";
+export { AbSecurityPolicy } from "./ab-security-policy";
+export { AbApiKeys } from "./ab-api-keys";
+export { AbAuditLog } from "./ab-audit-log";

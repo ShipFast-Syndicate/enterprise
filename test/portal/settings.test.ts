@@ -126,6 +126,54 @@ describe("<ab-security-settings>", () => {
     expect(tabButton(el, "members").getAttribute("aria-selected")).toBe("true");
   });
 
+  it("ArrowRight/ArrowLeft on the tablist move selection, skipping locked tabs and wrapping", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async () => jsonResponse(200, { features: ["sso"] })),
+    );
+    const el = makeEl();
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.shadowRoot!.querySelectorAll('[role="tab"]').length).toBe(6));
+    // Unlocked: members, sso. Locked: scim, policy, api-keys, audit.
+    expect(tabButton(el, "members").getAttribute("aria-selected")).toBe("true");
+
+    const tablist = el.shadowRoot!.querySelector('[role="tablist"]')!;
+    tablist.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
+    );
+    await el.updateComplete;
+    expect(tabButton(el, "sso").getAttribute("aria-selected")).toBe("true");
+
+    // Next ArrowRight would land on the locked "scim" tab — must skip ahead
+    // to the next unlocked one, wrapping back around to "members".
+    tablist.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }),
+    );
+    await el.updateComplete;
+    expect(tabButton(el, "members").getAttribute("aria-selected")).toBe("true");
+
+    tablist.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }),
+    );
+    await el.updateComplete;
+    expect(tabButton(el, "sso").getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("exposes aria-controls/role=tabpanel/aria-labelledby wiring between the selected tab and panel", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async () => jsonResponse(200, { features: [] })),
+    );
+    const el = makeEl();
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.shadowRoot!.querySelectorAll('[role="tab"]').length).toBe(6));
+
+    const tab = tabButton(el, "members");
+    const panel = el.shadowRoot!.querySelector('[role="tabpanel"]')!;
+    expect(tab.getAttribute("aria-controls")).toBe(panel.id);
+    expect(panel.getAttribute("aria-labelledby")).toBe(tab.id);
+  });
+
   it("respects a custom tabs attribute", async () => {
     vi.stubGlobal(
       "fetch",

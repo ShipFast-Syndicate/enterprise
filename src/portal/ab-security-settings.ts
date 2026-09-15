@@ -13,13 +13,19 @@
 // The selected tab's child element is looked up by tag name in
 // `TAB_ELEMENTS` and stamped via `lit/static-html.js`'s `unsafeStatic` —
 // `ab-sso-wizard`/`ab-scim-tokens`/`ab-security-policy`/`ab-api-keys`/
-// `ab-audit-log` (Tasks 11-12) don't exist yet in this task; stamping them
-// by tag name regardless (an un-upgraded custom element is a completely
-// inert, harmless DOM node until its class is registered) is exactly what
-// lets this shell ship ahead of them, per the task brief. `unsafeStatic`'s
-// input here is always one of `TAB_ELEMENTS`'s own literal values, never
-// anything derived from user input, so there's no injection concern despite
-// the name.
+// `ab-audit-log` (Tasks 11-12, `./ab-sso-wizard.ts` etc.) were built after
+// this file; stamping them by tag name rather than importing their classes
+// directly (an un-upgraded custom element is a completely inert, harmless
+// DOM node until its class is registered) is exactly what let this shell
+// ship ahead of them, per the task brief. `unsafeStatic`'s input here is
+// always one of `TAB_ELEMENTS`'s own literal values, never anything derived
+// from user input, so there's no injection concern despite the name.
+//
+// Keyboard tab navigation (Left/Right arrows) and the `aria-controls`/
+// `role="tabpanel"`/`aria-labelledby` wiring between each tab button and
+// the panel below were added alongside the Task 11/12 elements, per that
+// batch's controller ruling (g) — an accessibility minor deferred from
+// Task 10, not part of that task's original scope.
 
 import { html, css, type TemplateResult } from "lit";
 import { html as staticHtml, unsafeStatic } from "lit/static-html.js";
@@ -156,6 +162,32 @@ export class AbSecuritySettings extends AbElement {
     this.selected = tab;
   }
 
+  /**
+   * Left/Right arrow key navigation across the tablist (ruling (g),
+   * deferred from Task 10): wraps around, skips locked tabs, and moves
+   * focus to the newly selected tab's button — matching the WAI-ARIA
+   * Authoring Practices tab pattern.
+   */
+  private handleTabsKeydown(e: KeyboardEvent): void {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    const tabs = this.tabList;
+    if (tabs.length === 0) return;
+    e.preventDefault();
+    const step = e.key === "ArrowRight" ? 1 : -1;
+    const currentIndex = Math.max(tabs.indexOf(this.selected), 0);
+    for (let i = 1; i <= tabs.length; i++) {
+      const nextIndex = (((currentIndex + step * i) % tabs.length) + tabs.length) % tabs.length;
+      const next = tabs[nextIndex]!;
+      if (!this.isLocked(next)) {
+        this.selected = next;
+        void this.updateComplete.then(() => {
+          this.shadowRoot?.querySelector<HTMLButtonElement>(`button[data-tab="${next}"]`)?.focus();
+        });
+        return;
+      }
+    }
+  }
+
   private renderTabContent(tab: string): TemplateResult {
     const tag = TAB_ELEMENTS[tab];
     if (!tag) return html``;
@@ -171,16 +203,19 @@ export class AbSecuritySettings extends AbElement {
     const selectedLocked = this.selected !== "" && this.isLocked(this.selected);
 
     return html`
-      <div role="tablist">
+      <div role="tablist" @keydown=${(e: KeyboardEvent) => this.handleTabsKeydown(e)}>
         ${tabs.map((t) => {
           const locked = this.isLocked(t);
           return html`
             <button
               type="button"
               role="tab"
+              id="ab-tab-${t}"
               data-tab=${t}
               aria-selected=${t === this.selected ? "true" : "false"}
               aria-disabled=${locked ? "true" : "false"}
+              aria-controls="ab-panel-${t}"
+              tabindex=${t === this.selected ? "0" : "-1"}
               ?disabled=${locked}
               @click=${() => this.selectTab(t)}
             >
@@ -191,7 +226,13 @@ export class AbSecuritySettings extends AbElement {
           `;
         })}
       </div>
-      <div class="ab-panel">
+      <div
+        class="ab-panel"
+        id="ab-panel-${this.selected}"
+        role="tabpanel"
+        aria-labelledby="ab-tab-${this.selected}"
+        tabindex="0"
+      >
         ${
           this.selected === ""
             ? ""
