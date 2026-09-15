@@ -750,7 +750,14 @@ function buildDeleteGroup(opts: EnterpriseOptions) {
 
 // --- plugin -------------------------------------------------------------
 
-export function scimGroups(opts: EnterpriseOptions): BetterAuthPlugin {
+// No explicit `: BetterAuthPlugin` return-type annotation (client task-9 fix
+// round 1, applied here too for consistency — see `../enterprise-api/
+// plugin.ts`'s identical comment on `enterpriseApi`). `scimGroups`'s own
+// endpoints are `/scim/v2/Groups*`, not `/enterprise/*`, and it has no
+// client plugin of its own (see `../../client/index.ts`'s header comment),
+// so this doesn't unlock any new client typing — kept for the same
+// package-wide `satisfies BetterAuthPlugin` convention.
+export function scimGroups(opts: EnterpriseOptions) {
   return {
     id: "enterprise-scim-groups",
     schema: {
@@ -773,5 +780,5 @@ export function scimGroups(opts: EnterpriseOptions): BetterAuthPlugin {
       scimPatchGroup: buildPatchGroup(opts),
       scimDeleteGroup: buildDeleteGroup(opts),
     },
-  };
+  } satisfies BetterAuthPlugin;
 }

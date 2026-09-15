@@ -242,7 +242,13 @@ function buildRequire2faAfterHook() {
   };
 }
 
-export function orgPolicy(opts: EnterpriseOptions): BetterAuthPlugin {
+// No explicit `: BetterAuthPlugin` return-type annotation (client task-9
+// fix round 1) — see `../enterprise-api/plugin.ts`'s identical comment on
+// `enterpriseApi` for why: `satisfies BetterAuthPlugin` below keeps the
+// same structural validation while letting each endpoint's literal `path`
+// (and this plugin's own `id`) survive into `ReturnType<typeof orgPolicy>`
+// for `../client/plugin.ts`'s `$InferServerPlugin`.
+export function orgPolicy(opts: EnterpriseOptions) {
   return {
     id: "enterprise-policy",
     options: opts,
@@ -304,7 +310,7 @@ export function orgPolicy(opts: EnterpriseOptions): BetterAuthPlugin {
         },
       };
     },
-  };
+  } satisfies BetterAuthPlugin;
 }
 
 export { findOrgByEmailDomain };

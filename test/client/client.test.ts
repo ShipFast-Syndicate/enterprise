@@ -8,7 +8,8 @@
 // value, per the task-9 self-review checklist ("tests verify real request
 // shapes").
 
-import { describe, expect, it, vi } from "vitest";
+import { createAuthClient } from "better-auth/client";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   discoverHomeRealm,
   EnterpriseClientError,
@@ -24,9 +25,20 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
-/** A `vi.fn` typed as `typeof fetch`, queued to resolve each call in order. */
+/**
+ * A `vi.fn` typed as `typeof fetch`, queued to resolve each call in order.
+ * A call beyond the queued responses is a test bug (a helper under test
+ * fetching more/fewer times than expected) — it fails loudly (a rejected
+ * promise naming the unexpected request) rather than silently replaying
+ * `responses[0]`, which would let such a bug pass unnoticed.
+ */
 function mockFetch(...responses: Response[]) {
-  const fn = vi.fn<typeof fetch>(async () => responses[0]!);
+  const fn = vi.fn<typeof fetch>(async (input, init) => {
+    throw new Error(
+      `mockFetch: unexpected call beyond the ${responses.length} queued response(s): ` +
+        `${init?.method ?? "GET"} ${String(input)}`,
+    );
+  });
   for (const response of responses) fn.mockResolvedValueOnce(response);
   return fn;
 }
@@ -48,6 +60,26 @@ describe("enterpriseClient", () => {
       "/enterprise/audit/verify": "GET",
       "/enterprise/sso/test-login/finish": "GET",
     });
+  });
+
+  // Type-level (fix round 1, controller ruling): `$InferServerPlugin`'s
+  // three-plugin intersection is only useful if it actually makes
+  // `authClient.enterprise.*` typed — this is `expectTypeOf`, not
+  // `expect`: `pnpm typecheck` is what actually enforces it (a regression
+  // here is a compile error, not a runtime assertion failure); vitest also
+  // evaluates the file at runtime, where `expectTypeOf(...)` is a no-op, so
+  // `createAuthClient` really does get constructed once as a smoke check
+  // that wiring `enterpriseClient()` into `plugins: [...]` doesn't throw.
+  it("types authClient.enterprise.* from PathToObject via $InferServerPlugin", () => {
+    const client = createAuthClient({ plugins: [enterpriseClient()] });
+
+    // "/enterprise/features" -> { enterprise: { features: Fn } }
+    expectTypeOf(client.enterprise.features).toBeFunction();
+    // "/enterprise/policy/set" -> { enterprise: { policy: { set: Fn } } }
+    expectTypeOf(client.enterprise.policy.set).toBeFunction();
+
+    expectTypeOf(client.enterprise.features).returns.not.toBeAny();
+    expectTypeOf(client.enterprise.policy.set).returns.not.toBeAny();
   });
 });
 

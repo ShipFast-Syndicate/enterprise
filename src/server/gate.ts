@@ -49,7 +49,13 @@ const ORG_ID_REQUIRED_IN_BODY = new Set<string>([
   "/scim/delete-provider-connection",
 ]);
 
-export function enterpriseGate(opts: EnterpriseOptions): BetterAuthPlugin {
+// No explicit `: BetterAuthPlugin` return-type annotation (client task-9 fix
+// round 1, applied here too for consistency — see `./enterprise-api/
+// plugin.ts`'s identical comment on `enterpriseApi`). `enterpriseGate` has
+// no `endpoints` of its own, so this doesn't unlock any new client typing
+// by itself, but keeps every plugin constructor in this package following
+// the same `satisfies BetterAuthPlugin` convention.
+export function enterpriseGate(opts: EnterpriseOptions) {
   return {
     id: "enterprise-gate",
     // Exposed the same way built-in plugins (e.g. `jwt`) expose their
@@ -101,5 +107,5 @@ export function enterpriseGate(opts: EnterpriseOptions): BetterAuthPlugin {
         },
       ],
     },
-  };
+  } satisfies BetterAuthPlugin;
 }

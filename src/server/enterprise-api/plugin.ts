@@ -100,7 +100,17 @@ function buildSsoEnforcePreconditionHook() {
   };
 }
 
-export function enterpriseApi(opts: EnterpriseOptions): BetterAuthPlugin {
+// No explicit `: BetterAuthPlugin` return-type annotation (client task-9
+// fix round 1): annotating it there would widen the whole returned object
+// to that general interface — whose `endpoints` field is the generic
+// `{ [key: string]: Endpoint }` index signature — discarding each
+// endpoint's own literal `path` before `ReturnType<typeof enterpriseApi>`
+// (`../client/plugin.ts`'s `$InferServerPlugin`) ever sees it. `satisfies
+// BetterAuthPlugin` on the returned object literal keeps the same
+// structural check (a typo here still fails `pnpm typecheck`) without that
+// widening — the standard TS pattern for "validate the shape, keep the
+// narrow inferred type" (in use since TS 4.9; this repo pins TS 5.9.3).
+export function enterpriseApi(opts: EnterpriseOptions) {
   return {
     id: "enterprise-api",
     endpoints: {
@@ -112,5 +122,5 @@ export function enterpriseApi(opts: EnterpriseOptions): BetterAuthPlugin {
     hooks: {
       before: [buildSsoEnforcePreconditionHook()],
     },
-  };
+  } satisfies BetterAuthPlugin;
 }

@@ -444,7 +444,13 @@ function buildWhere(
   return where;
 }
 
-export function auditLog(opts: EnterpriseOptions): BetterAuthPlugin {
+// No explicit `: BetterAuthPlugin` return-type annotation (client task-9 fix
+// round 1) — see `../enterprise-api/plugin.ts`'s identical comment on
+// `enterpriseApi` for why. `satisfies BetterAuthPlugin` below still
+// contextually types every nested closure here (`matcher`/`handler`, same
+// as an annotation would — the whole reason `satisfies` exists) while
+// keeping literal endpoint `path`s intact in `ReturnType<typeof auditLog>`.
+export function auditLog(opts: EnterpriseOptions) {
   const listEndpoint = createAuthEndpoint(
     "/enterprise/audit/list",
     { method: "GET", use: [sessionMiddleware], query: listQuerySchema },
@@ -635,5 +641,5 @@ export function auditLog(opts: EnterpriseOptions): BetterAuthPlugin {
         },
       ],
     },
-  };
+  } satisfies BetterAuthPlugin;
 }

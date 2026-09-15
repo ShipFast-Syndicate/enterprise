@@ -17,28 +17,43 @@
 // (`@better-auth/scim`'s own `/scim/v2/Groups*`), adding no `/enterprise/*`
 // endpoint of its own for this client to type.
 //
-// Known limitation (not a Task 9 regression — pre-existing on the server
-// side): `enterpriseApi`/`orgPolicy`/`auditLog` each declare an explicit
-// `: BetterAuthPlugin` return type (`../server/enterprise-api/plugin.ts` et
-// al.), so `ReturnType<typeof X>` is exactly that interface — whose
-// `endpoints` field is the generic `{ [key: string]: Endpoint }` index
-// signature (`@better-auth/core`'s `dist/types/plugin.d.mts`), not each
-// endpoint's own literal `path`/body/query types. `PathToObject`
-// (`better-auth/dist/client/path-to-object.d.mts`) needs those literal
-// `path` strings to synthesize `authClient.enterprise.*`'s nested method
-// names, so this intersection alone can't produce full per-endpoint
-// autocomplete; changing the server plugins' return-type annotations to
-// unlock that is out of scope here. `pathMethods` below is unaffected by
-// this — it's a plain runtime lookup keyed by literal path strings supplied
-// directly in this file, not derived from `$InferServerPlugin`.
+// Client task-9 fix round 1: `enterpriseApi`/`orgPolicy`/`auditLog` no
+// longer declare an explicit `: BetterAuthPlugin` return type (see each
+// file's own header comment) — `ReturnType<typeof X>` now carries every
+// endpoint's real literal `path`/body/query types, which `PathToObject`
+// (`better-auth/dist/client/path-to-object.d.mts`) needs to synthesize
+// `authClient.enterprise.*`'s nested method names (verified: `client.
+// enterprise.features` and `client.enterprise.policy.set` are both typed
+// functions — `test/client/client.test.ts`'s `expectTypeOf` block).
+//
+// One wrinkle intersecting three *specific* return types (rather than the
+// general `BetterAuthPlugin` interface) surfaces: each plugin's own `id`
+// literal differs (`"enterprise-api"`/`"enterprise-policy"`/
+// `"enterprise-audit"`) and — empirically, intersecting two object types
+// that share a property whose literal types are disjoint collapses the
+// *entire* intersection to `never` here (not just that one property to
+// `never`, which is what a minimal repro of the same pattern with plain
+// object-literal types does instead — verified both ways against this
+// pinned TypeScript 5.9.3; a compiler quirk on these specific
+// deeply-generic `ReturnType<>`s, not something to fully explain here).
+// `Omit<_, "id">` on each plugin before intersecting, with a single
+// `enterprise-*` id union reattached, sidesteps it entirely — an `as const`
+// on each plugin's own `id` field (the fallback the controller ruling
+// suggested) would not have helped, since the ids were never widened
+// non-literal to begin with; the problem was three *different* literals
+// colliding, not one losing its literal-ness.
 import type { BetterAuthClientPlugin } from "@better-auth/core";
 import type { auditLog } from "../server/audit/plugin";
 import type { enterpriseApi } from "../server/enterprise-api/plugin";
 import type { orgPolicy } from "../server/policy/plugin";
 
-type EnterpriseServerPlugins = ReturnType<typeof enterpriseApi> &
-  ReturnType<typeof orgPolicy> &
-  ReturnType<typeof auditLog>;
+type NoId<T> = Omit<T, "id">;
+
+type EnterpriseServerPlugins = NoId<ReturnType<typeof enterpriseApi>> &
+  NoId<ReturnType<typeof orgPolicy>> &
+  NoId<ReturnType<typeof auditLog>> & {
+    id: "enterprise-api" | "enterprise-policy" | "enterprise-audit";
+  };
 
 /**
  * better-auth client plugin for `@alphabros/enterprise`. Add it to
