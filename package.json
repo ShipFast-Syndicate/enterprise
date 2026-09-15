@@ -8,9 +8,38 @@
   "engines": {
     "node": ">=22"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShipFast-Syndicate/enterprise.git"
+  },
+  "homepage": "https://github.com/ShipFast-Syndicate/enterprise#readme",
+  "bugs": {
+    "url": "https://github.com/ShipFast-Syndicate/enterprise/issues"
+  },
+  "author": "Alpha Bros",
+  "keywords": [
+    "better-auth",
+    "sso",
+    "saml",
+    "oidc",
+    "scim",
+    "enterprise",
+    "organizations",
+    "audit-log",
+    "alphabros"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "sideEffects": [
+    "./dist/portal/*"
+  ],
   "files": [
     "dist",
-    "sql"
+    "sql",
+    "LICENSE",
+    "README.md"
   ],
   "bin": {
     "ab-enterprise": "./dist/cli/index.js"
@@ -31,7 +60,8 @@
     "./portal": {
       "types": "./dist/portal/index.d.ts",
       "import": "./dist/portal/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsup && rm -rf sql && cp -R src/schema/sql sql",
@@ -45,13 +75,26 @@
   },
   "peerDependencies": {
     "@better-auth/api-key": "1.6.33",
+    "@better-auth/core": "1.6.33",
     "@better-auth/passkey": "1.6.33",
     "@better-auth/scim": "1.6.33",
     "@better-auth/sso": "1.6.33",
     "@libsql/client": "^0.15.15",
     "better-auth": "1.6.33",
+    "better-call": "1.4.0",
     "drizzle-orm": "^0.45.2",
     "lit": "^3"
+  },
+  "peerDependenciesMeta": {
+    "lit": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    },
+    "@libsql/client": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@better-auth/api-key": "1.6.33",
@@ -62,6 +105,7 @@
     "@better-auth/utils": "0.4.2",
     "@better-fetch/fetch": "1.3.1",
     "@libsql/client": "^0.15.15",
+    "@peculiar/x509": "^2.1.0",
     "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/git": "^10.0.1",
     "@types/node": "^22.20.2",
@@ -75,6 +119,7 @@
     "jose": "^6.1.3",
     "lit": "^3.3.3",
     "prettier": "^3.9.6",
+    "reflect-metadata": "^0.2.2",
     "samlify": "2.13.1",
     "semantic-release": "^24.2.9",
     "tsup": "^8.5.1",

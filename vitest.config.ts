@@ -6,6 +6,10 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: ["src/**"],
+      // The coverage run tries to instrument every file `include` matches,
+      // including the plain-SQL migration file copied into `src/schema/sql/`
+      // — v8 coverage has no notion of a `.sql` file and fails parsing it.
+      exclude: ["**/*.sql"],
     },
     // vitest 4 silently ignores the old `environmentMatchGlobs` option (no
     // warning, no error — it just never applied happy-dom to test/portal/**).

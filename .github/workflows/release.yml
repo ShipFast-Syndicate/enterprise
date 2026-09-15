@@ -3,11 +3,99 @@ on:
   push:
     branches: [main]
 
+# Two fast merges to `main` must not race semantic-release into a double
+# tag/publish (security audit W3). `cancel-in-progress: false` — a release
+# already in flight must run to completion, not be torn down mid-publish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  # Version, changelog, tag and GitHub release via the hub's semantic-release
+  # reusable. `.releaserc.json`'s `@semantic-release/npm` runs with
+  # `npmPublish: false` — this job only bumps `package.json`'s version and
+  # writes the release commit/tag; it never touches the npm registry, so it
+  # needs no `NPM_TOKEN` at all (trusted publishing, no npm token anywhere —
+  # Bastien 2026-09-15). Secrets are passed explicitly (security audit W2) —
+  # no `secrets: inherit` — and only the two the hub actually declares for
+  # this repo's use: `RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY`, which mint
+  # the installation token `@semantic-release/git` needs to push the release
+  # commit past the `main` branch ruleset (see the hub's own comment in
+  # `reusable-release.yml`).
   release:
     permissions:
       contents: write
       issues: write
       pull-requests: write
     uses: ShipFast-Syndicate/.github/.github/workflows/reusable-release.yml@78bee37c6546003297a5740bbbc16a29f0832480 # v1
-    secrets: inherit
+    secrets:
+      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  # npm publish via OIDC trusted publishing + provenance — no NPM_TOKEN.
+  # This runs as its own job (not through the hub reusable, which has no
+  # `id-token: write` and cannot mint provenance) so it can carry the OIDC
+  # permission and the `npm` deployment environment directly.
+  #
+  # The hub's `reusable-release.yml` exposes no "did a release happen"
+  # output, so this job always runs and gates every step on whether `release`
+  # actually produced a new `v*` tag at the tip of `main` — a no-op semantic-
+  # release run (e.g. a merge with no releasable commits) leaves this job a
+  # fast no-op rather than failing or force-publishing a stale version.
+  #
+  # Must run on a GitHub-hosted runner: npm's OIDC trusted-publishing flow is
+  # not available on self-hosted runners.
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    environment: npm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Check for a new release tag
+        id: check
+        run: |
+          git fetch --tags
+          if TAG=$(git describe --exact-match --tags HEAD 2>/dev/null) && [[ "$TAG" == v* ]]; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout the released tag
+        if: steps.check.outputs.released == 'true'
+        run: git checkout "${{ steps.check.outputs.tag }}"
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        if: steps.check.outputs.released == 'true'
+
+      - uses: actions/setup-node@v7
+        if: steps.check.outputs.released == 'true'
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        if: steps.check.outputs.released == 'true'
+        run: pnpm install --frozen-lockfile
+
+      # npm's OIDC trusted-publishing flow requires npm >= 11.5.1.
+      - name: Update npm
+        if: steps.check.outputs.released == 'true'
+        run: npm i -g npm@latest
+
+      - name: Build
+        if: steps.check.outputs.released == 'true'
+        run: pnpm build
+
+      - name: Publish with provenance
+        if: steps.check.outputs.released == 'true'
+        run: npm publish --provenance --access public
