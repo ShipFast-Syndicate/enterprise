@@ -49,7 +49,7 @@
     "@better-auth/scim": "1.6.33",
     "@better-auth/sso": "1.6.33",
     "better-auth": "1.6.33",
-    "drizzle-orm": ">=0.36",
+    "drizzle-orm": "^0.45.2",
     "lit": "^3"
   },
   "devDependencies": {
@@ -67,7 +67,7 @@
     "better-auth": "1.6.33",
     "better-call": "1.4.0",
     "conventional-changelog-conventionalcommits": "^8.0.0",
-    "drizzle-orm": "^0.44.7",
+    "drizzle-orm": "^0.45.2",
     "eslint": "^9.39.5",
     "happy-dom": "^17.6.3",
     "lit": "^3.3.3",
