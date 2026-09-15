@@ -36,6 +36,29 @@ Every step writes an `audit_event` row (via the underlying
 `/enterprise/sso/*` endpoints and `/enterprise/policy/set`, both wrapped by
 `auditLog()`).
 
+### Who may do which step
+
+Steps 1–4 are open to an org **owner or admin**. Step 5 is split, because
+`breakGlassUserId` names the one person who keeps signing in when SSO
+enforcement locks everyone else out:
+
+| Action | Owner | Admin |
+|---|---|---|
+| Register a provider, verify the domain, run the test login | yes | yes |
+| Set or change `breakGlassUserId` (including clearing it) | yes | **no** — `403 NOT_ORG_OWNER` |
+| Enable `ssoEnforced` while leaving `breakGlassUserId` alone | yes | yes |
+| Write `groupRoleMap` | yes | **no** — `403 NOT_ORG_OWNER` |
+
+So the supported admin path through step 5 is: an owner sets the break-glass
+user once (`POST /enterprise/policy/set { orgId, breakGlassUserId }`), and an
+admin can then enable enforcement with `{ orgId, ssoEnforced: true }` —
+omitting `breakGlassUserId`, or repeating the current value unchanged.
+
+`<ab-sso-wizard>` always sends `breakGlassUserId` (defaulted to the signed-in
+user), so an admin running the wizard before an owner has chosen one gets
+"An organization owner must set the break-glass user first" on that step
+rather than the server's bare "Owner role required."
+
 Raw SAML/OIDC diagnostics (HTTP status + error code, not just a friendly
 message) are shown **only** in the `test-login` step, per the design's error
 handling rule — every other step renders through the same generic error UI

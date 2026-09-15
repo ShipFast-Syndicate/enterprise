@@ -414,6 +414,46 @@ describe("<ab-sso-wizard>", () => {
     await vi.waitFor(() => expect(el.step).toBe("done"));
   });
 
+  // Final review I-1: the server keeps *choosing* the break-glass user
+  // owner-only, so an admin who walks this wizard reaches the last button and
+  // gets `NOT_ORG_OWNER`. The raw server message ("Owner role required.")
+  // says nothing about the way out.
+  it("an admin hitting NOT_ORG_OWNER on the enforce step is told an owner must set the break-glass user", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.includes("/enterprise/sso/providers")) {
+        return jsonResponse(200, {
+          providers: [
+            provider({ domainVerified: true, testLoginPassedAt: "2026-01-01T00:00:00Z" }),
+          ],
+        });
+      }
+      if (url.includes("/get-session")) return jsonResponse(200, { user: { id: "admin_1" } });
+      if (url.includes("/enterprise/policy/set")) {
+        return jsonResponse(403, { code: "NOT_ORG_OWNER", message: "Owner role required." });
+      }
+      throw new Error(`unmocked fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const el = makeEl();
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.step).toBe("enforce"));
+    await vi.waitFor(() =>
+      expect(
+        el.shadowRoot!.querySelector<HTMLInputElement>('[name="breakGlassUserId"]')!.value,
+      ).toBe("admin_1"),
+    );
+
+    el.shadowRoot!.querySelector<HTMLButtonElement>('[data-testid="enforce-toggle"]')!.click();
+
+    await vi.waitFor(() => {
+      const error = el.shadowRoot!.querySelector(".ab-error");
+      expect(error?.textContent).toBe("An organization owner must set the break-glass user first");
+    });
+    expect(el.step).toBe("enforce");
+  });
+
   it("a storage event keyed ab_sso_test re-fetches providers and advances to enforce", async () => {
     let passed = false;
     vi.stubGlobal(

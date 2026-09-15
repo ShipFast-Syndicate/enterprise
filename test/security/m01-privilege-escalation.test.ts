@@ -143,6 +143,89 @@ describe("M-01 — the admin→owner escalation is closed at every step", () => 
     expect(role.rows[0]!.role).toBe("member");
   });
 
+  // Final review I-1 — the rule M-01 introduced, narrowed to where the risk
+  // actually is. Choosing *who* is exempt from enforcement stays owner-only
+  // (the two cases above still hold); switching enforcement on against an
+  // exemption an owner already chose is an admin's job, because the spec,
+  // the README and `docs/sso.md` all sell SSO setup as an owner-or-admin
+  // flow and the wizard's last step was unreachable for admins.
+  describe("an admin may enable SSO enforcement against an owner's break-glass user", () => {
+    async function orgReadyToEnforce(t: TestAuth) {
+      const owner = await signUpOwner(t, "owner@acme.test");
+      const { orgId } = await createOrg(t, owner.cookie);
+      await t.client.execute({
+        sql: `INSERT INTO "ssoProvider" (id, issuer, domain, domainVerified, organizationId, providerId, userId) VALUES (?, ?, ?, 1, ?, ?, ?)`,
+        args: ["ssop_okta", "https://idp.test", "acme.test", orgId, "okta", owner.userId],
+      });
+      const now = Date.now();
+      await t.client.execute({
+        sql: `INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [
+          "verif_test_ok_okta",
+          "ab-sso-test-ok:okta",
+          new Date().toISOString(),
+          now + 365 * 24 * 60 * 60 * 1000,
+          now,
+          now,
+        ],
+      });
+      // Only the owner can put the break-glass user in place.
+      const set = await setPolicy(t, owner.cookie, { orgId, breakGlassUserId: owner.userId });
+      expect(set.status).toBe(200);
+      return { owner, orgId };
+    }
+
+    it("with breakGlassUserId omitted entirely", async () => {
+      const t = await makeAuth();
+      const { owner, orgId } = await orgReadyToEnforce(t);
+      const admin = await adminOf(t, orgId);
+
+      const res = await setPolicy(t, admin.cookie, { orgId, ssoEnforced: true });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        ssoEnforced: true,
+        breakGlassUserId: owner.userId,
+      });
+    });
+
+    it("with breakGlassUserId repeated unchanged", async () => {
+      const t = await makeAuth();
+      const { owner, orgId } = await orgReadyToEnforce(t);
+      const admin = await adminOf(t, orgId);
+
+      const res = await setPolicy(t, admin.cookie, {
+        orgId,
+        ssoEnforced: true,
+        breakGlassUserId: owner.userId,
+      });
+      expect(res.status).toBe(200);
+    });
+
+    it("but still not while pointing breakGlassUserId at someone else", async () => {
+      const t = await makeAuth();
+      const { orgId } = await orgReadyToEnforce(t);
+      const admin = await adminOf(t, orgId);
+
+      const res = await setPolicy(t, admin.cookie, {
+        orgId,
+        ssoEnforced: true,
+        breakGlassUserId: admin.userId,
+      });
+      expect(res.status).toBe(403);
+      expect(await code(res)).toBe("NOT_ORG_OWNER");
+    });
+
+    it("but still not while clearing an owner's break-glass user", async () => {
+      const t = await makeAuth();
+      const { orgId } = await orgReadyToEnforce(t);
+      const admin = await adminOf(t, orgId);
+
+      const res = await setPolicy(t, admin.cookie, { orgId, breakGlassUserId: null });
+      expect(res.status).toBe(403);
+      expect(await code(res)).toBe("NOT_ORG_OWNER");
+    });
+  });
+
   it("an admin may still list and revoke SCIM tokens", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t);

@@ -369,7 +369,16 @@ export class AbSsoWizard extends AbElement {
       this.step = "done";
       this.emitChange({ type: "sso-enforced" });
     } catch (e) {
-      this.error = e;
+      // Final review I-1. `/enterprise/policy/set` keeps *choosing* the
+      // break-glass user owner-only, and this step defaults the field to the
+      // signed-in user — so an admin walking the wizard reaches the last
+      // button and gets `NOT_ORG_OWNER`, whose server message ("Owner role
+      // required.") says nothing about what to do next. An admin may enable
+      // enforcement once an owner has set a break-glass user; say that.
+      this.error =
+        e instanceof PortalError && e.code === "NOT_ORG_OWNER"
+          ? new Error("An organization owner must set the break-glass user first")
+          : e;
     }
   }
 

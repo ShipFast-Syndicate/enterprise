@@ -141,13 +141,31 @@ function buildPolicyEndpoints() {
       await requireOwnerOrAdmin(fullCtx, orgId);
       await requireFeature(fullCtx, orgId, "enforce_2fa");
 
+      const existing = await findPolicyRow(fullCtx, orgId);
+      const current = toOrgPolicy(existing, orgId);
+
       // The two knobs that can mint owners are owner-only (M-01): an admin
       // who can write `groupRoleMap` can point a group at `owner`, mint
       // themselves a SCIM token and add themselves to that group — the full
       // admin→owner escalation the audit reproduced end to end. Same for
       // `breakGlassUserId`, which exempts a user from `ssoEnforced` *and*
       // from `allowedMethods`.
-      if (patch.groupRoleMap !== undefined || patch.breakGlassUserId !== undefined) {
+      //
+      // Narrowed to an actual *change* of the break-glass identity (final
+      // review I-1). M-01 made the whole field owner-only, which silently
+      // made the SSO wizard's last step owner-only too — the spec, the README
+      // and `docs/sso.md` all describe SSO setup as an owner-**or-admin**
+      // flow, and an admin walked four steps into a bare "Owner role
+      // required." The risk M-01 named is in *choosing* who is exempt from
+      // enforcement, not in switching enforcement on against an exemption an
+      // owner already chose: so an admin may enable `ssoEnforced` while
+      // leaving `breakGlassUserId` alone (omitted entirely, or repeated
+      // unchanged), and setting a new one — or clearing an existing one —
+      // still requires an owner. `groupRoleMap` stays owner-only on any
+      // write: it has no equivalent "unchanged" use.
+      const changesBreakGlass =
+        patch.breakGlassUserId !== undefined && patch.breakGlassUserId !== current.breakGlassUserId;
+      if (patch.groupRoleMap !== undefined || changesBreakGlass) {
         await requireOwner(fullCtx, orgId);
       }
       // `owner` is refused as a mapping target outright in v0.1 (M-01):
@@ -160,8 +178,6 @@ function buildPolicyEndpoints() {
         });
       }
 
-      const existing = await findPolicyRow(fullCtx, orgId);
-      const current = toOrgPolicy(existing, orgId);
       const next: OrgPolicy = {
         orgId,
         require2fa: patch.require2fa ?? current.require2fa,
