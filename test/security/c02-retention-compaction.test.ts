@@ -9,7 +9,9 @@
 // `verifyChain` re-anchors on it.
 
 import { describe, expect, it } from "vitest";
+import type { AuthContext } from "better-auth";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
+import { compactChain, hashRow, type AuditRowForHash } from "../../src/server/audit/chain";
 import { auditRows } from "./helpers";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -101,6 +103,147 @@ describe("C-02 — retention compaction keeps the chain verifiable", () => {
     const verdict = await verify(t, cookie, orgId);
     expect(verdict.ok).toBe(false);
     expect(verdict.brokenAtSeq).toBe(3);
+  });
+
+  // I-4 — C-02's remaining crash window. Compaction used to delete the
+  // expired prefix and only then create the anchor: a crash, a request
+  // timeout or a throwing `create` in between left the prefix gone with
+  // nothing to re-anchor on, and `verify` reported `ok:false` for that org
+  // from then on — the same permanent false positive C-02 exists to prevent,
+  // reached through a crash instead of through normal operation, with no
+  // recovery path and a plain `GET /enterprise/audit/list` as the trigger.
+  describe("a crash mid-compaction still leaves a verifiable chain", () => {
+    /**
+     * The live adapter with one method replaced by a thrower — a crash at that
+     * exact step. Cast because `auth.$context`'s adapter is typed against the
+     * *inferred* options of this particular instance, while `compactChain`
+     * takes the generic `AuthContext["adapter"]`; it is the same object.
+     */
+    async function adapterThatFailsAt(
+      t: TestAuth,
+      method: "deleteMany" | "update",
+    ): Promise<AuthContext["adapter"]> {
+      const { adapter } = await t.auth.$context;
+      return new Proxy(adapter, {
+        get(target, prop, receiver) {
+          if (prop === method) {
+            return () => Promise.reject(new Error("simulated crash"));
+          }
+          return Reflect.get(target, prop, receiver) as unknown;
+        },
+      }) as unknown as AuthContext["adapter"];
+    }
+
+    /**
+     * Writes a valid chain straight to the table, each row `ageDays` old.
+     * Back-dating rows written through the API instead (the `ageRows` helper
+     * above) rewrites `created_at`, which is part of the hashed payload — fine
+     * for the tests where those rows are compacted away before anything
+     * verifies them, but not here, where the whole point is that they survive
+     * a crash and still verify.
+     */
+    async function seedChain(t: TestAuth, orgId: string, ageDays: number[]): Promise<void> {
+      await t.client.execute({ sql: `DELETE FROM audit_event WHERE org_id = ?`, args: [orgId] });
+      let prevHash = "GENESIS";
+      for (const [index, days] of ageDays.entries()) {
+        const row: AuditRowForHash = {
+          orgId,
+          seq: index + 1,
+          actorType: "user",
+          actorId: "user_1",
+          action: "member.invited",
+          targetType: "member",
+          targetId: `inv_${index + 1}`,
+          ip: null,
+          userAgent: null,
+          metadata: {},
+          createdAt: Date.now() - days * DAY_MS,
+        };
+        const hash = await hashRow(prevHash, row);
+        await t.client.execute({
+          sql: `INSERT INTO audit_event (id, org_id, seq, actor_type, actor_id, action, target_type, target_id, ip, user_agent, metadata, created_at, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            `evt_${index + 1}`,
+            row.orgId,
+            row.seq,
+            row.actorType,
+            row.actorId,
+            row.action,
+            row.targetType,
+            row.targetId,
+            row.ip,
+            row.userAgent,
+            JSON.stringify(row.metadata),
+            row.createdAt,
+            prevHash,
+            hash,
+          ],
+        });
+        prevHash = hash;
+      }
+    }
+
+    /** Two rows past the 30-day window, one inside it — and the cutoff that window implies. */
+    async function seedAgedChain(t: TestAuth, orgId: string): Promise<Date> {
+      await seedChain(t, orgId, [40, 40, 0]);
+      return new Date(Date.now() - 30 * DAY_MS);
+    }
+
+    async function actions(t: TestAuth, orgId: string): Promise<string[]> {
+      const rows = await auditRows(t, orgId);
+      return rows.map((r) => String(r.action));
+    }
+
+    it("crashing before the delete lands: the original chain is untouched and still verifies", async () => {
+      const t = await makeAuth({ audit: { retentionDays: 30 } });
+      const { cookie } = await signUpOwner(t);
+      const { orgId } = await createOrg(t, cookie);
+      const cutoff = await seedAgedChain(t, orgId);
+
+      await expect(
+        compactChain(
+          { context: { adapter: await adapterThatFailsAt(t, "deleteMany") } },
+          orgId,
+          cutoff,
+        ),
+      ).rejects.toThrow("simulated crash");
+
+      // The pending anchor is there, in front of a prefix that never went away.
+      expect(await actions(t, orgId)).toEqual([
+        "audit.retention_compacting",
+        "member.invited",
+        "member.invited",
+        "member.invited",
+      ]);
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+
+      // …and the next compaction sweeps the stale anchor with the prefix.
+      const retry = await t.api.post("/enterprise/audit/compact", { orgId }, { cookie });
+      expect(retry.status).toBe(200);
+      expect(await actions(t, orgId)).toEqual(["audit.retention_compacted", "member.invited"]);
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+    });
+
+    it("crashing after the delete, before the anchor is marked complete: the pending anchor still anchors the chain", async () => {
+      const t = await makeAuth({ audit: { retentionDays: 30 } });
+      const { cookie } = await signUpOwner(t);
+      const { orgId } = await createOrg(t, cookie);
+      const cutoff = await seedAgedChain(t, orgId);
+
+      await expect(
+        compactChain(
+          { context: { adapter: await adapterThatFailsAt(t, "update") } },
+          orgId,
+          cutoff,
+        ),
+      ).rejects.toThrow("simulated crash");
+
+      // This is the state the old delete-then-create order could not survive:
+      // the expired prefix is gone. The anchor written *first* is what keeps
+      // the chain verifiable.
+      expect(await actions(t, orgId)).toEqual(["audit.retention_compacting", "member.invited"]);
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+    });
   });
 
   it("POST /enterprise/audit/compact is owner/admin-only and feature-gated", async () => {

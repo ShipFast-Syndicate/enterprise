@@ -65,6 +65,18 @@
   tamper-evidence remain two different guarantees: `audit-verify` proves nothing was altered
   **within the retention window**, and the anchor row records how many rows left it, not what
   they said.
+- **Compaction is crash-safe without a transaction.** The anchor row is written **before** the
+  delete, in three steps: insert it with `action: audit.retention_compacting`, delete the
+  expired prefix, then flip the action to `audit.retention_compacted` (recomputing its hash,
+  since `action` is part of the hashed payload). `verifyChain` reads both states — a pending
+  anchor still sitting in front of its prefix means the delete never ran, so the original chain
+  is verified from `GENESIS` and the anchor ignored; a pending anchor whose prefix is already
+  gone is treated exactly like a completed one. Either way the chain verifies `ok` and the next
+  compaction sweeps the stale pending anchor away with the prefix it stands for, because the
+  anchor always takes the `seq` one below every row the org currently holds. (Before this, a
+  crash between the delete and the anchor's creation left the prefix gone with nothing to
+  re-anchor on, and `verify` reported tampering for that org permanently, with no recovery
+  path.) No transaction is used: better-auth's generic adapter does not expose one.
 - **Compaction is triggered by a read.** It runs on `GET /enterprise/audit/list` — already
   owner/admin-only and feature-gated — because a deployment with no scheduler has no other
   reliable trigger, and on demand via `POST /enterprise/audit/compact` (same authorization).

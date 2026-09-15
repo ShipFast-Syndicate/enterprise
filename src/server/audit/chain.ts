@@ -21,6 +21,7 @@
 // out of a database and normalize them before verifying.
 
 import type { AuthContext } from "better-auth";
+import type { Where } from "@better-auth/core/db/adapter";
 
 type AuditAdapter = AuthContext["adapter"];
 
@@ -72,6 +73,30 @@ const GENESIS = "GENESIS";
  * `compactChain` below.
  */
 export const RETENTION_COMPACTED_ACTION = "audit.retention_compacted";
+
+/**
+ * The action the anchor row carries *while* a compaction is in flight (I-4).
+ *
+ * Compaction used to delete the expired prefix and only then create the
+ * anchor, under the in-process lock alone. A crash, a request timeout or a
+ * throwing `create` between those two calls left the prefix gone with nothing
+ * to re-anchor on, and `verifyChain` reported `ok:false` for that org from
+ * then on — the permanent false positive C-02 was raised to eliminate,
+ * reachable again through a crash. The anchor is written **first** now, with
+ * this action, and flipped to `RETENTION_COMPACTED_ACTION` once the delete
+ * has succeeded, so both crash windows leave a verifiable chain:
+ *
+ * - crash before/during the delete → a pending anchor sitting in front of the
+ *   still-intact original prefix; `verifyChain` ignores it and verifies the
+ *   real chain from `GENESIS`.
+ * - crash after the delete, before the flip → a pending anchor whose prefix is
+ *   gone; `verifyChain` treats it exactly like a completed anchor.
+ *
+ * Either way the next compaction sweeps the stale pending anchor with the
+ * prefix it stands in front of, because it always takes a `seq` below every
+ * row the org currently has (see `compactChain`).
+ */
+export const RETENTION_COMPACTING_ACTION = "audit.retention_compacting";
 
 /**
  * Deterministic JSON serialization of the hashed fields, in the fixed key
@@ -143,23 +168,58 @@ export async function hashRow(prevHash: string, row: AuditRowForHash): Promise<s
 export async function verifyChain(
   rows: AuditRow[],
 ): Promise<{ ok: true } | { ok: false; brokenAtSeq: number }> {
-  const sorted = [...rows].sort((a, b) => a.seq - b.seq);
-  let prevHash = GENESIS;
+  const result = await verifyChainPage(rows, null);
+  return result.ok ? { ok: true } : result;
+}
 
-  const anchor = sorted[0];
-  if (anchor && anchor.action === RETENTION_COMPACTED_ACTION) {
-    const lastHash = (anchor.metadata as { lastHash?: unknown } | undefined)?.lastHash;
+/**
+ * One page of `verifyChain`, so a caller can walk a long chain in bounded
+ * batches instead of materialising and hashing the whole table at once (I-3
+ * — `/enterprise/audit/verify` is a one-click action in `<ab-audit-log>`).
+ *
+ * `prevHash` is `null` for the **first** page — the anchor rules above apply
+ * and the baseline is `GENESIS` — and otherwise the `prevHash` the previous
+ * page returned. Pages must be `seq`-ascending, contiguous, and non-empty
+ * except possibly the first.
+ */
+export async function verifyChainPage(
+  rows: AuditRow[],
+  prevHashIn: string | null,
+): Promise<{ ok: true; prevHash: string } | { ok: false; brokenAtSeq: number }> {
+  const sorted = [...rows].sort((a, b) => a.seq - b.seq);
+  let prevHash = prevHashIn ?? GENESIS;
+
+  const anchor = prevHashIn === null ? sorted[0] : undefined;
+  if (
+    anchor &&
+    (anchor.action === RETENTION_COMPACTED_ACTION || anchor.action === RETENTION_COMPACTING_ACTION)
+  ) {
+    const metadata = anchor.metadata as
+      { lastHash?: unknown; compactedThroughSeq?: unknown } | undefined;
+    const lastHash = metadata?.lastHash;
     if (typeof lastHash !== "string" || anchor.prevHash !== lastHash) {
       return { ok: false, brokenAtSeq: anchor.seq };
     }
     if ((await hashRow(anchor.prevHash, anchor)) !== anchor.hash) {
       return { ok: false, brokenAtSeq: anchor.seq };
     }
-    // The surviving rows chain back to the *compacted-away* tail, not to the
-    // anchor's own hash — that's what makes the anchor a stand-in for the
-    // prefix rather than a link in the chain.
+    // The anchor is never itself a link in the chain — it is a stand-in for
+    // the prefix that is (or is about to be) gone, which is why the rows
+    // after it carry the *compacted-away* tail's hash, not the anchor's own.
     sorted.shift();
-    prevHash = lastHash;
+    // A **pending** anchor still standing in front of the rows it was going
+    // to replace means the delete never ran (I-4): the original chain is
+    // intact all the way back to `GENESIS`, so verify it as such and ignore
+    // the anchor entirely. A pending anchor whose prefix is already gone —
+    // the crash between the delete and the flip — is a completed anchor in
+    // every way that matters here.
+    const compactedThroughSeq = metadata?.compactedThroughSeq;
+    const prefixStillPresent =
+      anchor.action === RETENTION_COMPACTING_ACTION &&
+      typeof compactedThroughSeq === "number" &&
+      sorted[0] !== undefined &&
+      sorted[0].seq <= compactedThroughSeq;
+    prevHash = prefixStillPresent ? GENESIS : lastHash;
   }
 
   for (const row of sorted) {
@@ -172,7 +232,7 @@ export async function verifyChain(
     }
     prevHash = row.hash;
   }
-  return { ok: true };
+  return { ok: true, prevHash };
 }
 
 // Driver error codes that mean "a row with this unique key already exists"
@@ -328,7 +388,7 @@ export async function writeAudit(
 }
 
 export interface CompactionResult {
-  /** The highest `seq` that was compacted away; also the anchor row's own `seq`. */
+  /** The highest `seq` that was compacted away. The anchor row itself sits *below* every surviving row (see `compactChain`), not at this `seq`. */
   compactedThroughSeq: number;
   /** How many rows were removed (the anchor row itself replaces them all). */
   compactedCount: number;
@@ -340,12 +400,19 @@ export interface CompactionResult {
  * Retention as **archival compaction** rather than a bare delete (C-02).
  *
  * Every row of `orgId`'s chain at or below the highest `seq` older than
- * `cutoff` is removed and replaced by a single anchor row occupying that
- * same `seq`, carrying `{compactedThroughSeq, compactedCount, lastHash}` in
- * its metadata and the removed tail's hash as its `prevHash`. `verifyChain`
- * knows how to re-anchor on it, so a chain that has been compacted still
- * verifies `ok` — where the pre-C-02 hard delete left it permanently
- * reporting `ok:false, brokenAtSeq:<first surviving row>`.
+ * `cutoff` is removed and replaced by a single anchor row carrying
+ * `{compactedThroughSeq, compactedCount, lastHash}` in its metadata and the
+ * removed tail's hash as its `prevHash`. `verifyChain` knows how to re-anchor
+ * on it, so a chain that has been compacted still verifies `ok` — where the
+ * pre-C-02 hard delete left it permanently reporting `ok:false,
+ * brokenAtSeq:<first surviving row>`.
+ *
+ * The anchor is written **before** the delete and in three phases (I-4), so
+ * neither crash window can leave the chain unverifiable — see
+ * `RETENTION_COMPACTING_ACTION`. It takes the `seq` one below the org's
+ * current lowest rather than the compacted-through `seq`, because that one is
+ * still occupied while the anchor is being written and `(org_id, seq)` is
+ * unique.
  *
  * Rows are selected by `seq <= <highest expired seq>` rather than by
  * `createdAt` alone so that a *previous* anchor row (whose `createdAt` is
@@ -375,53 +442,83 @@ export async function compactChain(
     const through = expired[0];
     if (!through) return null;
 
-    const doomed = await adapter.findMany<{ seq: number }>({
+    // The lowest `seq` the org currently holds, including any anchor a
+    // previous compaction left behind. The new anchor goes one below it,
+    // which is the only way to write it **before** the delete: `seq` is an
+    // integer and `audit_event_org_seq` is unique per `(org_id, seq)`, so the
+    // compacted-through `seq` this anchor stands for is still occupied at
+    // that point. Anchors therefore march downward — 0, then -1, … — one step
+    // per compaction, and each one is swept by the next compaction's delete
+    // because it always sits inside `[minSeq, through.seq]`.
+    const lowest = await adapter.findMany<{ seq: number }>({
       model: "auditEvent",
-      where: [
-        { field: "orgId", value: orgId },
-        { field: "seq", value: through.seq, operator: "lte" },
-      ],
+      where: [{ field: "orgId", value: orgId }],
+      sortBy: { field: "seq", direction: "asc" },
+      limit: 1,
     });
-    await adapter.deleteMany({
-      model: "auditEvent",
-      where: [
-        { field: "orgId", value: orgId },
-        { field: "seq", value: through.seq, operator: "lte" },
-      ],
-    });
+    const minSeq = lowest[0]?.seq ?? 1;
+    const anchorSeq = minSeq - 1;
+
+    const doomedWhere: Where[] = [
+      { field: "orgId", value: orgId },
+      { field: "seq", value: minSeq, operator: "gte" },
+      { field: "seq", value: through.seq, operator: "lte" },
+    ];
+    // Counted, not fetched: the rows are about to be deleted and only their
+    // number is recorded, so there is no reason to materialise them (the
+    // sibling of I-3's unbounded read, on the write path).
+    const compactedCount = await adapter.count({ model: "auditEvent", where: doomedWhere });
 
     const createdAt = Date.now();
     const rowForHash: AuditRowForHash = {
       orgId,
-      seq: through.seq,
+      seq: anchorSeq,
       actorType: "system",
       actorId: null,
-      action: RETENTION_COMPACTED_ACTION,
+      action: RETENTION_COMPACTING_ACTION,
       targetType: "organization",
       targetId: orgId,
       ip: null,
       userAgent: null,
       metadata: {
         compactedThroughSeq: through.seq,
-        compactedCount: doomed.length,
+        compactedCount,
         lastHash: through.hash,
       },
       createdAt,
     };
-    const hash = await hashRow(through.hash, rowForHash);
-    await adapter.create<AuditEventDbRow>({
+
+    // Phase 1 — write the anchor, marked pending.
+    const pendingHash = await hashRow(through.hash, rowForHash);
+    const anchorRow = await adapter.create<AuditEventDbRow>({
       model: "auditEvent",
       data: {
         ...rowForHash,
         createdAt: new Date(createdAt),
         prevHash: through.hash,
-        hash,
+        hash: pendingHash,
+      },
+    });
+
+    // Phase 2 — remove the prefix the anchor now stands for.
+    await adapter.deleteMany({ model: "auditEvent", where: doomedWhere });
+
+    // Phase 3 — mark the anchor complete. `action` is part of the hashed
+    // payload (`canonical`), so the hash is recomputed rather than carried
+    // over; `prevHash` is unchanged.
+    const completed: AuditRowForHash = { ...rowForHash, action: RETENTION_COMPACTED_ACTION };
+    await adapter.update({
+      model: "auditEvent",
+      where: [{ field: "id", value: anchorRow.id }],
+      update: {
+        action: RETENTION_COMPACTED_ACTION,
+        hash: await hashRow(through.hash, completed),
       },
     });
 
     return {
       compactedThroughSeq: through.seq,
-      compactedCount: doomed.length,
+      compactedCount,
       lastHash: through.hash,
     };
   });

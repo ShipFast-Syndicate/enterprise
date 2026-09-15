@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { auditLog, AUDITED_PATHS } from "../../src/server/audit/plugin";
+import { auditLog, AUDITED_PATHS, VERIFY_PAGE_SIZE } from "../../src/server/audit/plugin";
+import { hashRow, type AuditRowForHash } from "../../src/server/audit/chain";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
 
 async function inviteMember(t: TestAuth, cookie: string, orgId: string, email: string) {
@@ -342,6 +343,82 @@ describe("GET /enterprise/audit/verify", () => {
     const broken = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, { cookie });
     expect(broken.status).toBe(200);
     expect(await broken.json()).toEqual({ ok: false, brokenAtSeq: 1 });
+  });
+
+  // I-3 — this endpoint used to read the org's whole chain in one unbounded
+  // `findMany` and then SHA-256 every row of it, on a one-click action in
+  // `<ab-audit-log>`. It pages now, so the interesting case is a chain that
+  // spans more than one page: the running `prevHash` has to carry across the
+  // page boundary, or a perfectly good chain would report broken at the first
+  // row of page 2 (and a tamper there would be missed).
+  describe("chains longer than one page", () => {
+    const ROWS = VERIFY_PAGE_SIZE + 5;
+
+    /** Writes a valid `ROWS`-long chain for `orgId` straight to the table, in one batch. */
+    async function seedChain(t: TestAuth, orgId: string): Promise<void> {
+      const statements: Array<{ sql: string; args: Array<string | number | null> }> = [];
+      let prevHash = "GENESIS";
+      for (let seq = 1; seq <= ROWS; seq++) {
+        const row: AuditRowForHash = {
+          orgId,
+          seq,
+          actorType: "user",
+          actorId: "user_1",
+          action: "member.invited",
+          targetType: "member",
+          targetId: `inv_${seq}`,
+          ip: null,
+          userAgent: null,
+          metadata: {},
+          createdAt: 1_700_000_000_000 + seq,
+        };
+        const hash = await hashRow(prevHash, row);
+        statements.push({
+          sql: `INSERT INTO audit_event (id, org_id, seq, actor_type, actor_id, action, target_type, target_id, ip, user_agent, metadata, created_at, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            `evt_${seq}`,
+            row.orgId,
+            row.seq,
+            row.actorType,
+            row.actorId,
+            row.action,
+            row.targetType,
+            row.targetId,
+            row.ip,
+            row.userAgent,
+            JSON.stringify(row.metadata),
+            row.createdAt,
+            prevHash,
+            hash,
+          ],
+        });
+        prevHash = hash;
+      }
+      await t.client.execute(`DELETE FROM audit_event WHERE org_id = '${orgId}'`);
+      await t.client.batch(statements, "write");
+    }
+
+    it("verifies a chain spanning several pages, and still catches a tamper past the first page", async () => {
+      const t = await makeAuth();
+      const { cookie } = await signUpOwner(t);
+      const { orgId } = await createOrg(t, cookie);
+      await seedChain(t, orgId);
+
+      const ok = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, { cookie });
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toEqual({ ok: true });
+
+      // The first row of the second page — the boundary the paging has to
+      // carry `prevHash` across.
+      const boundarySeq = VERIFY_PAGE_SIZE + 1;
+      await t.client.execute({
+        sql: `UPDATE audit_event SET metadata = ? WHERE org_id = ? AND seq = ?`,
+        args: [JSON.stringify({ tampered: true }), orgId, boundarySeq],
+      });
+
+      const broken = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, { cookie });
+      expect(await broken.json()).toEqual({ ok: false, brokenAtSeq: boundarySeq });
+    });
   });
 });
 

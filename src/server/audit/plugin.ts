@@ -53,7 +53,7 @@ import { requireOwnerOrAdmin } from "../policy/store";
 import type { EnterpriseOptions } from "../types";
 import {
   compactChain,
-  verifyChain,
+  verifyChainPage,
   writeAudit,
   type AuditInput,
   type AuditRow,
@@ -503,6 +503,16 @@ const compactBodySchema = z.object({
 /** Default ceiling on one `/enterprise/audit/export` call (M-05); override with `audit.exportMaxRows`. */
 export const DEFAULT_EXPORT_ROW_CAP = 100_000;
 
+/**
+ * Rows `/enterprise/audit/verify` reads and hashes per batch (I-3). Not
+ * configurable: it is an implementation detail of how the endpoint walks the
+ * chain, not a limit on what it verifies — every row is still checked, and
+ * the answer is identical whatever the batch size. 1000 keeps one page's
+ * `AuditEventRow[]` comfortably small while keeping the number of round trips
+ * to the adapter low.
+ */
+export const VERIFY_PAGE_SIZE = 1000;
+
 function buildWhere(
   orgId: string,
   filters: { action?: string; actorId?: string; from?: number; to?: number },
@@ -605,14 +615,33 @@ export function auditLog(opts: EnterpriseOptions) {
       await requireOwnerOrAdmin(ctx as unknown as GenericEndpointContext, orgId);
       await requireFeature(ctx as unknown as GenericEndpointContext, orgId, "audit_log");
 
-      const rows = await ctx.context.adapter.findMany<AuditEventRow>({
-        model: "auditEvent",
-        where: [{ field: "orgId", value: orgId }],
-        sortBy: { field: "seq", direction: "asc" },
-      });
+      // Paged (I-3). This used to be one unbounded `findMany` that
+      // materialised the org's whole chain and then SHA-256'd every row of
+      // it — worse per row than the export endpoint M-05 capped, and it is
+      // the endpoint `<ab-audit-log>`'s "Verify chain" badge calls, so a
+      // single click on a large org blocked on all of it. Memory is bounded
+      // to one page now; the chain is still verified in full, because
+      // `verifyChainPage` carries the running `prevHash` across pages.
+      let cursor: number | null = null;
+      let prevHash: string | null = null;
+      for (;;) {
+        const where: Where[] = [{ field: "orgId", value: orgId }];
+        if (cursor !== null) where.push({ field: "seq", value: cursor, operator: "gt" });
+        const page = await ctx.context.adapter.findMany<AuditEventRow>({
+          model: "auditEvent",
+          where,
+          sortBy: { field: "seq", direction: "asc" },
+          limit: VERIFY_PAGE_SIZE,
+        });
+        if (page.length === 0) break;
 
-      const result = await verifyChain(rows.map(toAuditRow));
-      return ctx.json(result);
+        const result = await verifyChainPage(page.map(toAuditRow), prevHash);
+        if (!result.ok) return ctx.json(result);
+        prevHash = result.prevHash;
+        cursor = page[page.length - 1]!.seq;
+        if (page.length < VERIFY_PAGE_SIZE) break;
+      }
+      return ctx.json({ ok: true });
     },
   );
 

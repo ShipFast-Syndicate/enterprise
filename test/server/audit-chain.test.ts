@@ -4,7 +4,9 @@ import {
   canonical,
   hashRow,
   verifyChain,
+  verifyChainPage,
   writeAudit,
+  RETENTION_COMPACTED_ACTION,
   type AuditRow,
 } from "../../src/server/audit/chain";
 import { makeAuth } from "../helpers/auth";
@@ -123,6 +125,56 @@ describe("verifyChain", () => {
 
   it("reports ok:true for an empty chain", async () => {
     await expect(verifyChain([])).resolves.toEqual({ ok: true });
+  });
+});
+
+// I-3 — `/enterprise/audit/verify` walks long chains in bounded pages
+// instead of materialising and hashing the whole table at once, so the
+// running `prevHash` has to survive the page boundary.
+describe("verifyChainPage", () => {
+  it("carries prevHash across pages: two halves of one chain verify as one", async () => {
+    const rows = await buildChain([{ seq: 1 }, { seq: 2 }, { seq: 3 }, { seq: 4 }]);
+
+    const first = await verifyChainPage(rows.slice(0, 2), null);
+    expect(first).toEqual({ ok: true, prevHash: rows[1]!.hash });
+    if (!first.ok) throw new Error("unreachable");
+
+    await expect(verifyChainPage(rows.slice(2), first.prevHash)).resolves.toEqual({
+      ok: true,
+      prevHash: rows[3]!.hash,
+    });
+  });
+
+  it("catches a tamper in a later page, at that page's own row", async () => {
+    const rows = await buildChain([{ seq: 1 }, { seq: 2 }, { seq: 3 }, { seq: 4 }]);
+    const first = await verifyChainPage(rows.slice(0, 2), null);
+    if (!first.ok) throw new Error("unreachable");
+
+    const tampered = rows.slice(2).map((r) => (r.seq === 3 ? { ...r, metadata: { x: 1 } } : r));
+    await expect(verifyChainPage(tampered, first.prevHash)).resolves.toEqual({
+      ok: false,
+      brokenAtSeq: 3,
+    });
+  });
+
+  it("a page that does not continue the previous one is broken at its first row", async () => {
+    const rows = await buildChain([{ seq: 1 }, { seq: 2 }, { seq: 3 }]);
+
+    await expect(verifyChainPage(rows.slice(1), "not-the-previous-hash")).resolves.toEqual({
+      ok: false,
+      brokenAtSeq: 2,
+    });
+  });
+
+  it("only the first page (prevHash === null) may start with a compaction anchor", async () => {
+    const rows = await buildChain([{ seq: 1 }, { seq: 2 }]);
+    // A non-first page is a plain continuation: an anchor-shaped row there is
+    // not re-anchored on, it just fails to chain.
+    const anchorLike = { ...rows[0]!, action: RETENTION_COMPACTED_ACTION };
+    await expect(verifyChainPage([anchorLike], "GENESIS")).resolves.toEqual({
+      ok: false,
+      brokenAtSeq: 1,
+    });
   });
 });
 
