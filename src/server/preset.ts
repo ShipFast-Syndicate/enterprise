@@ -1,8 +1,9 @@
 // Alpha Bros enterprise layer — better-auth plugin preset.
 //
-// v0.1 (this task): the upstream plugins the enterprise layer always needs
-// plus `enterpriseGate`. Later tasks append `auditLog`, `orgPolicy`, and our
-// own `scimGroups` (better-auth 1.6 has no SCIM Groups) to this list.
+// v0.1: the upstream plugins the enterprise layer always needs, plus
+// `enterpriseGate` and (Task 4) `auditLog`. Later tasks append `orgPolicy`
+// and our own `scimGroups` (better-auth 1.6 has no SCIM Groups) to this
+// list.
 //
 // `EnterpriseOptions.provisionUser` is plumbed onto the type in this task
 // (see `./types.ts`) for a later task to wire into the `sso()` call below;
@@ -27,6 +28,7 @@ import { sso } from "@better-auth/sso";
 import { scim } from "@better-auth/scim";
 import type { EnterpriseOptions } from "./types";
 import { enterpriseGate } from "./gate";
+import { auditLog } from "./audit/plugin";
 
 export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
   return [
@@ -41,5 +43,6 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
     }),
     scim({ storeSCIMToken: "hashed", providerOwnership: { enabled: true } }),
     enterpriseGate(opts),
+    auditLog(opts),
   ];
 }

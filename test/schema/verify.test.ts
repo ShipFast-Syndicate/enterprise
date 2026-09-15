@@ -17,15 +17,22 @@ describe("verifyDatabase", () => {
 
     expect(ok).toBe(false);
     const keys = missing.map((m) => (m.column ? `${m.table}.${m.column}` : m.table));
+    // `audit_event` is *not* expected here (unlike `org_policy`/`scim_group`,
+    // still plugin-less as of this task): Task 4's `auditLog` plugin
+    // declares a `schema` for it (`src/server/audit/plugin.ts`), so
+    // `runMigrations` above — which derives its DDL from `getAuthTables()`,
+    // the same introspection a real `better-auth generate`/migration run
+    // uses — already creates it, the same way it already creates `user`/
+    // `organization` before this package's own migration adds `studio_ref`.
     expect(keys).toEqual(
       expect.arrayContaining([
         "org_policy",
-        "audit_event",
         "scim_group",
         "user.studio_ref",
         "organization.studio_ref",
       ]),
     );
+    expect(keys).not.toContain("audit_event");
     // and nothing else besides studio_ref is missing off `user`/`organization`
     // — the base upstream DDL already has every other tracked column.
     expect(missing.filter((m) => m.table === "user")).toEqual([

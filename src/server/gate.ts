@@ -69,10 +69,14 @@ export function enterpriseGate(opts: EnterpriseOptions): BetterAuthPlugin {
             if (!session) return; // anonymous — let the endpoint answer 401
 
             const body = ctx.body as { organizationId?: string; orgId?: string } | undefined;
+            // GET endpoints (e.g. `/enterprise/audit/list|export`, Task 4)
+            // carry the org id in the query string, not the body.
+            const query = ctx.query as { orgId?: string } | undefined;
             const orgId = ORG_ID_REQUIRED_IN_BODY.has(ctx.path)
               ? body?.organizationId
               : (body?.organizationId ??
                 body?.orgId ??
+                query?.orgId ??
                 (session.session as { activeOrganizationId?: string }).activeOrganizationId);
             if (!orgId) {
               throw new APIError("BAD_REQUEST", {

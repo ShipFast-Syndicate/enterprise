@@ -96,7 +96,17 @@ function buildDynamicSchema(authOptions: BetterAuthOptions) {
     for (const [key, field] of Object.entries(table.fields)) {
       const name = field.fieldName ?? key;
       const notNull = field.required !== false;
-      columns[key] = sqliteColumn(name, field.type as string, notNull);
+      // Keyed by `name` (the physical column name a `fieldName` override
+      // maps to — equal to `key` for every model that doesn't set one),
+      // not by `key`: `@better-auth/drizzle-adapter`'s own field resolution
+      // (`getFieldName`) looks columns up on the schema object by the
+      // *mapped* name, not the semantic field key, so a drizzle table
+      // object must expose its columns under that same name for the
+      // adapter to find them. This only diverges from `key` for a model
+      // with an explicit `fieldName` mapping — Task 4's `auditLog` plugin
+      // (`src/server/audit/plugin.ts`) is the first one, mapping its
+      // camelCase field keys to the SQL migration's snake_case columns.
+      columns[name] = sqliteColumn(name, field.type as string, notNull);
       columnDdl.push(
         `"${name}" ${sqlColumnType(field.type as string)}${notNull ? " NOT NULL" : ""}${field.unique ? " UNIQUE" : ""}`,
       );
