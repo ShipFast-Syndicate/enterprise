@@ -1,9 +1,17 @@
 // Alpha Bros enterprise layer — better-auth plugin preset.
 //
 // v0.1: the upstream plugins the enterprise layer always needs, plus
-// `enterpriseGate` and (Task 4) `auditLog`. Later tasks append `orgPolicy`
-// and our own `scimGroups` (better-auth 1.6 has no SCIM Groups) to this
-// list.
+// `enterpriseGate`, (Task 4) `auditLog`, and (Task 5) `orgPolicy`. A later
+// task appends our own `scimGroups` (better-auth 1.6 has no SCIM Groups) to
+// this list.
+//
+// `orgPolicy` deliberately does NOT bring its own `magicLink()` plugin —
+// `/sign-in/magic-link`/`/magic-link/verify` sign-in enforcement is generic
+// (it matches on `ctx.path` and simply never fires if no plugin registers
+// those paths); a product wires up `magicLink()` itself alongside this
+// preset the same way it wires up its own email delivery, the same as
+// `emailAndPassword` is a core `betterAuth()` option rather than something
+// this preset turns on.
 //
 // `EnterpriseOptions.provisionUser` is plumbed onto the type in this task
 // (see `./types.ts`) for a later task to wire into the `sso()` call below;
@@ -29,6 +37,7 @@ import { scim } from "@better-auth/scim";
 import type { EnterpriseOptions } from "./types";
 import { enterpriseGate } from "./gate";
 import { auditLog } from "./audit/plugin";
+import { orgPolicy } from "./policy/plugin";
 
 export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
   return [
@@ -44,5 +53,6 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
     scim({ storeSCIMToken: "hashed", providerOwnership: { enabled: true } }),
     enterpriseGate(opts),
     auditLog(opts),
+    orgPolicy(opts),
   ];
 }

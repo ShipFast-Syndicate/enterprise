@@ -17,22 +17,20 @@ describe("verifyDatabase", () => {
 
     expect(ok).toBe(false);
     const keys = missing.map((m) => (m.column ? `${m.table}.${m.column}` : m.table));
-    // `audit_event` is *not* expected here (unlike `org_policy`/`scim_group`,
-    // still plugin-less as of this task): Task 4's `auditLog` plugin
-    // declares a `schema` for it (`src/server/audit/plugin.ts`), so
-    // `runMigrations` above — which derives its DDL from `getAuthTables()`,
-    // the same introspection a real `better-auth generate`/migration run
-    // uses — already creates it, the same way it already creates `user`/
-    // `organization` before this package's own migration adds `studio_ref`.
+    // `audit_event` and (as of Task 5) `org_policy` are *not* expected here
+    // (unlike `scim_group`, still plugin-less): Task 4's `auditLog` plugin
+    // and Task 5's `orgPolicy` plugin each declare a `schema` for their own
+    // table (`src/server/audit/plugin.ts`, `src/server/policy/plugin.ts`),
+    // so `runMigrations` above — which derives its DDL from
+    // `getAuthTables()`, the same introspection a real `better-auth
+    // generate`/migration run uses — already creates both, the same way it
+    // already creates `user`/`organization` before this package's own
+    // migration adds `studio_ref`.
     expect(keys).toEqual(
-      expect.arrayContaining([
-        "org_policy",
-        "scim_group",
-        "user.studio_ref",
-        "organization.studio_ref",
-      ]),
+      expect.arrayContaining(["scim_group", "user.studio_ref", "organization.studio_ref"]),
     );
     expect(keys).not.toContain("audit_event");
+    expect(keys).not.toContain("org_policy");
     // and nothing else besides studio_ref is missing off `user`/`organization`
     // — the base upstream DDL already has every other tracked column.
     expect(missing.filter((m) => m.table === "user")).toEqual([
@@ -94,11 +92,26 @@ describe("EXPECTED_TABLES drift guard", () => {
   // (see `src/schema/expected.ts`).
   const UNTRACKED_UPSTREAM_TABLES = new Set(["session", "account", "verification"]);
 
+  // `getAuthTables()` never includes an `id` field in a model's own
+  // `fields` map — regardless of whether that model's physical table has an
+  // `id` column — because better-auth's adapter factory injects it later,
+  // generically, at write time (`createAdapterFactory`'s `transformInput`
+  // unconditionally does `fields.id = idField(...)`; see the header comment
+  // on `src/server/policy/plugin.ts`). So whether a live table's column list
+  // *actually* starts with `id` isn't something `getAuthTables()` can answer
+  // — it's a fact about this package's own hand-written SQL migration
+  // (`src/schema/sql/0001_enterprise.sql`) for the tables that migration
+  // owns. `org_policy`/`scim_group` use their own natural key (`org_id`/
+  // `team_id`) as the primary key instead, same as their `EXPECTED_TABLES`
+  // entries (`src/schema/expected.ts`) and drizzle table defs
+  // (`src/schema/index.ts`) both already reflect.
+  const NO_ID_COLUMN_TABLES = new Set(["org_policy", "scim_group"]);
+
   it("matches a live getAuthTables() derivation, column-for-column", () => {
     const tables = getAuthTables(baseOptions());
     const live: Record<string, string[]> = {};
     for (const table of Object.values(tables)) {
-      const cols = ["id"];
+      const cols = NO_ID_COLUMN_TABLES.has(table.modelName) ? [] : ["id"];
       for (const [key, field] of Object.entries(table.fields)) {
         cols.push(field.fieldName ?? key);
       }
