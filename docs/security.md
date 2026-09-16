@@ -170,7 +170,7 @@ package. The 0.1.0 release is therefore published manually, once, by Bastien:
 ### Before first publish — checklist
 
 From the 2026-09-15 security audit
-(`.superpowers/sdd/2026-09-15-enterprise-v0.1/security-audit-part1-repo-supply-chain.md`),
+(private audit archive, `bros-brain/projects/enterprise/audits/`),
 split by who does it:
 
 **Done in this task (Claude, code/config):**
@@ -194,20 +194,17 @@ split by who does it:
 
 **Still needed — Bastien / org-admin, before the first publish:**
 
-- [ ] Grant `STUDIO_ARTIFACT_S3` (+ `REVIEWER_APP_*`, `AUDITS_TG_*`, `CF_ACCESS_*`) to this repo
-      so `ci / summary` can go green (R7).
-- [ ] Grant `RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY` to this repo's Actions secrets, and
-      confirm the release App is a bypass actor on the `main` branch ruleset (14754562) (P3, P7). No
-      `NPM_TOKEN` is needed — publishing is trusted-publishing/OIDC only.
+- [x] `STUDIO_ARTIFACT_S3`, `REVIEWER_APP_*`, `AUDITS_TG_*` granted to this repo (2026-09-16); `ci / summary` green.
+- [x] `RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY` granted (2026-09-16); the release App is the
+      `main` ruleset's bypass actor. No `NPM_TOKEN` — publishing is trusted-publishing/OIDC only.
 - [ ] Confirm the `@alphabros` npm scope exists and perform the manual 0.1.0 publish (above),
       then configure the trusted publisher on the now-existing package.
 - [ ] Flip the repo to public — after every item above, and after deciding R6 below.
-- [ ] Enable secret scanning + push protection, Dependabot alerts + security updates, and CodeQL
-      default setup (R1).
-- [ ] Decide whether `docs/superpowers/plans/2026-09-15-enterprise-v0.1.md` (internal design doc,
-      no secrets, but exposes internal architecture/fleet conventions) stays committed once the repo
-      goes public, or moves under the git-ignored `.superpowers/` path (R6).
-- [ ] Turn off "Allow GitHub Actions to approve pull requests"; require ≥ 1 approval on `main`;
+- [x] Secret scanning + push protection and Dependabot alerts + security updates enabled
+      (2026-09-16); CodeQL default setup once the repo is public (R1).
+- [x] The internal implementation plan moved out of the repo into the private vault (R6, 2026-09-16).
+- [x] "Allow GitHub Actions to approve pull requests" turned off (2026-09-16).
+- [ ] Require ≥ 1 approval on `main`;
       add `non_fast_forward` to the `develop` ruleset; set `sha_pinning_required: true` (R4, R3, R2).
 
 ## Test key history note
