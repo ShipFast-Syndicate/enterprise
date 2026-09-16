@@ -317,15 +317,75 @@ interface AuditEventDbRow {
   hash: string;
 }
 
+/**
+ * When `row` is a compaction anchor (completed or still-pending — see
+ * `RETENTION_COMPACTING_ACTION`), the hash that chains *from* it is not its
+ * own `hash` but `metadata.lastHash` — the hash of the last row compaction
+ * removed. `verifyChainPage` re-anchors on exactly this value (see its own
+ * anchor handling above); `insertNextRow` has to agree, or the first write
+ * after a compaction that swept an org's *entire* chain permanently breaks
+ * `verifyChain` for that org, since the anchor is then also the row
+ * `insertNextRow` selects as "last". Falls back to `row.hash` when
+ * `metadata.lastHash` isn't the string it's supposed to be, which only
+ * matters for an already-corrupt anchor that `verifyChain` will flag on its
+ * own.
+ */
+function chainedHashOf(row: {
+  action: string;
+  hash: string;
+  metadata: Record<string, unknown>;
+}): string {
+  if (row.action !== RETENTION_COMPACTED_ACTION && row.action !== RETENTION_COMPACTING_ACTION) {
+    return row.hash;
+  }
+  const lastHash = (row.metadata as { lastHash?: unknown } | undefined)?.lastHash;
+  return typeof lastHash === "string" ? lastHash : row.hash;
+}
+
+/**
+ * The `seq` a new row is numbered *from* when `row` is a compaction anchor.
+ * An anchor's own `seq` sits below every row the org holds (`compactChain`
+ * marches anchors downward: 0, then -1, …), so naively continuing from
+ * `anchor.seq + 1` after a full-chain wipe hands the very next row a `seq`
+ * that falls inside `[minSeq, compactedThroughSeq]` — the same range a
+ * still-undeleted expired prefix would occupy if compaction had crashed
+ * *before* its delete. `verifyChainPage`'s pending-anchor disambiguation
+ * (`prefixStillPresent`) tells the two cases apart only by comparing the
+ * next present row's `seq` to `metadata.compactedThroughSeq`, so a
+ * low-`seq` new row masquerades as "the delete never ran" and gets verified
+ * from `GENESIS` — wrongly, since it's a fresh row chained off
+ * `metadata.lastHash`. Continuing from `max(anchor.seq, compactedThroughSeq)
+ * + 1` instead keeps every post-anchor `seq` strictly above that range, so
+ * it can never be confused with a surviving pre-compaction prefix — without
+ * touching `verifyChainPage` itself.
+ */
+function nextSeqBaseOf(row: {
+  seq: number;
+  action: string;
+  metadata: Record<string, unknown>;
+}): number {
+  if (row.action !== RETENTION_COMPACTED_ACTION && row.action !== RETENTION_COMPACTING_ACTION) {
+    return row.seq;
+  }
+  const compactedThroughSeq = (row.metadata as { compactedThroughSeq?: unknown } | undefined)
+    ?.compactedThroughSeq;
+  return typeof compactedThroughSeq === "number" ? Math.max(row.seq, compactedThroughSeq) : row.seq;
+}
+
 async function insertNextRow(adapter: AuditAdapter, input: AuditInput): Promise<AuditRow> {
-  const last = await adapter.findMany<{ seq: number; hash: string }>({
+  const last = await adapter.findMany<{
+    seq: number;
+    hash: string;
+    action: string;
+    metadata: Record<string, unknown>;
+  }>({
     model: "auditEvent",
     where: [{ field: "orgId", value: input.orgId }],
     sortBy: { field: "seq", direction: "desc" },
     limit: 1,
   });
-  const seq = (last[0]?.seq ?? 0) + 1;
-  const prevHash = last[0]?.hash ?? GENESIS;
+  const seq = (last[0] ? nextSeqBaseOf(last[0]) : 0) + 1;
+  const prevHash = last[0] ? chainedHashOf(last[0]) : GENESIS;
   const createdAt = Date.now();
 
   const rowForHash: AuditRowForHash = {

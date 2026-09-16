@@ -74,7 +74,11 @@
   bare delete, and `verify` then reported tampering forever — see C-02 below). Retention and
   tamper-evidence remain two different guarantees: `audit-verify` proves nothing was altered
   **within the retention window**, and the anchor row records how many rows left it, not what
-  they said.
+  they said. The write path agrees with this: after compaction leaves an anchor as an org's last
+  row (completed or still-`retention_compacting`), the next row appended to that org's chain
+  chains its `prev_hash` from the anchor's `metadata.lastHash`, not the anchor's own `hash` —
+  otherwise a full-chain compaction would leave the org reporting `ok:false` forever, from the
+  very next write on.
 - **Compaction is crash-safe without a transaction.** The anchor row is written **before** the
   delete, in three steps: insert it with `action: audit.retention_compacting`, delete the
   expired prefix, then flip the action to `audit.retention_compacted` (recomputing its hash,

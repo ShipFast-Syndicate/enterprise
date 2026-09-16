@@ -244,6 +244,82 @@ describe("C-02 — retention compaction keeps the chain verifiable", () => {
       expect(await actions(t, orgId)).toEqual(["audit.retention_compacting", "member.invited"]);
       expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
     });
+
+    // Same bug as the completed-anchor test above, reached through the I-4
+    // crash window instead of a clean compaction: a pending anchor whose
+    // prefix is already gone is, per `verifyChainPage`, exactly like a
+    // completed one — so it must anchor the next write's `prevHash` off its
+    // `metadata.lastHash` too, not its own `hash`.
+    it("the first write after a crash leaves a pending anchor still chains correctly, and a later completed compaction still verifies", async () => {
+      const t = await makeAuth({ audit: { retentionDays: 30 } });
+      const { cookie } = await signUpOwner(t);
+      const { orgId } = await createOrg(t, cookie);
+
+      // Every row expired this time — the crash-created pending anchor ends
+      // up as the org's entire surviving chain.
+      await seedChain(t, orgId, [40, 40]);
+      const cutoff = new Date(Date.now() - 30 * DAY_MS);
+
+      await expect(
+        compactChain(
+          { context: { adapter: await adapterThatFailsAt(t, "update") } },
+          orgId,
+          cutoff,
+        ),
+      ).rejects.toThrow("simulated crash");
+
+      expect(await actions(t, orgId)).toEqual(["audit.retention_compacting"]);
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+
+      await inviteMember(t, cookie, orgId, "one@acme.test");
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+
+      // Age the new row out too (whatever `seq` the write path gave it —
+      // deliberately not assumed here) and run a real (non-crashing)
+      // compaction: it sweeps the stale pending anchor along with it
+      // (existing I-4 behaviour), and the chain must still verify on the
+      // far side.
+      const newRowSeq = Number((await auditRows(t, orgId)).at(-1)!.seq);
+      await ageRows(t, orgId, 40, newRowSeq);
+      const retry = await t.api.post("/enterprise/audit/compact", { orgId }, { cookie });
+      expect(retry.status).toBe(200);
+      expect(await actions(t, orgId)).toEqual(["audit.retention_compacted"]);
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+    });
+  });
+
+  // The write path used to disagree with `verifyChainPage`'s anchor
+  // semantics: when the org's *entire* chain was swept by compaction, the
+  // anchor is the only row left, so `insertNextRow`'s "last row" query
+  // selects it — and it used to chain the next write off the anchor's own
+  // `hash` instead of `metadata.lastHash` (the hash of the last row that was
+  // compacted away), which is what `verifyChainPage` re-anchors on. That
+  // made the org's chain report `ok:false` forever, starting from the very
+  // first write after the compaction.
+  it("the first write after compaction removes an org's entire chain still chains correctly, from a completed anchor", async () => {
+    const t = await makeAuth({ audit: { retentionDays: 30 } });
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+
+    await inviteMember(t, cookie, orgId, "one@acme.test");
+    await inviteMember(t, cookie, orgId, "two@acme.test");
+    // Every row the org has is now older than the retention window — the
+    // whole chain, not just a prefix, is due for compaction.
+    await ageRows(t, orgId, 40, 2);
+
+    const compactRes = await t.api.post("/enterprise/audit/compact", { orgId }, { cookie });
+    expect(compactRes.status).toBe(200);
+
+    const afterCompaction = await auditRows(t, orgId);
+    expect(afterCompaction.length).toBe(1);
+    expect(afterCompaction[0]!.action).toBe("audit.retention_compacted");
+
+    await inviteMember(t, cookie, orgId, "three@acme.test");
+    expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+
+    // A second write on top of the first must still check out too.
+    await inviteMember(t, cookie, orgId, "four@acme.test");
+    expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
   });
 
   it("POST /enterprise/audit/compact is owner/admin-only and feature-gated", async () => {
