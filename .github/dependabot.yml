@@ -1,0 +1,36 @@
+# Dependabot policy for @alphabros/enterprise.
+#
+# The better-auth set is pinned EXACT on the 1.6 line by design (ADR-0057, spec §6):
+# @better-auth/sso and @better-auth/scim 1.7.x need better-auth ^1.7, which the
+# fleet does not run. Bumps of that set are a deliberate, reviewed change — never
+# an automated PR. The 1.6 SCIM advisory (GHSA-j8v8-g9cx-5qf4) is mitigated in code;
+# see docs/security.md.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        dependency-type: development
+        patterns: ["*"]
+        exclude-patterns: ["better-auth", "@better-auth/*", "better-call", "@better-fetch/*"]
+    ignore:
+      - dependency-name: better-auth
+      - dependency-name: "@better-auth/*"
+      - dependency-name: better-call
+      - dependency-name: "@better-fetch/fetch"
+    labels: ["dependencies"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Europe/Paris
+    labels: ["dependencies", "ci"]
