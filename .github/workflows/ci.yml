@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: ShipFast-Syndicate/.github/.github/workflows/reusable-ci-app.yml@78bee37c6546003297a5740bbbc16a29f0832480 # v1
+    uses: ShipFast-Syndicate/.github/.github/workflows/reusable-ci-app.yml@2a28019254d6d4fa83d5d82d9a08f3a88dc02994 # v1
     with:
       project-name: enterprise
       eslint-command: "pnpm lint"
