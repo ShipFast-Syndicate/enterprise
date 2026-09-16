@@ -1,6 +1,6 @@
 {
   "name": "@alphabros/enterprise",
-  "version": "0.0.0-development",
+  "version": "0.1.0",
   "description": "Alpha Bros studio enterprise layer for better-auth: SSO (SAML/OIDC), SCIM (Users+Groups), orgs, audit log, security policy, admin portal",
   "license": "MIT",
   "type": "module",
