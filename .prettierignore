@@ -9,4 +9,3 @@ CHANGELOG.md
 # working documents, not product surface, and not hand-formatted. The four
 # customer-facing docs next to it (sso.md, scim.md, security.md, and anything
 # added later) ARE format-checked.
-docs/superpowers/
