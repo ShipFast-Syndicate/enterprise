@@ -232,7 +232,7 @@ every scan of the current codebase (dependency review, `npm pack`, a fresh clone
 ## Fixed in the pre-publish security pass
 
 The 2026-09-15 code-level security audit
-(`.superpowers/sdd/2026-09-15-enterprise-v0.1/security-audit-part2-code.md`, 31 findings:
+(private audit archive `bros-brain/projects/enterprise/audits/`, 31 findings:
 4 High, 8 Medium, 10 Low, 9 Info) ran against `feat/v0.1-package`. Everything below was fixed
 before the first publish, each with a regression test in `test/security/` that reproduces the
 audit's own exploit (failing before the fix, passing after).
