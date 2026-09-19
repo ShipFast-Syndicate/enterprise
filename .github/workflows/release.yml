@@ -28,6 +28,8 @@ jobs:
       issues: write
       pull-requests: write
     uses: ShipFast-Syndicate/.github/.github/workflows/reusable-release.yml@13c9221923d36ac2af4de3434eab7c30013aac1e # v1
+    with:
+      runs-on: '["ubuntu-latest"]'
     secrets:
       RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
