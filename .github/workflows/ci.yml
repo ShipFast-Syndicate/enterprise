@@ -20,9 +20,14 @@ concurrency:
 
 jobs:
   ci:
-    uses: ShipFast-Syndicate/.github/.github/workflows/reusable-ci-app.yml@78bee37c6546003297a5740bbbc16a29f0832480 # v1
+    uses: ShipFast-Syndicate/.github/.github/workflows/reusable-ci-app.yml@04cd046d2af4206066ae54066a17fafd40775dad # Runner forwarding includes PR base check
     with:
       project-name: enterprise
+      # Public PR code runs on fresh GitHub-hosted VMs. Keep trusted push/manual
+      # placement unchanged; override every runner class, including optional E2E.
+      runs-on: ${{ github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted","Linux","ARM64","small"]' }}
+      heavy-runs-on: ${{ github.event_name == 'pull_request' && '["ubuntu-latest"]' || 'auto' }}
+      e2e-runs-on: ${{ github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted","Linux","X64"]' }}
       eslint-command: "pnpm lint"
       typecheck-command: "pnpm typecheck"
       prettier-command: "pnpm format:check"
@@ -32,13 +37,6 @@ jobs:
       run-e2e: false
       run-migration-dry-run: false
     secrets:
-      STUDIO_ARTIFACT_S3: ${{ secrets.STUDIO_ARTIFACT_S3 }}
-      REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
-      REVIEWER_APP_PRIVATE_KEY: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
-      AUDITS_TG_BOT_TOKEN: ${{ secrets.AUDITS_TG_BOT_TOKEN }}
-      AUDITS_TG_CHAT_ID: ${{ secrets.AUDITS_TG_CHAT_ID }}
-      AUDITS_TG_TOPIC_ID: ${{ secrets.AUDITS_TG_TOPIC_ID }}
-      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
-      VERCEL_PROTECTION_BYPASS: ${{ secrets.VERCEL_PROTECTION_BYPASS }}
+      # Hosted PR jobs use GitHub artifacts. Quality comments fall back to the
+      # per-run GITHUB_TOKEN; post-merge QA is disabled in this CI bundle.
+      STUDIO_ARTIFACT_S3: ${{ github.event_name != 'pull_request' && secrets.STUDIO_ARTIFACT_S3 || '' }}
