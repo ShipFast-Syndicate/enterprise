@@ -42,11 +42,11 @@ Semgrep reports a failing exit code without printing matched source. Reproduce
 locally with the command in the workflow to inspect findings privately.
 
 The separate `release.yml` still calls a private reusable release workflow. That
-call has executed successfully; it currently inherits the reusable's runner
-default. Moving that job to a hosted runner and verifying it must precede any
-runner-group restriction that would remove its existing access. This CI change
-does not change the release workflow or authorize package publication. The
-main-PR release-readiness gate remains enforced.
+call has executed successfully and now explicitly requests a GitHub-hosted
+runner. Verify hosted execution on the next authorized release before applying
+any runner-group restriction that would remove its previous access. The runner
+choice does not authorize package publication; the main-PR release-readiness
+gate remains enforced.
 
 Hosted placement in this source does not restrict what an altered workflow can
 request. The workflow contract tests detect drift; a PR can edit those tests too.
