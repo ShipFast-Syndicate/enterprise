@@ -17,6 +17,6 @@ concurrency:
 
 jobs:
   ci:
-    # Public callers cannot resolve private remote reusable workflows.
+    # Keep CI self-contained, with explicit hosted placement and no private hub dependency.
     # Keep this caller ID and the local summary ID: branch rules require ci / summary.
     uses: ./.github/workflows/public-ci.yml

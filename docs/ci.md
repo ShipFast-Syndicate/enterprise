@@ -1,8 +1,11 @@
 # Public CI
 
-The public repository calls its own `public-ci.yml` workflow. Public callers
-cannot use remote private reusable workflows, including nested dependencies
-([GitHub's access rules](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations)).
+The public repository calls its own `public-ci.yml` workflow. The preceding
+remote CI invocation failed before any jobs started, but earlier CI and release
+runs successfully called the private hub after this repository became public.
+The exact cause of that startup failure is not established. Self-contained CI
+makes hosted runner placement and the complete gate contract explicit without
+depending on private hub access or nested workflow references.
 All CI jobs use GitHub-hosted runners and read-only repository access. Forks need
 no repository secrets, reviewer App key, private artifacts service, or PR comment
 permission. Checkouts do not retain the token in Git configuration.
@@ -38,11 +41,14 @@ ephemeral runner; raw matches are not published as artifacts or PR comments.
 Semgrep reports a failing exit code without printing matched source. Reproduce
 locally with the command in the workflow to inspect findings privately.
 
-The separate `release.yml` still calls a private reusable release workflow and
-has the same public/private access incompatibility. This CI change does not
-repair or authorize package publication. The main-PR release-readiness gate
-remains enforced.
+The separate `release.yml` still calls a private reusable release workflow. That
+call has executed successfully; it currently inherits the reusable's runner
+default. Moving that job to a hosted runner and verifying it must precede any
+runner-group restriction that would remove its existing access. This CI change
+does not change the release workflow or authorize package publication. The
+main-PR release-readiness gate remains enforced.
 
 Hosted placement in this source does not restrict what an altered workflow can
-request. Organization runner-group admission and fork approval remain separate
+request. The workflow contract tests detect drift; a PR can edit those tests too.
+Organization runner-group admission and fork approval remain separate
 administrative controls.
