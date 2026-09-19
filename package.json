@@ -124,7 +124,8 @@
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.70.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "yaml": "2.9.1"
   },
   "dependencies": {
     "zod": "^4.6.5"

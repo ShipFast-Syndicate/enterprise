@@ -9,6 +9,9 @@ version: 2
 updates:
   - package-ecosystem: npm
     directory: /
+    # Security scan policy: allow new versions to age; security updates are exempt.
+    cooldown:
+      default-days: 7
     schedule:
       interval: weekly
       day: monday
@@ -28,6 +31,8 @@ updates:
     labels: ["dependencies"]
   - package-ecosystem: github-actions
     directory: /
+    cooldown:
+      default-days: 7
     schedule:
       interval: weekly
       day: monday
