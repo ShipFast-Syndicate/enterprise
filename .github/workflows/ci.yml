@@ -8,10 +8,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  checks: write
-  issues: write
-  actions: read
+  pull-requests: read
   statuses: read
 
 concurrency:
@@ -20,23 +17,6 @@ concurrency:
 
 jobs:
   ci:
-    uses: ShipFast-Syndicate/.github/.github/workflows/reusable-ci-app.yml@04cd046d2af4206066ae54066a17fafd40775dad # Runner forwarding includes PR base check
-    with:
-      project-name: enterprise
-      # Public PR code runs on fresh GitHub-hosted VMs. Keep trusted push/manual
-      # placement unchanged; override every runner class, including optional E2E.
-      runs-on: ${{ github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted","Linux","ARM64","small"]' }}
-      heavy-runs-on: ${{ github.event_name == 'pull_request' && '["ubuntu-latest"]' || 'auto' }}
-      e2e-runs-on: ${{ github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted","Linux","X64"]' }}
-      eslint-command: "pnpm lint"
-      typecheck-command: "pnpm typecheck"
-      prettier-command: "pnpm format:check"
-      coverage-command: "pnpm test:coverage"
-      gitleaks-config-path: ".gitleaks.toml"
-      build-matrix: '[{"target":"npm","command":"pnpm build","env":"","allow-failure":false}]'
-      run-e2e: false
-      run-migration-dry-run: false
-    secrets:
-      # Hosted PR jobs use GitHub artifacts. Quality comments fall back to the
-      # per-run GITHUB_TOKEN; post-merge QA is disabled in this CI bundle.
-      STUDIO_ARTIFACT_S3: ${{ github.event_name != 'pull_request' && secrets.STUDIO_ARTIFACT_S3 || '' }}
+    # Public callers cannot resolve private remote reusable workflows.
+    # Keep this caller ID and the local summary ID: branch rules require ci / summary.
+    uses: ./.github/workflows/public-ci.yml
