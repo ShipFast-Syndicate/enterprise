@@ -39,8 +39,9 @@ jobs:
           CI_RUN_ID: ${{ github.event.workflow_run.id }}
           ALLOWED: ${{ inputs.allowed-update-types }}
           APPLY: "true"
-        shell: python3 {0}
+        shell: bash
         run: |
+          python3 - <<'PY'
           import json
           import os
           import re
@@ -231,3 +232,4 @@ jobs:
               except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError):
                   print('::error::Unable to verify exact-head merge gate; no fallback merge attempted.', file=sys.stderr)
                   sys.exit(1)
+          PY
