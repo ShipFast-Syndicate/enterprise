@@ -1,0 +1,233 @@
+# Reviewed source: ShipFast-Syndicate/.github@c31964060a6d6022743151716149c38fc62dbafc
+# Owned local copy because this public repository cannot call the private hub.
+name: Reusable — Dependabot Auto-merge
+
+on:
+  workflow_call:
+    inputs:
+      allowed-update-types:
+        description: Space-separated permitted semver update types from verified Dependabot commit metadata.
+        type: string
+        default: "version-update:semver-patch version-update:semver-minor"
+      runs-on:
+        description: JSON-string runner label list.
+        type: string
+        default: '["ubuntu-latest"]'
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+  actions: read
+
+jobs:
+  automerge:
+    if: >-
+      (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]') ||
+      (github.event_name == 'workflow_run' && (github.event.workflow_run.name == 'CI' || github.event.workflow_run.name == 'CI summary') && github.event.workflow_run.conclusion == 'success')
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    timeout-minutes: 5
+    steps:
+      - name: Verify current-head CI and merge only that head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+          CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          ALLOWED: ${{ inputs.allowed-update-types }}
+          APPLY: "true"
+        shell: python3 {0}
+        run: |
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.request
+
+          SUMMARY = 'ci / summary'
+          HOLDS = {'hold', 'do-not-merge', 'wip'}
+
+          def api(path, method='GET', body=None):
+              request = urllib.request.Request(
+                  'https://api.github.com/' + path, method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          def pages(reader, path, key=None):
+              rows = []
+              for page in range(1, 101):
+                  payload = reader(f'{path}&per_page=100&page={page}')
+                  batch = payload[key] if key else payload
+                  if not isinstance(batch, list):
+                      raise ValueError('Invalid API page')
+                  rows.extend(batch)
+                  if len(batch) < 100:
+                      return rows
+              raise ValueError('API pagination limit reached')
+
+          def latest(rows, key):
+              result = {}
+              for row in rows:
+                  identity = key(row)
+                  if identity not in result or row['id'] > result[identity]['id']:
+                      result[identity] = row
+              return list(result.values())
+
+          def identity(pr, repo, head):
+              return (pr.get('state') == 'open' and not pr.get('draft')
+                      and pr.get('user', {}).get('login') == 'dependabot[bot]'
+                      and pr.get('user', {}).get('type') == 'Bot'
+                      and pr.get('head', {}).get('sha') == head
+                      and (pr.get('head', {}).get('repo') or {}).get('full_name') == repo
+                      and not HOLDS.intersection(str(x.get('name', '')).lower() for x in pr.get('labels', []))
+                      and pr.get('mergeable') is True
+                      and pr.get('mergeable_state') in {'clean', 'has_hooks'})
+
+          def green(reader, repo, head, summary_run_url=None):
+              checks = latest(pages(reader, f'repos/{repo}/commits/{head}/check-runs?filter=all', 'check_runs'),
+                              lambda x: (x['name'], x['app']['id']))
+              statuses = latest(pages(reader, f'repos/{repo}/commits/{head}/statuses?sort=updated'),
+                                lambda x: x['context'])
+              summaries = []
+              for check in checks:
+                  if check.get('head_sha') != head:
+                      return False
+                  trusted = check.get('app', {}).get('slug') == 'github-actions' and check.get('app', {}).get('id') == 15368
+                  if check['name'] == SUMMARY:
+                      summaries.append(trusted and check.get('status') == 'completed' and check.get('conclusion') == 'success')
+                  # The running gate cannot wait for itself. No other pending or failed
+                  # check is ignored; deliberate skipped/neutral non-summary jobs may pass.
+                  if trusted and check['name'] == 'automerge / automerge':
+                      continue
+                  if check.get('status') != 'completed' or check.get('conclusion') not in {'success', 'neutral', 'skipped'}:
+                      return False
+              for status in statuses:
+                  if status['context'] == SUMMARY:
+                      if summary_run_url and status.get('target_url') != summary_run_url:
+                          return False
+                      creator = status.get('creator', {})
+                      summaries.append(creator.get('login') == 'github-actions[bot]' and creator.get('type') == 'Bot' and status.get('state') == 'success')
+                  if status.get('state') != 'success':
+                      return False
+              return (bool(summaries) and all(summaries)
+                      and (not summary_run_url or any(x['context'] == SUMMARY for x in statuses)))
+
+          def evaluate(reader, repo, number, head, apply=False, allowed='version-update:semver-patch version-update:semver-minor', summary_run_url=None):
+              if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not str(number).isdigit() or not re.fullmatch(r'[0-9a-f]{40}', head):
+                  raise ValueError('Exact repository, PR and full head SHA required')
+              path = f'repos/{repo}/pulls/{number}'
+              if not identity(reader(path), repo, head):
+                  return 'hold: PR identity, mergeability or hold label'
+              if not update_allowed(reader, path, allowed):
+                  return 'hold: unsigned, unsupported or ineligible dependency update'
+              if not green(reader, repo, head, summary_run_url):
+                  return 'hold: current-head CI is missing, pending or unsuccessful'
+              reviews = latest([x for x in pages(reader, path + '/reviews?sort=created')
+                              if x.get('state') in {'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'}],
+                             lambda x: x['user']['login'])
+              if any(x.get('state') == 'CHANGES_REQUESTED' for x in reviews):
+                  return 'hold: unresolved requested changes'
+              # Re-read immediately before the guarded write; a stale successful job or
+              # an event for an earlier head never authorizes the new head. No auto-merge
+              # flag is armed, so a later head must pass this gate again.
+              if (summary_run_url and not summary_from_run(reader, repo, head, summary_run_url)):
+                  return 'hold: CI summary no longer belongs to the triggering run'
+              if not identity(reader(path), repo, head) or not green(reader, repo, head, summary_run_url):
+                  return 'hold: PR or CI changed before merge'
+              if not apply:
+                  return 'eligible: exact current head is green (read-only)'
+              result = reader(path + '/merge', 'PUT', {'sha': head, 'merge_method': 'squash'})
+              if result.get('merged') is not True:
+                  raise ValueError('GitHub did not confirm merge')
+              return 'merged: exact verified head; repository rules enforced by GitHub'
+
+
+          def update_allowed(reader, path, allowed):
+              supported = {'version-update:semver-patch', 'version-update:semver-minor', 'version-update:semver-major'}
+              permitted = set(allowed.split())
+              if not permitted or not permitted.issubset(supported):
+                  raise ValueError('Invalid allowed update-type policy')
+              # Same authenticity boundary as fetch-metadata: first PR commit, exact
+              # Dependabot author, and a verified commit signature. Later maintainer
+              # commits are preserved and still need exact-head CI.
+              commits = reader(path + '/commits?per_page=1')
+              if not commits:
+                  return False
+              first = commits[0]
+              if (first.get('author') or {}).get('login') != 'dependabot[bot]' or (first.get('commit') or {}).get('verification', {}).get('verified') is not True:
+                  return False
+              message = first['commit'].get('message', '')
+              blocks = re.findall(r'(?:^|\n)---\nupdated-dependencies:\n(.*?)\n\.\.\.(?:\n|$)', message, re.S)
+              if len(blocks) != 1:
+                  return False
+              dependencies = re.findall(r'^- dependency-name: .+$', blocks[0], re.M)
+              updates = re.findall(r'^  update-type: (\S+)\s*$', blocks[0], re.M)
+              return bool(dependencies) and len(dependencies) == len(updates) and set(updates).issubset(permitted)
+
+          def ci_pull_request(reader, repo, run_id, head):
+              if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not str(run_id).isdigit() or not re.fullmatch(r'[0-9a-f]{40}', head):
+                  raise ValueError('Exact CI run and full head SHA required')
+              run = reader(f'repos/{repo}/actions/runs/{run_id}')
+              if ((run.get('name'), run.get('path')) not in {
+                      ('CI', '.github/workflows/ci.yml'),
+                      ('CI summary', '.github/workflows/ci-summary.yml')}
+                      or run.get('head_sha') != head or run.get('status') != 'completed'
+                      or run.get('conclusion') != 'success'
+                      or run.get('repository', {}).get('full_name') != repo):
+                  return None
+              # A workflow_run summary executes at the default-branch SHA. Its
+              # posted commit status, not run.head_sha, binds it to the PR head.
+              aggregate = run.get('event') == 'workflow_run' or run.get('name') == 'CI summary'
+              candidates = pages(reader, f'repos/{repo}/pulls?state=open' if aggregate
+                                 else f'repos/{repo}/commits/{head}/pulls?state=open')
+              matches = []
+              run_url = f'https://github.com/{repo}/actions/runs/{run_id}'
+              for pr in candidates:
+                  pr_head = pr.get('head', {}).get('sha', '')
+                  if (pr.get('state') != 'open'
+                          or (pr.get('head', {}).get('repo') or {}).get('full_name') != repo
+                          or pr.get('user', {}).get('login') != 'dependabot[bot]'
+                          or pr.get('user', {}).get('type') != 'Bot'
+                          or not re.fullmatch(r'[0-9a-f]{40}', pr_head)):
+                      continue
+                  if aggregate:
+                      if not summary_from_run(reader, repo, pr_head, run_url):
+                          continue
+                  elif pr_head != head:
+                      continue
+                  matches.append((pr['number'], pr_head, run_url if aggregate else None))
+              return matches[0] if len(matches) == 1 else None
+
+          def summary_from_run(reader, repo, head, run_url):
+              statuses = latest(pages(reader, f'repos/{repo}/commits/{head}/statuses?sort=updated'),
+                                lambda x: x['context'])
+              summaries = [status for status in statuses if status['context'] == SUMMARY]
+              return len(summaries) == 1 and all(
+                  status.get('state') == 'success' and status.get('target_url') == run_url
+                  and status.get('creator', {}).get('login') == 'github-actions[bot]'
+                  and status.get('creator', {}).get('type') == 'Bot'
+                  for status in summaries)
+
+          if __name__ == '__main__':
+              try:
+                  repo, head = os.environ['REPO'], os.environ['HEAD_SHA']
+                  number = os.environ.get('PR_NUMBER', '')
+                  summary_run_url = None
+                  if os.environ['EVENT_NAME'] == 'workflow_run':
+                      target = ci_pull_request(api, repo, os.environ['CI_RUN_ID'], head)
+                      number, head, summary_run_url = target if target else (None, head, None)
+                  if not number:
+                      print('hold: no unique current Dependabot PR for the completed CI head')
+                  else:
+                      print(evaluate(api, repo, number, head, os.environ.get('APPLY') == 'true', os.environ['ALLOWED'], summary_run_url))
+              except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError):
+                  print('::error::Unable to verify exact-head merge gate; no fallback merge attempted.', file=sys.stderr)
+                  sys.exit(1)
