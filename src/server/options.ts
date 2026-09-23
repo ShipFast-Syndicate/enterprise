@@ -28,6 +28,15 @@ import { assertSecretsKey } from "./secrets";
  */
 export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
   assertSecretsKey(opts.secretsKey);
+  if (
+    typeof opts.scimCredentialHashSecret !== "string" ||
+    opts.scimCredentialHashSecret.length < 32 ||
+    opts.scimCredentialHashSecret === opts.secretsKey
+  ) {
+    throw new Error(
+      "scimCredentialHashSecret must be an independent secret of at least 32 characters",
+    );
+  }
 
   const retentionDays = opts.audit?.retentionDays;
   if (retentionDays !== undefined && (!Number.isFinite(retentionDays) || retentionDays < 1)) {

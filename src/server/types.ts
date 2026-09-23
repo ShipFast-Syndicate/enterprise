@@ -3,7 +3,7 @@
 // `Feature` is the entitlement vocabulary the gate plugin (`./gate.ts`) and
 // `requireFeature` (`./entitlements.ts`) speak. `EnterpriseOptions` is the
 // single config object every consumer (preset, gate, and — in later tasks —
-// the audit/policy/scimGroups plugins) is constructed from.
+// the audit/policy/SCIM plugins) is constructed from.
 
 import type { sso } from "@better-auth/sso";
 
@@ -18,7 +18,7 @@ export interface EnterpriseOptions {
   resolveEntitlements: ResolveEntitlements;
   /**
    * Reserved — not yet consumed by `enterprisePreset` (`./preset.ts`).
-   * `@better-auth/sso@1.6.33`'s `sso()` constructor has no plugin-level slot
+   * `@better-auth/sso@1.7.5`'s `sso()` constructor has no plugin-level slot
    * for a default/shared SP signing identity (verified directly against
    * `node_modules/@better-auth/sso/dist/index-CMcY1z4e.d.mts`'s `SSOOptions`
    * interface — only a *per-provider* `samlConfig.spMetadata`, set at
@@ -33,6 +33,8 @@ export interface EnterpriseOptions {
   samlSpKeys?: { cert: string; privateKey: string };
   /** Symmetric key used to encrypt stored secrets. Must be >= 32 chars. */
   secretsKey: string;
+  /** Independent >=32 character HMAC key for managed SCIM credentials. */
+  scimCredentialHashSecret: string;
   /**
    * Audit log retention and export bounds.
    *
@@ -50,10 +52,10 @@ export interface EnterpriseOptions {
    *
    * `"owner"` is **not** a legal target (M-01): an IdP group that confers org
    * ownership is the payload of the admin→owner escalation the 2026-09-15
-   * audit reproduced. The type refuses it, and `resolveGroupRoleMap`
-   * (`./scim-groups/plugin.ts`) additionally drops any `"owner"` entry that
+   * audit reproduced. The type refuses it, and the native projection
+   * (`./scim.ts`) additionally drops any `"owner"` entry that
    * reaches it at runtime — from a stale policy row written before this rule,
-   * or from untyped JavaScript — with a warning.
+   * or from untyped JavaScript.
    */
   scim?: { groupRoleMap?: Record<string, "admin" | "member"> };
   /**

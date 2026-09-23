@@ -1,32 +1,5 @@
-// Alpha Bros enterprise layer — static snapshot of the tables/columns
-// `verifyDatabase` (`./verify.ts`) checks for.
-//
-// The upstream portion (every key below except `org_policy`, `audit_event`,
-// `scim_group`) is a snapshot of `getAuthTables()` with the Task 2 preset
-// (`enterprisePreset`) mounted — the same introspection `better-auth
-// generate`/`getMigrations` are themselves built on. Column order and
-// spelling are exactly what that call returns: `field.fieldName ?? key` for
-// each field, `id` first — better-auth does not snake_case its own default
-// field names (confirmed directly against the DDL `test/helpers/auth.ts`'s
-// `buildDynamicSchema` generates, which uses that same `field.fieldName ??
-// key` expression to build `CREATE TABLE` column lists), so most of these
-// are camelCase (`emailVerified`, `twoFactorEnabled`, `organizationId`, …)
-// and several model/table names are too (`teamMember`, `ssoProvider`,
-// `scimProvider`). `test/schema/verify.test.ts`'s "EXPECTED_TABLES drift
-// guard" asserts this literal still matches a live `getAuthTables()` call,
-// so a better-auth upgrade that adds, removes, or renames a field fails CI
-// instead of drifting silently.
-//
-// `session`, `account`, and `verification` are core better-auth tables that
-// exist in any working better-auth deployment independent of this
-// package's plugins — deliberately not tracked here; `verifyDatabase` only
-// guards the tables/columns *this* package's plugins and migration
-// actually require.
-//
-// `user` and `organization` additionally carry `studio_ref` — the column
-// `0001_enterprise.sql`'s `ALTER TABLE` statements add (linking each row
-// back to the studio product's own record), not part of better-auth's own
-// field set.
+// Snapshot of Better Auth 1.7.5 plus enterprise plugin models.
+// The schema drift test compares this contract to getAuthTables().
 export const EXPECTED_TABLES: Record<string, string[]> = {
   user: [
     "id",
@@ -44,9 +17,9 @@ export const EXPECTED_TABLES: Record<string, string[]> = {
     "studio_ref",
   ],
   organization: ["id", "name", "slug", "logo", "createdAt", "metadata", "studio_ref"],
+  team: ["id", "name", "memberCount", "organizationId", "createdAt", "updatedAt"],
+  teamMember: ["id", "teamId", "userId", "membershipKey", "createdAt"],
   member: ["id", "organizationId", "userId", "role", "createdAt"],
-  team: ["id", "name", "organizationId", "createdAt", "updatedAt"],
-  teamMember: ["id", "teamId", "userId", "createdAt"],
   invitation: [
     "id",
     "organizationId",
@@ -58,18 +31,6 @@ export const EXPECTED_TABLES: Record<string, string[]> = {
     "createdAt",
     "inviterId",
   ],
-  ssoProvider: [
-    "id",
-    "issuer",
-    "oidcConfig",
-    "samlConfig",
-    "userId",
-    "providerId",
-    "organizationId",
-    "domain",
-    "domainVerified",
-  ],
-  scimProvider: ["id", "providerId", "scimToken", "organizationId", "userId"],
   twoFactor: [
     "id",
     "secret",
@@ -116,16 +77,137 @@ export const EXPECTED_TABLES: Record<string, string[]> = {
     "permissions",
     "metadata",
   ],
-  org_policy: [
-    "org_id",
-    "require_2fa",
-    "sso_enforced",
-    "break_glass_user_id",
-    "session_max_age_s",
-    "allowed_methods",
-    "group_role_map",
-    "updated_at",
+  ssoProvider: [
+    "id",
+    "issuer",
+    "oidcConfig",
+    "samlConfig",
+    "userId",
+    "providerId",
+    "organizationId",
+    "domain",
+    "domainVerified",
   ],
+  scimManagedConnection: [
+    "id",
+    "creationRequestId",
+    "connectionId",
+    "provisioningDomainId",
+    "status",
+    "revision",
+    "createdAt",
+    "createdBy",
+    "decommissionStartedAt",
+    "decommissionStartedBy",
+    "decommissionedAt",
+    "decommissionedBy",
+  ],
+  scimManagedCredential: [
+    "id",
+    "connectionRecordId",
+    "credentialId",
+    "tokenDigest",
+    "hashVersion",
+    "activeSlotKey",
+    "status",
+    "serializedScopes",
+    "expiresAt",
+    "createdAt",
+    "createdBy",
+    "lastUsedAt",
+    "revokedAt",
+    "revokedBy",
+    "decommissionedAt",
+  ],
+  scimManagedConnectionEvent: [
+    "id",
+    "connectionRecordId",
+    "eventKey",
+    "sequence",
+    "type",
+    "actorId",
+    "credentialId",
+    "createdAt",
+  ],
+  scimConnectionBinding: [
+    "id",
+    "connectionId",
+    "connectionKey",
+    "provisioningDomainId",
+    "createdAt",
+    "decommissionedAt",
+    "decommissionStatus",
+    "decommissionCursorUserId",
+    "decommissionReconciledUserCount",
+    "decommissionBatchCount",
+    "decommissionRevision",
+    "decommissionCompletedAt",
+    "decommissionLeaseId",
+    "decommissionLeaseExpiresAt",
+  ],
+  scimIdentityTombstone: [
+    "id",
+    "connectionId",
+    "provisioningDomainId",
+    "externalId",
+    "externalIdKey",
+    "userId",
+    "profile",
+    "deletedAt",
+  ],
+  scimSubject: ["id", "userId", "profileSourceId", "revision", "createdAt", "updatedAt"],
+  scimUser: [
+    "id",
+    "connectionId",
+    "provisioningDomainId",
+    "userId",
+    "connectionUserKey",
+    "userName",
+    "userNameKey",
+    "primaryEmail",
+    "workEmailValueIndex",
+    "emailValueIndex",
+    "displayName",
+    "formattedName",
+    "givenName",
+    "familyName",
+    "serializedEmails",
+    "serializedAttributes",
+    "externalId",
+    "externalIdKey",
+    "active",
+    "orderKey",
+    "createdAt",
+    "updatedAt",
+  ],
+  scimProjectionGrant: [
+    "id",
+    "connectionId",
+    "provisioningDomainId",
+    "scimUserId",
+    "userId",
+    "sourceKind",
+    "sourceId",
+    "sourceValue",
+    "role",
+    "grantKey",
+    "createdAt",
+    "updatedAt",
+  ],
+  scimGroup: [
+    "id",
+    "connectionId",
+    "provisioningDomainId",
+    "revision",
+    "displayName",
+    "displayNameKey",
+    "externalId",
+    "externalIdKey",
+    "orderKey",
+    "createdAt",
+    "updatedAt",
+  ],
+  scimGroupMember: ["id", "connectionId", "groupId", "scimUserId", "membershipKey", "createdAt"],
   audit_event: [
     "id",
     "org_id",
@@ -142,5 +224,16 @@ export const EXPECTED_TABLES: Record<string, string[]> = {
     "prev_hash",
     "hash",
   ],
-  scim_group: ["team_id", "org_id", "external_id", "created_at", "updated_at"],
+  org_policy: [
+    "id",
+    "org_id",
+    "require_2fa",
+    "sso_enforced",
+    "break_glass_user_id",
+    "session_max_age_s",
+    "allowed_methods",
+    "group_role_map",
+    "updated_at",
+  ],
+  enterprise_scim_member: ["id", "org_id", "user_id", "member_id", "last_role"],
 };

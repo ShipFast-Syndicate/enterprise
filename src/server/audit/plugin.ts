@@ -39,7 +39,7 @@ import {
   APIError,
   createAuthEndpoint,
   createAuthMiddleware,
-  getIp,
+  getIP,
   getSessionFromCtx,
   isAPIError,
   sessionMiddleware,
@@ -83,19 +83,23 @@ export const AUDITED_PATHS: Record<
   "/organization/accept-invitation": { action: "member.joined", targetType: "member" },
   "/sso/register": { action: "sso.provider_registered", targetType: "sso_provider" },
   "/sso/verify-domain": { action: "sso.domain_verified", targetType: "sso_provider" },
-  "/scim/generate-token": { action: "scim.token_created", targetType: "scim_provider" },
-  "/scim/delete-provider-connection": { action: "scim.token_revoked", targetType: "scim_provider" },
   // "/scim/v2/Users" and "/scim/v2/Users/:userId" are each shared by several
   // SCIM endpoints at different HTTP methods (list vs. create; get/put/patch
   // vs. delete) — `methods` restricts a path entry to only the mutating ones
   // (list/get are reads, never audited); DELETE on the `:userId` path needs
   // a *different* action than its PUT/PATCH default, so it's handled via
   // `METHOD_ACTION_OVERRIDES` below rather than `methods` alone.
-  "/scim/v2/Users": { action: "scim.user_created", targetType: "user", methods: ["POST"] },
+  "/scim/v2/Users": { action: "scim.user_created", targetType: "scim_user", methods: ["POST"] },
   // Real upstream pattern (`:userId`), not the brief's illustrative `:id` — see header comment.
   "/scim/v2/Users/:userId": {
     action: "scim.user_updated",
-    targetType: "user",
+    targetType: "scim_user",
+    methods: ["PUT", "PATCH"],
+  },
+  "/scim/v2/Groups": { action: "scim.group_created", targetType: "scim_group", methods: ["POST"] },
+  "/scim/v2/Groups/:groupId": {
+    action: "scim.group_updated",
+    targetType: "scim_group",
     methods: ["PUT", "PATCH"],
   },
   "/api-key/create": { action: "api_key.created", targetType: "api_key" },
@@ -130,7 +134,10 @@ const METHOD_ACTION_OVERRIDES: Record<
   Record<string, { action: string; targetType: string }>
 > = {
   "/scim/v2/Users/:userId": {
-    DELETE: { action: "scim.user_deleted", targetType: "user" },
+    DELETE: { action: "scim.user_deleted", targetType: "scim_user" },
+  },
+  "/scim/v2/Groups/:groupId": {
+    DELETE: { action: "scim.group_deleted", targetType: "scim_group" },
   },
 };
 
@@ -199,7 +206,7 @@ function extractId(value: unknown): string | null {
 // (`test/server/audit-plugin.test.ts`'s invite-member test failed
 // `actorId`/session assertions until this was made explicit) — does not
 // reliably survive into a plugin-level `hooks.after` handler the way
-// `ctx.context.returned`/`ctx.context.scimProvider` do.
+// `ctx.context.returned`/`ctx.context.scimConnection` do.
 function resolveActorId(
   returned: unknown,
   session: { user: { id: string } } | null,
@@ -234,7 +241,7 @@ function resolveTargetId(
 // come from the URL instead.
 function resolveRouteParamId(ctx: GenericEndpointContext): string | null {
   const params = ctx.params as Record<string, string | undefined> | undefined;
-  return params?.userId ?? params?.providerId ?? null;
+  return params?.userId ?? params?.groupId ?? params?.providerId ?? null;
 }
 
 // `/sso/callback/:providerId`/`/sso/saml2/sp/acs/:providerId` (Task 8) share
@@ -302,7 +309,7 @@ async function isOrgMember(
  * The resolution order is now strictly "most trustworthy source first", and
  * every remaining caller-supplied value has to be *proved*:
  *
- * 1. **SCIM bearer** — `ctx.context.scimProvider` is set by SCIM bearer
+ * 1. **SCIM bearer** — `ctx.context.scimConnection` is set by SCIM bearer
  *    authentication from the token row itself; a SCIM request may only ever
  *    write to its own token's org, whatever its body says.
  * 2. **SSO callbacks** — the org comes from the `ssoProvider` row named by
@@ -320,9 +327,10 @@ async function resolveOrgId(
   ctx: GenericEndpointContext,
   session: { session: object; user?: { id?: string } } | null,
 ): Promise<string | null> {
-  const scimProvider = (ctx.context as unknown as { scimProvider?: { organizationId?: string } })
-    .scimProvider;
-  if (scimProvider?.organizationId) return scimProvider.organizationId;
+  const scimConnection = (
+    ctx.context as unknown as { scimConnection?: { provisioningDomainId?: string } }
+  ).scimConnection;
+  if (scimConnection?.provisioningDomainId) return scimConnection.provisioningDomainId;
 
   const providerOrgId = await resolveSsoProviderOrgId(ctx, ctx.path ?? "");
   if (providerOrgId) return providerOrgId;
@@ -779,19 +787,21 @@ export function auditLog(opts: EnterpriseOptions) {
             const action = ssoFailed ? "auth.sso_sign_in_failed" : entry.action;
             const targetType = ssoFailed ? "sso_provider" : entry.targetType;
 
-            const scimProvider = (ctx.context as unknown as { scimProvider?: unknown })
-              .scimProvider;
-            const actorId = ssoFailed ? null : resolveActorId(returned, session);
+            const scimConnection = (ctx.context as unknown as { scimConnection?: { id: string } })
+              .scimConnection;
+            const actorId = ssoFailed
+              ? null
+              : (scimConnection?.id ?? resolveActorId(returned, session));
             const input: AuditInput = {
               orgId,
-              actorType: ssoFailed ? "system" : scimProvider ? "scim" : "user",
+              actorType: ssoFailed ? "system" : scimConnection ? "scim" : "user",
               actorId,
               action,
               targetType,
               targetId: ssoFailed
                 ? resolveRouteParamId(fullCtx)
                 : resolveTargetId(returned, resolveRouteParamId(fullCtx), actorId),
-              ip: ctx.request ? (getIp(ctx.request, ctx.context.options) ?? null) : null,
+              ip: ctx.request ? (getIP(ctx.request, ctx.context.options) ?? null) : null,
               userAgent: ctx.request?.headers.get("user-agent") ?? null,
               metadata: ssoFailed ? { error: extractRedirectError(returned) } : {},
             };

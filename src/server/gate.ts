@@ -21,8 +21,6 @@ export const GATED_PATHS: Record<string, Feature> = {
   "/sso/register": "sso",
   "/sso/request-domain-verification": "sso",
   "/sso/verify-domain": "sso",
-  "/scim/generate-token": "scim",
-  "/scim/delete-provider-connection": "scim",
   "/organization/create-team": "teams",
   "/api-key/create": "api_keys",
   "/enterprise/audit/list": "audit_log",
@@ -53,31 +51,14 @@ export const GATED_PATHS: Record<string, Feature> = {
   // wizard cannot read.
   "/enterprise/scim/tokens": "scim",
   "/enterprise/scim/tokens/create": "scim",
+  "/enterprise/scim/tokens/rotate": "scim",
   "/enterprise/scim/tokens/revoke": "scim",
 };
 
-// `@better-auth/scim` below 1.7 has an unpatched HIGH advisory
-// (GHSA-j8v8-g9cx-5qf4): a SCIM provider created without `organizationId`
-// ("personal" provider) can be taken over. This design only ever allows
-// org-scoped providers, so these two paths require `organizationId`
-// explicitly in the body — unlike every other gated path, they must NOT
-// fall back to the session's active org (see the org-id resolution below).
-const ORG_ID_REQUIRED_IN_BODY = new Set<string>([
-  "/scim/generate-token",
-  "/scim/delete-provider-connection",
-]);
-
-// Paths only an org **owner** may call (M-01). Minting a SCIM token is the
-// second half of the admin→owner escalation the audit reproduced (write
-// `groupRoleMap: {Bosses: "owner"}` as an admin, mint a token, `POST
-// /scim/v2/Groups {displayName: "Bosses", members: [self]}`); the first half
-// is closed in `./policy/plugin.ts`. Enforced here rather than only in
-// `./enterprise-api/scim.ts` so calling the upstream endpoint directly is
-// covered too — the portal wrapper forwards through this same dispatch
-// pipeline, so both routes hit this check.
-const OWNER_ONLY_PATHS = new Set<string>([
-  "/scim/generate-token",
+// Credential management is tenant-authorized; only owners may mint or rotate.
+const OWNER_ONLY_PATHS = new Set([
   "/enterprise/scim/tokens/create",
+  "/enterprise/scim/tokens/rotate",
 ]);
 
 // No explicit `: BetterAuthPlugin` return-type annotation (client task-9 fix
@@ -135,12 +116,11 @@ export function enterpriseGate(opts: EnterpriseOptions) {
             // GET endpoints (e.g. `/enterprise/audit/list|export`, Task 4)
             // carry the org id in the query string, not the body.
             const query = ctx.query as { orgId?: string } | undefined;
-            const orgId = ORG_ID_REQUIRED_IN_BODY.has(ctx.path)
-              ? body?.organizationId
-              : (body?.organizationId ??
-                body?.orgId ??
-                query?.orgId ??
-                (session.session as { activeOrganizationId?: string }).activeOrganizationId);
+            const orgId =
+              body?.organizationId ??
+              body?.orgId ??
+              query?.orgId ??
+              (session.session as { activeOrganizationId?: string }).activeOrganizationId;
             if (!orgId) {
               throw new APIError("BAD_REQUEST", {
                 code: "ORG_REQUIRED",

@@ -13,7 +13,7 @@
 //   session.create.before` backstop, and `resolvePolicyOrgForUser` (the
 //   membership-first, domain-fallback org resolver both enforcement points
 //   share).
-// - `./deprovision.ts` — the SCIM deprovision `hooks.after` cascade.
+// SCIM deactivation runs in the native identity transaction (../scim.ts).
 // - `./home-realm.ts` — `findOrgByEmailDomain` and the public
 //   `/enterprise/home-realm` endpoint.
 //
@@ -37,7 +37,6 @@ import {
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
 import type { EnterpriseOptions } from "../types";
-import { buildDeprovisionAfterHook } from "./deprovision";
 import { buildSessionCreateBeforeHook, buildSignInBeforeHook } from "./enforcement";
 import { findOrgByEmailDomain, HOME_REALM_RATE_LIMIT, homeRealmEndpoint } from "./home-realm";
 import { buildScimRequiredUserCreateBeforeHook } from "./scim-required";
@@ -336,7 +335,7 @@ export function orgPolicy(opts: EnterpriseOptions) {
     rateLimit: [HOME_REALM_RATE_LIMIT],
     hooks: {
       before: [buildSignInBeforeHook()],
-      after: [buildRequire2faAfterHook(), buildDeprovisionAfterHook()],
+      after: [buildRequire2faAfterHook()],
     },
     // `databaseHooks` is wired via `init()` returning `{options:
     // {databaseHooks}}` — the better-auth convention every plugin that

@@ -28,7 +28,15 @@ describe("AUDITED_PATHS", () => {
   it("covers the target types the brief lists, expanded to {action, targetType} objects", () => {
     const targetTypes = new Set(Object.values(AUDITED_PATHS).map((v) => v.targetType));
     expect(targetTypes).toEqual(
-      new Set(["user", "member", "sso_provider", "scim_provider", "api_key", "org_policy"]),
+      new Set([
+        "user",
+        "member",
+        "sso_provider",
+        "scim_user",
+        "scim_group",
+        "api_key",
+        "org_policy",
+      ]),
     );
   });
 
@@ -39,7 +47,7 @@ describe("AUDITED_PATHS", () => {
     // as the task brief's illustrative sketch wrote.
     expect(AUDITED_PATHS["/scim/v2/Users/:userId"]).toEqual({
       action: "scim.user_updated",
-      targetType: "user",
+      targetType: "scim_user",
       methods: ["PUT", "PATCH"],
     });
     expect(AUDITED_PATHS["/scim/v2/Users/:id"]).toBeUndefined();
@@ -60,6 +68,7 @@ describe("enterprise-audit hook matcher — parameterised path matching", () => 
   const plugin = auditLog({
     product: "test",
     secretsKey: "s".repeat(32),
+    scimCredentialHashSecret: "catalog-test-key-".repeat(3),
     resolveEntitlements: async () => new Set(),
   });
   const matcher = plugin.hooks!.after![0]!.matcher;
@@ -425,17 +434,18 @@ describe("GET /enterprise/audit/verify", () => {
 describe("enterprise-audit hook — SCIM bearer path (parameterised, live dispatch, method-aware)", () => {
   async function setUpScimUser(t: TestAuth, cookie: string, orgId: string) {
     const tokenRes = await t.api.post(
-      "/scim/generate-token",
-      { providerId: "okta", organizationId: orgId },
+      "/enterprise/scim/tokens/create",
+      { providerId: "okta", orgId },
       { cookie },
     );
-    expect(tokenRes.status).toBe(201);
+    expect(tokenRes.status).toBe(200);
     const { scimToken } = (await tokenRes.json()) as { scimToken: string };
     const bearer = { authorization: `Bearer ${scimToken}` };
 
     const createRes = await t.api.post(
       "/scim/v2/Users",
       {
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
         userName: "scim.user@acme.test",
         emails: [{ value: "scim.user@acme.test", primary: true }],
       },
@@ -484,7 +494,7 @@ describe("enterprise-audit hook — SCIM bearer path (parameterised, live dispat
       },
       bearer,
     );
-    expect(patchRes.status).toBe(204);
+    expect(patchRes.status).toBe(200);
 
     const rows = await auditRowsFor(t, orgId, "scim.user_updated");
     expect(rows.rows.length).toBe(1);

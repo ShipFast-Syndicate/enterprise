@@ -27,11 +27,7 @@ export async function mintScimToken(
   orgId: string,
   providerId = "okta",
 ): Promise<{ authorization: string }> {
-  const res = await t.api.post(
-    "/scim/generate-token",
-    { providerId, organizationId: orgId },
-    { cookie },
-  );
+  const res = await t.api.post("/enterprise/scim/tokens/create", { providerId, orgId }, { cookie });
   if (!res.ok) throw new Error(`generate-token failed: ${res.status} ${await res.text()}`);
   const { scimToken } = (await res.json()) as { scimToken: string };
   return { authorization: `Bearer ${scimToken}` };
@@ -41,10 +37,16 @@ export async function createScimUser(
   t: TestAuth,
   bearer: { authorization: string },
   email: string,
+  externalId?: string,
 ): Promise<string> {
   const res = await t.api.post(
     "/scim/v2/Users",
-    { userName: email, emails: [{ value: email, primary: true }] },
+    {
+      schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
+      userName: email,
+      externalId,
+      emails: [{ value: email, primary: true }],
+    },
     bearer,
   );
   if (!res.ok) throw new Error(`SCIM create user failed: ${res.status} ${await res.text()}`);
@@ -68,4 +70,12 @@ export async function setPolicy(
   body: Record<string, unknown>,
 ): Promise<Response> {
   return t.api.post("/enterprise/policy/set", body, { cookie });
+}
+
+export async function coreUserId(t: TestAuth, scimUserId: string): Promise<string> {
+  const result = await t.client.execute({
+    sql: "SELECT userId FROM scimUser WHERE id = ?",
+    args: [scimUserId],
+  });
+  return String(result.rows[0]!.userId);
 }

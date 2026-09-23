@@ -1,13 +1,4 @@
-// Alpha Bros enterprise layer — `<ab-scim-tokens>` (Task 11).
-//
-// SCIM provisioning token lifecycle: `GET /enterprise/scim/tokens` (list —
-// `providerId` only, `createdAt`/`lastUsedAt` always `null` in v0.1, see
-// `../server/enterprise-api/scim.ts`'s header comment), `POST .../create`
-// (returns the token once — never persisted or re-fetchable, so it's held
-// only in `newToken` state until the admin dismisses the copy box), and
-// `POST .../revoke` behind `confirm` (same stubbable-confirm pattern as
-// `./ab-members.ts`).
-
+// Organization SCIM credential lifecycle. Tokens stay in component memory only.
 import { html, css, type TemplateResult } from "lit";
 import { AbElement } from "./base";
 
@@ -15,6 +6,7 @@ interface ScimToken {
   providerId: string;
   createdAt: string | null;
   lastUsedAt: string | null;
+  status?: string;
 }
 
 interface TokensResponse {
@@ -113,23 +105,45 @@ export class AbScimTokens extends AbElement {
   }
 
   private async handleRevoke(token: ScimToken): Promise<void> {
-    const ok = this.confirm(`Revoke the SCIM token for provider "${token.providerId}"?`);
+    const ok = this.confirm(
+      `Remove SCIM connection "${token.providerId}" and deactivate the access it provisioned?`,
+    );
     if (!ok) return;
     this.submitError = undefined;
     try {
-      await this.api.post("/enterprise/scim/tokens/revoke", {
+      const result = await this.api.post<{ ok: boolean }>("/enterprise/scim/tokens/revoke", {
         orgId: this.orgId,
         providerId: token.providerId,
       });
       await this.load();
-      this.emitChange({ type: "scim-token-revoked", providerId: token.providerId });
+      if (result.ok) this.emitChange({ type: "scim-token-revoked", providerId: token.providerId });
+    } catch (e) {
+      this.submitError = e;
+    }
+  }
+
+  private async handleRotate(token: ScimToken): Promise<void> {
+    if (
+      !this.confirm(
+        `Replace the token for "${token.providerId}"? The old token will stop working immediately.`,
+      )
+    )
+      return;
+    this.submitError = undefined;
+    try {
+      const data = await this.api.post<{ scimToken: string; baseUrl: string }>(
+        "/enterprise/scim/tokens/rotate",
+        { orgId: this.orgId, providerId: token.providerId },
+      );
+      this.newToken = { providerId: token.providerId, ...data };
+      this.emitChange({ type: "scim-token-rotated", providerId: token.providerId });
     } catch (e) {
       this.submitError = e;
     }
   }
 
   private defaultProviderId(): string {
-    return `scim-${this.orgId}`;
+    return `scim-${this.orgId}`.slice(0, 64);
   }
 
   override render(): TemplateResult {
@@ -168,7 +182,10 @@ export class AbScimTokens extends AbElement {
                 <td>${t.createdAt ?? "—"}</td>
                 <td>${t.lastUsedAt ?? "—"}</td>
                 <td>
-                  <button type="button" @click=${() => void this.handleRevoke(t)}>Revoke</button>
+                  <button type="button" @click=${() => void this.handleRevoke(t)}>
+                    ${t.status === "decommissioning" ? "Continue removal" : "Revoke"}
+                  </button>
+                  ${t.status === "decommissioning" ? html`<span role="status">Access removal is in progress.</span>` : html`<button type="button" @click=${() => void this.handleRotate(t)}>Rotate token</button>`}
                 </td>
               </tr>
             `,
@@ -177,7 +194,13 @@ export class AbScimTokens extends AbElement {
       </table>
       ${this.tokens.length === 0 ? html`<p class="ab-muted">No SCIM tokens yet.</p>` : ""}
       <form @submit=${(e: SubmitEvent) => void this.handleCreate(e)}>
-        <input name="providerId" .value=${this.defaultProviderId()} required />
+        <label
+          >Provider ID (use the SSO provider ID to pair sign-in)<input
+            name="providerId"
+            maxlength="64"
+            .value=${this.defaultProviderId()}
+            required
+        /></label>
         <button type="submit">Create token</button>
       </form>
     `;
