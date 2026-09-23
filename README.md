@@ -66,12 +66,12 @@ import { enterprisePreset, type Feature } from "@alphabros/enterprise/server";
 export const auth = betterAuth({
   database: /* drizzleAdapter(db, { provider: "sqlite", transaction: true }) */ myAdapter,
   plugins: enterprisePreset({
-    product: "klar",
+    product: "my-app",
     // Reads your own billing/plan state — see "Entitlements" below.
     resolveEntitlements: async (orgId) => resolveEntitlementsFromStripe(orgId),
     // Encrypts the per-provider IdP secrets stored on the `ssoProvider` row
     // (OIDC `clientSecret`, SAML private-key fields). >=32 chars, from your
-    // product's 1Password vault — never a literal in source. See
+    // deployment's secret manager — never a literal in source. See
     // docs/security.md for exactly which fields it covers.
     secretsKey: process.env.ENTERPRISE_SECRETS_KEY!,
     scimCredentialHashSecret: process.env.ENTERPRISE_SCIM_CREDENTIAL_HASH_SECRET!,
