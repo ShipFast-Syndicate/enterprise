@@ -7,8 +7,8 @@ package with four subpath entry points and a CLI.
 
 ## Status
 
-**v0.1 — pilot-grade.** Server plugins, schema/CLI, client helpers, and all seven portal
-elements are implemented and tested (330+ tests). Read [`docs/security.md`](./docs/security.md)
+**v1.0 — pilot-grade.** Server plugins, schema/CLI, client helpers, and all seven portal
+elements are implemented and tested (390 tests). Read [`docs/security.md`](./docs/security.md)
 before deploying to a real customer — it documents the patched SCIM migration, token storage,
 audit chain limitations, and the retention/GDPR posture.
 
@@ -30,16 +30,16 @@ This package ships one dependency of its own (`zod`) and declares everything els
   "@better-auth/sso": "1.7.5",
   "better-auth": "1.7.5",
   "better-call": "1.4.0",
-  "@libsql/client": "^0.15.15", // optional — only needed for ./schema and the CLI
+  "@libsql/client": "^0.15.15 || ^0.17.3", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
   "lit": "^3", // optional — only needed for ./portal
 }
 ```
 
 `better-auth` and its `@better-auth/*` plugin set are pinned to the exact `1.7.5` release
-(not a caret range) because `@better-auth/scim` has an unpatched advisory below the `1.7`
-line — see [`docs/security.md`](./docs/security.md#accepted-advisories) for why this
-package's own defaults make it inapplicable here, and when the pin will move.
+(not a caret range) so the complete auth stack uses the tested, patched SCIM release.
+The former advisory exception is removed. See [`docs/security.md`](./docs/security.md)
+and the [migration guide](./docs/migration-1-7.md) for the new credential and identity model.
 
 Requirements: Node `>=22`, pnpm 10 (or any package manager — pnpm is only this repo's own
 dev toolchain).
@@ -178,11 +178,11 @@ including what `org_policy.sso_enforced` does to non-SSO sign-in attempts.
 `<ab-security-policy>`, `<ab-api-keys>`, `<ab-audit-log>`. They render a shadow DOM and talk to
 the `/enterprise/*` API directly — no server code needed beyond `enterprisePreset` above.
 
-One scope caveat: **API keys are per user in v0.1, not per organization.** `<ab-api-keys>` drives
+One scope caveat: **API keys are per user, not per organization.** `<ab-api-keys>` drives
 upstream `/api-key/list` and `/api-key/create`, which are scoped to the signed-in user, so an
 org's security screen shows and creates _that user's_ keys wherever they were created — and a
 SCIM deprovision revokes all of that user's keys, not only the ones they used for this org.
-Per-org key scoping is post-v0.1.
+Per-org key scoping remains a follow-up.
 
 **Import the elements only from a browser-only context.** Lit's browser build references
 `HTMLElement`, which doesn't exist on the server; importing the module in server-rendered code
@@ -332,8 +332,8 @@ at runtime and does not run on Cloudflare Workers/workerd. `./server`, `./client
 
 - [`docs/sso.md`](./docs/sso.md) — the SSO wizard flow, DNS TXT verification, SAML SP metadata
   URLs, and the `node:dns`-on-Workers caveat.
-- [`docs/scim.md`](./docs/scim.md) — SCIM Users (upstream) vs. Groups (this package), the
-  `ResourceTypes` limitation, and Okta/Entra ID setup notes.
+- [`docs/scim.md`](./docs/scim.md) — native SCIM Users/Groups, credential rotation,
+  membership projection, decommissioning, and IdP setup notes.
 - [`docs/security.md`](./docs/security.md) — patched SCIM migration, secrets/token storage,
   audit chain limits, retention/GDPR, and this package's trusted-publishing setup.
 
