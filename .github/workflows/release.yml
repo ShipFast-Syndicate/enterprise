@@ -11,35 +11,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Version, changelog, tag and GitHub release via the hub's semantic-release
-  # reusable. `.releaserc.json`'s `@semantic-release/npm` runs with
+  # Version, changelog, tag and GitHub release locally: this public repository
+  # cannot call the private hub's reusable workflow. `@semantic-release/npm` runs with
   # `npmPublish: false` — this job only bumps `package.json`'s version and
   # writes the release commit/tag; it never touches the npm registry, so it
   # needs no `NPM_TOKEN` at all (trusted publishing, no npm token anywhere —
-  # Bastien 2026-09-15). Secrets are passed explicitly (security audit W2) —
-  # no `secrets: inherit` — and only the two the hub actually declares for
-  # this repo's use: `RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY`, which mint
+  # Bastien 2026-09-15). Only the token-generation step receives
+  # `RELEASE_APP_ID` + `RELEASE_APP_PRIVATE_KEY`, which mint
   # the installation token `@semantic-release/git` needs to push the release
-  # commit past the `main` branch ruleset (see the hub's own comment in
-  # `reusable-release.yml`).
+  # commit past the `main` branch ruleset.
   release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
       issues: write
       pull-requests: write
-    uses: ShipFast-Syndicate/.github/.github/workflows/reusable-release.yml@13c9221923d36ac2af4de3434eab7c30013aac1e # v1
-    with:
-      runs-on: '["ubuntu-latest"]'
-    secrets:
-      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
-      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+          cache: "pnpm"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Generate release-bot token
+        id: release-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Keep the installation token scoped to this repository.
+          repositories: ${{ github.event.repository.name }}
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
+          # The dedicated CI jobs already enforce local pre-push checks.
+          HUSKY: "0"
+        run: pnpm exec semantic-release
 
   # npm publish via OIDC trusted publishing + provenance — no NPM_TOKEN.
-  # This runs as its own job (not through the hub reusable, which has no
-  # `id-token: write` and cannot mint provenance) so it can carry the OIDC
-  # permission and the `npm` deployment environment directly.
+  # This runs as its own job so only publication carries OIDC permissions
+  # and the protected `npm` deployment environment.
   #
-  # The hub's `reusable-release.yml` exposes no "did a release happen"
+  # The semantic-release command exposes no "did a release happen"
   # output, so this job always runs and gates every step on whether `release`
   # actually produced a new `v*` tag at the tip of `main` — a no-op semantic-
   # release run (e.g. a merge with no releasable commits) leaves this job a
