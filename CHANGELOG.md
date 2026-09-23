@@ -1,3 +1,9 @@
+## [1.0.1](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.0.0...v1.0.1) (2026-09-23)
+
+### Bug Fixes
+
+* **sso:** release provider-bound domain verification ([#21](https://github.com/ShipFast-Syndicate/enterprise/issues/21)) ([611f225](https://github.com/ShipFast-Syndicate/enterprise/commit/611f22504ecb8d5fa86eef05912777a980881f1d)), closes [#19](https://github.com/ShipFast-Syndicate/enterprise/issues/19)
+
 ## [1.0.0](https://github.com/ShipFast-Syndicate/enterprise/compare/v0.1.0...v1.0.0) (2026-09-23)
 
 ### ⚠ BREAKING CHANGES
