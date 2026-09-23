@@ -238,6 +238,32 @@ const publicActions = new Set([
   "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
 ]);
 
+test("public release uses a local job and confines registry authority to protected publication", () => {
+  const release = parse(readFileSync(new URL("../workflows/release.yml", import.meta.url), "utf8"));
+  assert.deepEqual(release.on, { push: { branches: ["main"] } });
+  assert.equal(release.concurrency["cancel-in-progress"], false);
+  assert.equal(release.jobs.release.uses, undefined);
+  assert.equal(release.jobs.release.permissions["id-token"], undefined);
+  assert.deepEqual(release.jobs.publish.permissions, { "id-token": "write", contents: "read" });
+  assert.equal(release.jobs.publish.environment, "npm");
+  assert.equal(release.jobs.publish.needs, "release");
+  for (const job of Object.values(release.jobs)) {
+    assert.equal(job["runs-on"], "ubuntu-latest");
+    for (const step of job.steps) {
+      if (step.uses) assert.match(step.uses, /^(actions|pnpm)\/[\w-]+@[0-9a-f]{40}$/);
+      if (step.run) assert.doesNotMatch(step.run, /\$\{\{/);
+      assert.equal(step.env?.NPM_TOKEN, undefined);
+    }
+  }
+  const token = release.jobs.release.steps.find((step) => step.id === "release-token");
+  assert.equal(token.with.repositories, "${{ github.event.repository.name }}");
+  const checkout = release.jobs.release.steps.find((step) =>
+    step.uses?.startsWith("actions/checkout@"),
+  );
+  assert.equal(checkout.with["persist-credentials"], false);
+  assert.equal(checkout.with["fetch-depth"], 0);
+});
+
 function assertClosure(caller, workflow) {
   assert.deepEqual(Object.keys(caller.on).sort(), ["pull_request", "push", "workflow_dispatch"]);
   assert.equal(caller.jobs.ci.uses, "./.github/workflows/public-ci.yml");
