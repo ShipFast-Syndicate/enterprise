@@ -83,6 +83,10 @@ export const auth = betterAuth({
 });
 ```
 
+For OIDC, configure the provider's exact origin through Better Auth's
+`trustedOrigins` option or `BETTER_AUTH_TRUSTED_ORIGINS` before using the portal.
+See [OIDC origin configuration](./docs/sso.md#trust-the-oidc-provider-origin).
+
 `samlSpKeys` is **not** in that list. It is typed on `EnterpriseOptions` and reserved, but
 `enterprisePreset` cannot consume it: `@better-auth/sso@1.7.5`'s `sso()` has no plugin-level slot
 for a shared SP signing identity — only a _per-provider_ `samlConfig.spMetadata`, set at
