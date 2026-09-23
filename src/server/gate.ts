@@ -55,6 +55,10 @@ export const GATED_PATHS: Record<string, Feature> = {
   "/enterprise/scim/tokens/revoke": "scim",
 };
 
+// These upstream endpoints accept only a providerId. Their organization must
+// come from the stored provider, independent of the caller's active organization.
+const PROVIDER_DOMAIN_PATHS = new Set(["/sso/request-domain-verification", "/sso/verify-domain"]);
+
 // Credential management is tenant-authorized; only owners may mint or rotate.
 const OWNER_ONLY_PATHS = new Set([
   "/enterprise/scim/tokens/create",
@@ -112,15 +116,34 @@ export function enterpriseGate(opts: EnterpriseOptions) {
             const session = await getSessionFromCtx(ctx as unknown as GenericEndpointContext);
             if (!session) return; // anonymous — let the endpoint answer 401
 
-            const body = ctx.body as { organizationId?: string; orgId?: string } | undefined;
+            const body = ctx.body as
+              { organizationId?: string; orgId?: string; providerId?: string } | undefined;
             // GET endpoints (e.g. `/enterprise/audit/list|export`, Task 4)
             // carry the org id in the query string, not the body.
             const query = ctx.query as { orgId?: string } | undefined;
-            const orgId =
+            let orgId =
               body?.organizationId ??
               body?.orgId ??
               query?.orgId ??
               (session.session as { activeOrganizationId?: string }).activeOrganizationId;
+            if (PROVIDER_DOMAIN_PATHS.has(ctx.path)) {
+              const provider =
+                typeof body?.providerId === "string"
+                  ? await ctx.context.adapter.findOne<{ organizationId?: string | null }>({
+                      model: "ssoProvider",
+                      where: [{ field: "providerId", value: body.providerId }],
+                    })
+                  : null;
+              // Never let an entitled session/caller org authorize verification
+              // for another provider, including a legacy unbound provider.
+              orgId = provider?.organizationId ?? undefined;
+              if (!orgId) {
+                throw new APIError("FORBIDDEN", {
+                  code: "NOT_ORG_MEMBER",
+                  message: "You are not a member of this organization.",
+                });
+              }
+            }
             if (!orgId) {
               throw new APIError("BAD_REQUEST", {
                 code: "ORG_REQUIRED",
