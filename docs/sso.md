@@ -64,6 +64,28 @@ message) are shown **only** in the `test-login` step, per the design's error
 handling rule — every other step renders through the same generic error UI
 every other portal component uses.
 
+## Trust the OIDC provider origin
+
+Better Auth 1.7 validates the discovery URL and the endpoint origins advertised
+by its discovery document against the application's trusted origins. Before
+registering an OIDC provider, configure its exact HTTPS origin on the server:
+
+```sh
+BETTER_AUTH_TRUSTED_ORIGINS=https://idp.example.com
+```
+
+Better Auth reads this comma-separated environment variable directly. You can
+also pass `trustedOrigins: ["https://idp.example.com"]` to `betterAuth(...)`.
+Include any additional origins used by the provider's discovery endpoints,
+and deploy the configuration to the environment where registration will run.
+The application's own origin remains trusted automatically.
+
+Entering an issuer in the portal does not grant it server-side trust. An
+`Untrusted OIDC discovery URL` response means the operator must review and
+configure that origin. Keep the allowlist narrow: these are Better Auth trust
+settings, and explicitly trusting private-network IdPs also changes their SSRF
+validation boundary. Do not use a wildcard to make arbitrary issuers pass.
+
 ## DNS record
 
 The verification identifier reuses `@better-auth/sso`'s own format exactly
@@ -106,28 +128,17 @@ IdP-initiated SAML (a response with no prior `AuthnRequest`) is accepted —
 explicitly (matching upstream's own default, made explicit so the intent is
 visible in this repo rather than relying on a default that could change).
 
-## `node:dns` on Workers — a v0.1 caveat
+## DNS verification on Cloudflare Workers
 
-`POST /sso/verify-domain` (upstream `@better-auth/sso`) resolves the TXT
-record with `node:dns`. That module does not exist on Cloudflare Workers —
-a product running its better-auth instance entirely on `workerd` cannot call
-domain verification from the Worker itself. Two workarounds, neither
-implemented by this package in v0.1 (documented here for P2 to pick up):
+`POST /sso/verify-domain` uses `node:dns/promises.resolveTxt`. Cloudflare
+Workers supports `resolveTxt` when `nodejs_compat` is enabled; see the
+[Cloudflare DNS compatibility documentation](https://developers.cloudflare.com/workers/runtime-apis/nodejs/dns/).
+Use a supported compatibility date and verify the real TXT challenge in the
+deployed runtime. The old v0.1 statement that Workers has no `node:dns` support
+is no longer accurate.
 
-1. Run the `/sso/verify-domain` call (only that one endpoint) on a Node
-   leg — e.g. a small Node-runtime API route/edge-exempt function that
-   proxies just this call, while everything else stays on Workers.
-2. Resolve the TXT record yourself over DNS-over-HTTPS (`fetch()` to
-   `https://cloudflare-dns.com/dns-query` or a similar resolver, which works
-   fine on Workers) and skip upstream's endpoint entirely, writing
-   `domainVerified` directly the way this package's own test helpers do for
-   fixtures (`UPDATE "ssoProvider" SET domainVerified = 1 WHERE ...`) —
-   **only appropriate once you've actually verified the record yourself**,
-   never as a shortcut in production.
-
-v0.1 does not choose between these for you — pick whichever fits your
-deployment target, or run domain verification during local/CI setup only
-where a Node runtime is available.
+Keep the provider's normal domain-verification flow. A database flag set by a
+test fixture does not prove control of a customer's domain.
 
 ## Just-in-time (JIT) provisioning
 
