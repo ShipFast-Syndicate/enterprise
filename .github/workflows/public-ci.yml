@@ -27,6 +27,7 @@ jobs:
         id: install
         run: pnpm install --frozen-lockfile
       - run: node --test .github/scripts/*.test.mjs
+      - run: python3 .github/scripts/dependabot-gate.test.py
 
   node:
     # Preserve the existing security-only Dependabot policy.
