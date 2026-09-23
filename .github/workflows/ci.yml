@@ -8,10 +8,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  checks: write
-  issues: write
-  actions: read
+  pull-requests: read
   statuses: read
 
 concurrency:
@@ -20,25 +17,6 @@ concurrency:
 
 jobs:
   ci:
-    uses: ShipFast-Syndicate/.github/.github/workflows/reusable-ci-app.yml@78bee37c6546003297a5740bbbc16a29f0832480 # v1
-    with:
-      project-name: enterprise
-      eslint-command: "pnpm lint"
-      typecheck-command: "pnpm typecheck"
-      prettier-command: "pnpm format:check"
-      coverage-command: "pnpm test:coverage"
-      gitleaks-config-path: ".gitleaks.toml"
-      build-matrix: '[{"target":"npm","command":"pnpm build","env":"","allow-failure":false}]'
-      run-e2e: false
-      run-migration-dry-run: false
-    secrets:
-      STUDIO_ARTIFACT_S3: ${{ secrets.STUDIO_ARTIFACT_S3 }}
-      REVIEWER_APP_ID: ${{ secrets.REVIEWER_APP_ID }}
-      REVIEWER_APP_PRIVATE_KEY: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
-      AUDITS_TG_BOT_TOKEN: ${{ secrets.AUDITS_TG_BOT_TOKEN }}
-      AUDITS_TG_CHAT_ID: ${{ secrets.AUDITS_TG_CHAT_ID }}
-      AUDITS_TG_TOPIC_ID: ${{ secrets.AUDITS_TG_TOPIC_ID }}
-      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
-      VERCEL_PROTECTION_BYPASS: ${{ secrets.VERCEL_PROTECTION_BYPASS }}
+    # Keep CI self-contained, with explicit hosted placement and no private hub dependency.
+    # Keep this caller ID and the local summary ID: branch rules require ci / summary.
+    uses: ./.github/workflows/public-ci.yml

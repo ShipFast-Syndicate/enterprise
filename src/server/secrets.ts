@@ -1,3 +1,4 @@
+import { getCurrentAdapter } from "@better-auth/core/context";
 // Alpha Bros enterprise layer — encryption at rest for IdP secrets (C-04).
 //
 // `EnterpriseOptions.secretsKey` used to be a *declared but entirely unused*
@@ -289,7 +290,7 @@ function whereValue(params: ModelParams, field: string): string | null {
  * writing an unbound — or worse, plaintext — secret.
  */
 async function resolveWriteAad(
-  target: Adapter,
+  target: Pick<Adapter, "findOne">,
   params: ModelParams,
   payload: unknown,
 ): Promise<string | null> {
@@ -333,18 +334,38 @@ function touchesSecrets(payload: unknown): boolean {
  * `this` — keep working unchanged.
  */
 export function withSecretEncryption(adapter: Adapter, secretsKey: string): Adapter {
-  return new Proxy(adapter, {
+  return wrapAdapter(adapter, secretsKey, true);
+}
+
+function wrapAdapter(adapter: Adapter, secretsKey: string, followTransaction: boolean): Adapter {
+  const proxy = new Proxy(adapter, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver) as unknown;
       if (typeof value !== "function") return value;
-      const call = value.bind(target) as (params: unknown) => Promise<unknown>;
+      const call = async (params: unknown): Promise<unknown> => {
+        const active = followTransaction ? await getCurrentAdapter(target) : target;
+        if (active !== target && active !== proxy) {
+          const method = Reflect.get(active, prop) as (input: unknown) => Promise<unknown>;
+          return method.call(active, params);
+        }
+        return value.call(target, params);
+      };
 
       switch (prop) {
+        case "transaction":
+          return (callback: (transaction: Adapter) => Promise<unknown>) =>
+            target.transaction((transaction) =>
+              callback(wrapAdapter(transaction as Adapter, secretsKey, false)),
+            );
         case "create":
           return async (params: ModelParams) => {
             if (!isSecretModel(params)) return call(params);
             if (!touchesSecrets(params.data)) return decryptRow(await call(params), secretsKey);
-            const aad = await resolveWriteAad(target, params, params.data);
+            const aad = await resolveWriteAad(
+              followTransaction ? await getCurrentAdapter(target) : target,
+              params,
+              params.data,
+            );
             if (!aad) throw unbindableWrite("create");
             const data = await encryptPayload(params.data, secretsKey, aad);
             return decryptRow(await call({ ...params, data }), secretsKey);
@@ -354,7 +375,11 @@ export function withSecretEncryption(adapter: Adapter, secretsKey: string): Adap
           return async (params: ModelParams) => {
             if (!isSecretModel(params)) return call(params);
             if (!touchesSecrets(params.update)) return decryptRow(await call(params), secretsKey);
-            const aad = await resolveWriteAad(target, params, params.update);
+            const aad = await resolveWriteAad(
+              followTransaction ? await getCurrentAdapter(target) : target,
+              params,
+              params.update,
+            );
             if (!aad) throw unbindableWrite(String(prop));
             const update = await encryptPayload(params.update, secretsKey, aad);
             return decryptRow(await call({ ...params, update }), secretsKey);
@@ -375,4 +400,5 @@ export function withSecretEncryption(adapter: Adapter, secretsKey: string): Adap
       }
     },
   }) as Adapter;
+  return proxy;
 }

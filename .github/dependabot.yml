@@ -1,0 +1,32 @@
+# Auth peers must move together. Group compatible updates and retain security alerts.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    # Security scan policy: allow new versions to age; security updates are exempt.
+    cooldown:
+      default-days: 7
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Paris
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        dependency-type: development
+        patterns: ["*"]
+        exclude-patterns: ["better-auth", "@better-auth/*", "better-call", "@better-fetch/*"]
+      better-auth:
+        patterns: ["better-auth", "@better-auth/*", "better-call", "@better-fetch/*"]
+    labels: ["dependencies"]
+  - package-ecosystem: github-actions
+    directory: /
+    cooldown:
+      default-days: 7
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Europe/Paris
+    labels: ["dependencies", "ci"]

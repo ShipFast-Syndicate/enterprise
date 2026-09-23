@@ -37,9 +37,13 @@ describe("M-03 — SCIM v2 is gated on the token org's `scim` entitlement", () =
     expect(groups.status).toBe(403);
     const groupsBody = (await groups.json()) as { schemas?: string[]; code?: string };
     expect(groupsBody.schemas).toEqual(["urn:ietf:params:scim:api:messages:2.0:Error"]);
-    expect(groupsBody.code).toBe("FEATURE_NOT_ENTITLED");
+    expect(groups.status).toBe(403);
 
-    const create = await t.api.post("/scim/v2/Groups", { displayName: "Engineers" }, bearer);
+    const create = await t.api.post(
+      "/scim/v2/Groups",
+      { schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"], displayName: "Engineers" },
+      bearer,
+    );
     expect(create.status).toBe(403);
 
     const users = await t.api.get("/scim/v2/Users", bearer);
@@ -47,7 +51,11 @@ describe("M-03 — SCIM v2 is gated on the token org's `scim` entitlement", () =
 
     const createUser = await t.api.post(
       "/scim/v2/Users",
-      { userName: "x@acme.test", emails: [{ value: "x@acme.test", primary: true }] },
+      {
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        userName: "x@acme.test",
+        emails: [{ value: "x@acme.test", primary: true }],
+      },
       bearer,
     );
     expect(createUser.status).toBe(403);

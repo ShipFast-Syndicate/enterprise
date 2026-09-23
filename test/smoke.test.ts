@@ -6,7 +6,7 @@ import { drizzle } from "drizzle-orm/libsql";
 import { createClient } from "@libsql/client";
 
 describe("toolchain", () => {
-  it("boots better-auth 1.6.33 on libsql :memory:", async () => {
+  it("boots better-auth 1.7.5 on libsql :memory:", async () => {
     const client = createClient({ url: ":memory:" });
     const db = drizzle(client);
     const auth = betterAuth({
@@ -23,6 +23,6 @@ describe("toolchain", () => {
     // from node_modules directly instead.
     const pkgPath = new URL("../node_modules/better-auth/package.json", import.meta.url);
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version: string };
-    expect(pkg.version).toBe("1.6.33");
+    expect(pkg.version).toBe("1.7.5");
   });
 });

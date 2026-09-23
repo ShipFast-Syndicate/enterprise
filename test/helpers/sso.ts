@@ -76,6 +76,7 @@ export async function registerSamlProvider(
       samlConfig: {
         entryPoint: `${TEST_IDP_ENTITY_ID}/sso`,
         cert: IDP_CERT,
+        idpMetadata: { entityID: TEST_IDP_ENTITY_ID },
         callbackUrl: acsUrl,
         spMetadata: { entityID: spEntityID },
       },

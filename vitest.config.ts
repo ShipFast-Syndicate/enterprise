@@ -6,18 +6,20 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       include: ["src/**"],
-      // The coverage run tries to instrument every file `include` matches,
-      // including the plain-SQL migration file copied into `src/schema/sql/`
-      // — v8 coverage has no notion of a `.sql` file and fails parsing it.
-      exclude: ["**/*.sql"],
+      // SQL migrations and the portal's Markdown design-token reference are
+      // not executable JavaScript; V8 cannot instrument either file format.
+      exclude: ["**/*.sql", "**/*.md"],
     },
     // vitest 4 silently ignores the old `environmentMatchGlobs` option (no
     // warning, no error — it just never applied happy-dom to test/portal/**).
     // `test.projects` is its replacement: each project gets its own
     // `include`/`environment`, while `coverage` and `testTimeout` stay
-    // shared at the root. test/portal/env.test.ts guards this wiring.
+    // shared at the root. Vitest 4 requires extends: true for project-level
+    // settings such as testTimeout to inherit. test/portal/env.test.ts guards
+    // the portal environment; the CI contract test checks resolved timeouts.
     projects: [
       {
+        extends: true,
         test: {
           name: "server",
           include: ["test/**/*.test.ts"],
@@ -26,6 +28,7 @@ export default defineConfig({
         },
       },
       {
+        extends: true,
         test: {
           name: "portal",
           include: ["test/portal/**/*.test.ts"],

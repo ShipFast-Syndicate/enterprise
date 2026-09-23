@@ -256,6 +256,7 @@ describe("home-realm rate limit wiring on the orgPolicy plugin", () => {
     const plugin = orgPolicy({
       product: "test",
       secretsKey: "s".repeat(32),
+      scimCredentialHashSecret: "catalog-test-key-".repeat(3),
       resolveEntitlements: async () => new Set(),
     });
     const entry = plugin.rateLimit?.[0];

@@ -420,7 +420,7 @@ describe("POST /enterprise/policy/set — mandatory test login before ssoEnforce
 });
 
 describe("SCIM token endpoints", () => {
-  it("create returns the token once; list shows the providerId with null createdAt/lastUsedAt; revoke removes it", async () => {
+  it("create returns the token once; list shows metadata without credentials; revoke removes it", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, cookie);
@@ -441,7 +441,14 @@ describe("SCIM token endpoints", () => {
     const list = (await listRes.json()) as {
       tokens: Array<{ providerId: string; createdAt: string | null; lastUsedAt: string | null }>;
     };
-    expect(list.tokens).toEqual([{ providerId: "hris", createdAt: null, lastUsedAt: null }]);
+    expect(list.tokens).toEqual([
+      expect.objectContaining({
+        providerId: "hris",
+        createdAt: expect.any(String),
+        lastUsedAt: null,
+        status: "active",
+      }),
+    ]);
 
     const revokeRes = await t.api.post(
       "/enterprise/scim/tokens/revoke",
@@ -449,7 +456,7 @@ describe("SCIM token endpoints", () => {
       { cookie },
     );
     expect(revokeRes.status).toBe(200);
-    expect(await revokeRes.json()).toEqual({ ok: true });
+    expect(await revokeRes.json()).toEqual({ ok: true, status: "complete", retryAfter: null });
 
     const listAfter = await t.api.get(`/enterprise/scim/tokens?orgId=${orgId}`, { cookie });
     expect((await listAfter.json()).tokens).toEqual([]);

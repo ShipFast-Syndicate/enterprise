@@ -16,7 +16,7 @@ export {
 } from "./audit/chain";
 export { orgPolicy, getPolicyPreconditions, type OrgPolicy } from "./policy/plugin";
 export { findOrgByEmailDomain, HOME_REALM_PATH } from "./policy/home-realm";
-export { scimGroups } from "./scim-groups/plugin";
+export { enterpriseScim, scimMembershipSchema } from "./scim";
 export {
   parseFilter,
   applyGroupPatch,

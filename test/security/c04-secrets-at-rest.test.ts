@@ -144,7 +144,12 @@ describe("C-04 — IdP client secrets are encrypted at rest", () => {
 
   it("enterpriseGate validates options too, so a hand-composed plugin list is covered", () => {
     expect(() =>
-      enterpriseGate({ product: "test", secretsKey: "short", resolveEntitlements: async () => [] }),
+      enterpriseGate({
+        product: "test",
+        secretsKey: "short",
+        scimCredentialHashSecret: "catalog-test-key-".repeat(3),
+        resolveEntitlements: async () => [],
+      }),
     ).toThrow(/at least 32 characters/);
 
     // Round 2: retention bounds (a 0/negative window would compact an org's
@@ -154,6 +159,7 @@ describe("C-04 — IdP client secrets are encrypted at rest", () => {
         enterprisePreset({
           product: "test",
           secretsKey: "s".repeat(32),
+          scimCredentialHashSecret: "catalog-test-key-".repeat(3),
           resolveEntitlements: async () => [],
           audit: { retentionDays },
         }),
@@ -163,6 +169,7 @@ describe("C-04 — IdP client secrets are encrypted at rest", () => {
       enterprisePreset({
         product: "test",
         secretsKey: "s".repeat(32),
+        scimCredentialHashSecret: "catalog-test-key-".repeat(3),
         resolveEntitlements: async () => [],
         audit: { retentionDays: 1 },
       }),

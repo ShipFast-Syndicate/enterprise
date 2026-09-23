@@ -1,6 +1,6 @@
 # @alphabros/enterprise
 
-Alpha Bros studio enterprise layer for [better-auth](https://www.better-auth.com/) `1.6.33`:
+Alpha Bros studio enterprise layer for [better-auth](https://www.better-auth.com/) `1.7.5`:
 SSO (SAML + OIDC), SCIM 2.0 provisioning (Users + Groups), organizations, a tamper-evident
 audit log, security policy enforcement, and a framework-agnostic admin portal — as one
 package with four subpath entry points and a CLI.
@@ -9,7 +9,7 @@ package with four subpath entry points and a CLI.
 
 **v0.1 — pilot-grade.** Server plugins, schema/CLI, client helpers, and all seven portal
 elements are implemented and tested (330+ tests). Read [`docs/security.md`](./docs/security.md)
-before deploying to a real customer — it documents the one accepted advisory, token storage,
+before deploying to a real customer — it documents the patched SCIM migration, token storage,
 audit chain limitations, and the retention/GDPR posture.
 
 ## Install
@@ -23,12 +23,12 @@ This package ships one dependency of its own (`zod`) and declares everything els
 
 ```jsonc
 {
-  "@better-auth/api-key": "1.6.33",
-  "@better-auth/core": "1.6.33",
-  "@better-auth/passkey": "1.6.33",
-  "@better-auth/scim": "1.6.33",
-  "@better-auth/sso": "1.6.33",
-  "better-auth": "1.6.33",
+  "@better-auth/api-key": "1.7.5",
+  "@better-auth/core": "1.7.5",
+  "@better-auth/passkey": "1.7.5",
+  "@better-auth/scim": "1.7.5",
+  "@better-auth/sso": "1.7.5",
+  "better-auth": "1.7.5",
   "better-call": "1.4.0",
   "@libsql/client": "^0.15.15", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
@@ -36,7 +36,7 @@ This package ships one dependency of its own (`zod`) and declares everything els
 }
 ```
 
-`better-auth` and its `@better-auth/*` plugin set are pinned to the exact `1.6.33` release
+`better-auth` and its `@better-auth/*` plugin set are pinned to the exact `1.7.5` release
 (not a caret range) because `@better-auth/scim` has an unpatched advisory below the `1.7`
 line — see [`docs/security.md`](./docs/security.md#accepted-advisories) for why this
 package's own defaults make it inapplicable here, and when the pin will move.
@@ -54,6 +54,9 @@ dev toolchain).
 | `@alphabros/enterprise/portal` | Lit web components for a security-settings admin UI               |
 | `ab-enterprise` (bin)          | CLI: `migrate`, `verify`, `audit-verify` (Node-only)              |
 
+Upgrading from 0.1 requires new SCIM tables, a separate credential HMAC secret and
+IdP reprovisioning. Read [the migration guide](./docs/migration-1-7.md) first.
+
 ## Quick start — server
 
 ```ts
@@ -61,7 +64,7 @@ import { betterAuth } from "better-auth";
 import { enterprisePreset, type Feature } from "@alphabros/enterprise/server";
 
 export const auth = betterAuth({
-  database: /* your libSQL/Turso adapter */ myAdapter,
+  database: /* drizzleAdapter(db, { provider: "sqlite", transaction: true }) */ myAdapter,
   plugins: enterprisePreset({
     product: "klar",
     // Reads your own billing/plan state — see "Entitlements" below.
@@ -71,6 +74,7 @@ export const auth = betterAuth({
     // product's 1Password vault — never a literal in source. See
     // docs/security.md for exactly which fields it covers.
     secretsKey: process.env.ENTERPRISE_SECRETS_KEY!,
+    scimCredentialHashSecret: process.env.ENTERPRISE_SCIM_CREDENTIAL_HASH_SECRET!,
     // Optional: runs on every SSO-driven JIT signup (CRM sync, welcome email, ...).
     provisionUser: async (user) => trackNewEnterpriseUser(user),
     audit: { retentionDays: 365 },
@@ -80,7 +84,7 @@ export const auth = betterAuth({
 ```
 
 `samlSpKeys` is **not** in that list. It is typed on `EnterpriseOptions` and reserved, but
-`enterprisePreset` cannot consume it: `@better-auth/sso@1.6.x`'s `sso()` has no plugin-level slot
+`enterprisePreset` cannot consume it: `@better-auth/sso@1.7.5`'s `sso()` has no plugin-level slot
 for a shared SP signing identity — only a _per-provider_ `samlConfig.spMetadata`, set at
 `/sso/register` time. Read it back yourself and put it in your own registration body if you want
 one shared identity across orgs; see [`docs/sso.md`](./docs/sso.md). Wiring it properly is a P2
@@ -88,7 +92,7 @@ item, gated on upstream.
 
 `enterprisePreset` returns the full plugin list: `organization` (teams enabled), `sso`,
 `scim`, `twoFactor`, `passkey`, `apiKey`, plus this package's own `enterpriseGate` (entitlement
-enforcement), `auditLog`, `orgPolicy`, `scimGroups`, and `enterpriseApi` (the portal-facing
+enforcement), `auditLog`, `orgPolicy`, `scimMembershipSchema`, and `enterpriseApi` (the portal-facing
 `/enterprise/*` wrapper endpoints). Every product already mounting the better-auth handler
 needs **no per-framework server code** beyond this.
 
@@ -330,7 +334,7 @@ at runtime and does not run on Cloudflare Workers/workerd. `./server`, `./client
   URLs, and the `node:dns`-on-Workers caveat.
 - [`docs/scim.md`](./docs/scim.md) — SCIM Users (upstream) vs. Groups (this package), the
   `ResourceTypes` limitation, and Okta/Entra ID setup notes.
-- [`docs/security.md`](./docs/security.md) — the one accepted advisory, secrets/token storage,
+- [`docs/security.md`](./docs/security.md) — patched SCIM migration, secrets/token storage,
   audit chain limits, retention/GDPR, and this package's trusted-publishing setup.
 
 ## Development

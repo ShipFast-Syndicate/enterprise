@@ -1,60 +1,11 @@
-// Test helper: boots a real better-auth instance wired through
-// `enterprisePreset` on an in-memory libsql db, creates every table it
-// needs, and exposes a tiny fetch-style `api` so tests drive the plugin
-// through `auth.handler` (real HTTP request objects) rather than calling
-// internals directly.
-//
-// Schema bridge — why this is more than "call getMigrations() and go":
-//
-// The task-2 brief's own sketch of this file is `getMigrations(auth.options)`
-// (`import { getMigrations } from "better-auth/db"`) followed by
-// `runMigrations()`, plus hand-written `CREATE TABLE` SQL for our own 3
-// tables. Verified against the pinned better-auth@1.6.33, two things in
-// that sketch don't hold and had to be worked around:
-//
-// 1. `getMigrations` isn't exported from `better-auth/db` in this version —
-//    `better-auth/db/migration` is the subpath that actually exports it
-//    (`node_modules/better-auth/package.json`'s `exports["./db/migration"]`,
-//    backed by `dist/db/get-migration.d.mts`).
-// 2. More fundamentally, `getMigrations(...).runMigrations()` only works
-//    against a database better-auth can turn into a raw Kysely connection
-//    itself (`createKyselyAdapter` in `@better-auth/kysely-adapter`
-//    recognizes better-sqlite3/pg/mysql/D1/etc. driver shapes). A
-//    `drizzleAdapter(...)` instance — what this file (per the brief) passes
-//    as `database` — isn't one of those shapes, so `createKyselyAdapter`
-//    returns `{ kysely: null }` and `getMigrations()` calls
-//    `process.exit(1)` (verified directly: it logs "Only kysely adapter is
-//    supported for migrations" and exits before returning anything, so
-//    there's no way to reach `runMigrations()` or `compileMigrations()`
-//    through it here).
-//
-// Separately, `drizzleAdapter` itself requires every better-auth model it's
-// asked to read/write (user, session, account, organization, ssoProvider,
-// scimProvider, ...) to already exist as a real drizzle table in the schema
-// it's given (`config.schema ?? db._.fullSchema` — see
-// `@better-auth/drizzle-adapter`'s `getSchema()`); passing only our 3
-// enterprise tables leaves every better-auth core/plugin table missing, so
-// the first real sign-up or org-create call would throw
-// `BetterAuthError('The model "user" was not found in the schema object')`.
-//
-// So both problems are solved the same way real projects solve them outside
-// tests — by generating a schema/migration from better-auth's own resolved
-// table definitions — except done at test-boot time instead of as a
-// checked-in file: `getAuthTables()` (the same introspection
-// `getMigrations`/`better-auth generate` are themselves built on, exported
-// from `better-auth/db`) gives the full field list per model, and
-// `buildDynamicSchema` turns that into both a drizzle sqlite schema (for
-// `drizzleAdapter` to query through) and matching `CREATE TABLE IF NOT
-// EXISTS` SQL (executed directly on the libsql client) for every upstream
-// better-auth model. Our own 3 tables aren't part of that model registry
-// (the `enterpriseGate` plugin declares no `schema`) — Task 3's real
-// `applyMigration` (`src/schema/migrate.ts`, executing the checked-in
-// `sql/0001_enterprise.sql`) creates those, plus the two `studio_ref`
-// columns on `user`/`organization`, on top of the dynamic upstream schema
-// below. Per Task 3's controller ruling (a), every server test now goes
-// through that real migration rather than hand-written SQL mirroring
-// `src/schema/index.ts`, so the shipped SQL is what's actually exercised.
-
+// Real HTTP auth handler backed by an isolated SQLite file. Native interactive
+// transactions require all connections to share a database, so :memory: is unsuitable.
+// getAuthTables supplies the actual pinned model definitions; package migrations
+// add enterprise columns and indexes. File/client cleanup runs after each test.
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach } from "vitest";
 import type { BetterAuthOptions, BetterAuthPlugin } from "better-auth";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
@@ -65,6 +16,14 @@ import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import { applyMigration, enterpriseSchema } from "../../src/schema";
 import { enterprisePreset } from "../../src/server/preset";
 import type { EnterpriseOptions, Feature } from "../../src/server/types";
+
+const databases: { client: Client; directory: string }[] = [];
+afterEach(() => {
+  for (const { client, directory } of databases.splice(0)) {
+    client.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function sqliteColumn(name: string, type: string, notNull: boolean) {
   const col =
@@ -203,6 +162,7 @@ export function baseAuthOptions(): BetterAuthOptions {
     plugins: enterprisePreset({
       product: "test",
       secretsKey: "s".repeat(32),
+      scimCredentialHashSecret: "catalog-test-key-".repeat(3),
       resolveEntitlements: async () => new Set(),
     }),
   };
@@ -236,6 +196,7 @@ export async function makeAuth(
   const opts: EnterpriseOptions = {
     product: "test",
     secretsKey: "s".repeat(32),
+    scimCredentialHashSecret: "catalog-test-key-".repeat(3),
     resolveEntitlements: async () => entitled,
     ...overrides,
   };
@@ -249,10 +210,14 @@ export async function makeAuth(
   };
 
   const { drizzleSchema, ddl } = buildDynamicSchema(baseOptions);
-  const client = createClient({ url: ":memory:" });
+  // Interactive libsql transactions use separate connections; file-backed SQLite
+  // keeps the same database visible after commit. Each test gets its own file.
+  const directory = mkdtempSync(join(tmpdir(), "enterprise-auth-"));
+  const client = createClient({ url: `file:${join(directory, "auth.db")}` });
+  databases.push({ client, directory });
   const db = drizzle(client, { schema: { ...enterpriseSchema, ...drizzleSchema } });
   const auth = betterAuth({
-    database: drizzleAdapter(db, { provider: "sqlite" }),
+    database: drizzleAdapter(db, { provider: "sqlite", transaction: true }),
     ...baseOptions,
   });
   await applyMigrations(ddl, client);
