@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / '.github/workflows/dependabot-merge-gate.yml'
 source = WORKFLOW.read_text().split("          python3 - <<'PY'\n", 1)[1].split('          PY\n', 1)[0]
 namespace = {'__name__': 'gate_test'}
-exec('\n'.join(line[10:] for line in source.splitlines()), namespace)
+# Test-only loader: execute the tracked workflow's gate, never a PR payload or network input.
+exec('\n'.join(line[10:] for line in source.splitlines()), namespace)  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
 evaluate = namespace['evaluate']
 HEAD = 'a' * 40
 REPO = 'ShipFast-Syndicate/example'
