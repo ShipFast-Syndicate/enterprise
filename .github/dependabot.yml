@@ -1,9 +1,9 @@
 # Auth peers must move together. Group compatible updates and retain security alerts.
+# Security scan policy: allow new versions to age; security updates are exempt.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
-    # Security scan policy: allow new versions to age; security updates are exempt.
     cooldown:
       default-days: 7
     schedule:
@@ -15,11 +15,21 @@ updates:
     groups:
       dev-tooling:
         dependency-type: development
-        patterns: ["*"]
-        exclude-patterns: ["better-auth", "@better-auth/*", "better-call", "@better-fetch/*"]
+        patterns:
+          - "*"
+        exclude-patterns:
+          - better-auth
+          - "@better-auth/*"
+          - better-call
+          - "@better-fetch/*"
       better-auth:
-        patterns: ["better-auth", "@better-auth/*", "better-call", "@better-fetch/*"]
-    labels: ["dependencies"]
+        patterns:
+          - better-auth
+          - "@better-auth/*"
+          - better-call
+          - "@better-fetch/*"
+    labels:
+      - dependencies
   - package-ecosystem: github-actions
     directory: /
     cooldown:
@@ -29,4 +39,9 @@ updates:
       day: monday
       time: "06:30"
       timezone: Europe/Paris
-    labels: ["dependencies", "ci"]
+    labels:
+      - dependencies
+      - ci
+    ignore:
+      - dependency-name: ShipFast-Syndicate/.github*
+      - dependency-name: Alphabros/.github*
