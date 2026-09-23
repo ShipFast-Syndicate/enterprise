@@ -1,3 +1,15 @@
+## [1.0.0](https://github.com/ShipFast-Syndicate/enterprise/compare/v0.1.0...v1.0.0) (2026-09-23)
+
+### ⚠ BREAKING CHANGES
+
+* migrate enterprise provisioning to patched Better Auth 1.7
+
+### Bug Fixes
+
+* **ci:** isolate public pull request jobs and minimize secrets ([360af9d](https://github.com/ShipFast-Syndicate/enterprise/commit/360af9df873dae68eb7996a6f25539fee8f42b0d))
+* **ci:** make public package release self-contained ([f9c42c3](https://github.com/ShipFast-Syndicate/enterprise/commit/f9c42c37fa8446fac7d0e55d1f88c666c5ed5a9c))
+* migrate enterprise provisioning to patched Better Auth 1.7 ([743a462](https://github.com/ShipFast-Syndicate/enterprise/commit/743a46291d0f69a7fb1bbc3b821e10aa328c2d0e))
+
 ## [0.1.0](https://github.com/ShipFast-Syndicate/enterprise/compare/v0.0.0...v0.1.0) (2026-09-16)
 
 ### Features
