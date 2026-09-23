@@ -46,6 +46,7 @@ jobs:
           import os
           import re
           import sys
+          import time
           import urllib.error
           import urllib.request
 
@@ -217,6 +218,22 @@ jobs:
                   and status.get('creator', {}).get('type') == 'Bot'
                   for status in summaries)
 
+          def after_ci(reader, repo, number, head, apply=False, allowed='version-update:semver-patch version-update:semver-minor', summary_run_url=None, sleep=time.sleep):
+              # CodeQL can finish just after CI. Re-read the same exact head for a
+              # bounded two minutes; never arm auto-merge or ignore a pending check.
+              retryable = {'hold: PR identity, mergeability or hold label',
+                           'hold: current-head CI is missing, pending or unsuccessful'}
+              for attempt in range(7):
+                  result = evaluate(reader, repo, number, head, apply, allowed, summary_run_url)
+                  if result not in retryable or attempt == 6:
+                      return result
+                  # Stop immediately if the PR closed, moved, or was placed on hold.
+                  pr = reader(f'repos/{repo}/pulls/{number}')
+                  if (pr.get('state') != 'open' or pr.get('head', {}).get('sha') != head
+                          or HOLDS.intersection(str(x.get('name', '')).lower() for x in pr.get('labels', []))):
+                      return result
+                  sleep(20)
+
           if __name__ == '__main__':
               try:
                   repo, head = os.environ['REPO'], os.environ['HEAD_SHA']
@@ -228,7 +245,8 @@ jobs:
                   if not number:
                       print('hold: no unique current Dependabot PR for the completed CI head')
                   else:
-                      print(evaluate(api, repo, number, head, os.environ.get('APPLY') == 'true', os.environ['ALLOWED'], summary_run_url))
+                      run_gate = after_ci if os.environ['EVENT_NAME'] == 'workflow_run' else evaluate
+                      print(run_gate(api, repo, number, head, os.environ.get('APPLY') == 'true', os.environ['ALLOWED'], summary_run_url))
               except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError):
                   print('::error::Unable to verify exact-head merge gate; no fallback merge attempted.', file=sys.stderr)
                   sys.exit(1)
