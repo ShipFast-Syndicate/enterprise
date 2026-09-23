@@ -1,128 +1,187 @@
-// Alpha Bros enterprise layer — enterpriseApi plugin: SCIM token endpoints.
-//
-// Portal-facing wrappers around `@better-auth/scim`'s token lifecycle,
-// scoped to a single org: `GET .../tokens` (list — `providerId` only;
-// `createdAt`/`lastUsedAt` are always `null` in v0.1, since `scimProvider`
-// has neither column — verified against `node_modules/@better-auth/scim/
-// dist/index.mjs`'s `schema.scimProvider.fields`, which declares only
-// `providerId`/`scimToken`/`organizationId`/`userId`), `POST .../create`
-// (forwards to upstream `/scim/generate-token` — the token is shown once,
-// exactly as upstream returns it, never persisted by this layer), and
-// `POST .../revoke` (forwards to upstream `/scim/delete-provider-
-// connection`).
-//
-// `organizationId` is required explicitly in the forwarded body for both
-// writes: `../gate.ts`'s `ORG_ID_REQUIRED_IN_BODY` demands it for these two
-// upstream paths (GHSA-j8v8-g9cx-5qf4 — see that file's header comment), and
-// won't fall back to the session's active org the way most gated paths do.
-
-import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
+// Tenant-authorized HTTP wrappers around the server-only 1.7 credential catalog.
+import { APIError, createAuthEndpoint, getEndpoints, sessionMiddleware } from "better-auth/api";
+import { runWithTransaction } from "@better-auth/core/context";
 import type { GenericEndpointContext } from "better-auth";
+import type { SCIMPlugin } from "@better-auth/scim";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
 import { requireOwner, requireOwnerOrAdmin } from "../policy/store";
-import { forwardJson, relayStatus } from "./forward";
+import { scimConnectionLabel as label } from "../scim-connection";
+import { writeAudit } from "../audit/chain";
 
-interface ScimProviderRow {
-  providerId: string;
+const orgIdSchema = z.string().min(1).max(100);
+const body = z.object({ orgId: orgIdSchema, providerId: z.string().trim().min(1).max(64) });
+const scopes = [
+  "scim.users.read",
+  "scim.users.write",
+  "scim.groups.read",
+  "scim.groups.write",
+] as const;
+function api(ctx: GenericEndpointContext) {
+  return getEndpoints(ctx.context, ctx.context.options).api as unknown as SCIMPlugin["endpoints"];
 }
-
-const tokensQuerySchema = z.object({ orgId: z.string() });
-
-function buildTokensListEndpoint() {
+async function authorize(ctx: GenericEndpointContext, orgId: string, owner = false) {
+  if (owner) await requireOwner(ctx, orgId);
+  else await requireOwnerOrAdmin(ctx, orgId);
+  await requireFeature(ctx, orgId, "scim");
+}
+async function connections(ctx: GenericEndpointContext, orgId: string) {
+  return (await api(ctx).listSCIMManagedConnections({ body: { provisioningDomainId: orgId } }))
+    .connections;
+}
+async function findConnection(ctx: GenericEndpointContext, orgId: string, providerId: string) {
+  const connection = (await connections(ctx, orgId)).find(
+    (c) => c.status !== "decommissioned" && label(c) === providerId,
+  );
+  if (!connection) throw new APIError("NOT_FOUND", { message: "SCIM connection not found" });
+  return connection;
+}
+function mintEndpoint(rotate: boolean) {
   return createAuthEndpoint(
-    "/enterprise/scim/tokens",
-    { method: "GET", use: [sessionMiddleware], query: tokensQuerySchema },
+    rotate ? "/enterprise/scim/tokens/rotate" : "/enterprise/scim/tokens/create",
+    {
+      method: "POST",
+      use: [sessionMiddleware],
+      body,
+    },
     async (ctx) => {
-      const fullCtx = ctx as unknown as GenericEndpointContext;
-      const { orgId } = ctx.query;
-      // Owner/admin, not any member (M-08); role before entitlement (M-07).
-      // Admins may list (and revoke) tokens; only an owner may create one
-      // (M-01, below).
-      await requireOwnerOrAdmin(fullCtx, orgId);
-      await requireFeature(fullCtx, orgId, "scim");
-
-      const rows = await ctx.context.adapter.findMany<ScimProviderRow>({
-        model: "scimProvider",
-        where: [{ field: "organizationId", value: orgId }],
+      const full = ctx as unknown as GenericEndpointContext;
+      const { orgId, providerId } = ctx.body;
+      await authorize(full, orgId, true);
+      // Credential changes and the audit row commit together. Failure cannot leave
+      // an active credential whose one-time token was never delivered.
+      const created = await runWithTransaction(ctx.context.adapter, async () => {
+        const service = api(full);
+        const policy = {
+          provisioningDomainId: orgId,
+          actorId: ctx.context.session.user.id,
+          scopes,
+          expiresAt: new Date(Date.now() + 365 * 86400_000),
+        };
+        let result;
+        if (rotate) {
+          const connection = await findConnection(full, orgId, providerId);
+          const state = await service.getSCIMManagedConnection({
+            body: { connectionId: connection.connectionId, provisioningDomainId: orgId },
+          });
+          for (const credential of state.credentials.filter((c) => c.status === "active")) {
+            await service.revokeSCIMManagedCredential({
+              body: {
+                connectionId: connection.connectionId,
+                provisioningDomainId: orgId,
+                credentialId: credential.credentialId,
+                actorId: policy.actorId,
+              },
+            });
+          }
+          result = await service.rotateSCIMManagedCredential({
+            body: { ...policy, connectionId: connection.connectionId },
+          });
+        } else {
+          if (
+            (await connections(full, orgId)).some(
+              (c) => c.status !== "decommissioned" && label(c) === providerId,
+            )
+          ) {
+            throw new APIError("CONFLICT", {
+              message: "This provider already has a connection. Rotate its token instead.",
+            });
+          }
+          result = await service.createSCIMManagedConnection({
+            body: {
+              ...policy,
+              creationRequestId: JSON.stringify([
+                "enterprise",
+                orgId,
+                providerId,
+                crypto.randomUUID(),
+              ]),
+            },
+          });
+        }
+        await writeAudit(full, {
+          orgId,
+          actorType: "user",
+          actorId: policy.actorId,
+          action: rotate ? "scim.token_rotated" : "scim.token_created",
+          targetType: "scim_connection",
+          targetId: result.connection.connectionId,
+        });
+        return result;
       });
+      ctx.setHeader("Cache-Control", "no-store");
       return ctx.json({
-        tokens: rows.map((row) => ({
-          providerId: row.providerId,
-          createdAt: null as string | null,
-          lastUsedAt: null as string | null,
-        })),
+        scimToken: created.token,
+        baseUrl: `${ctx.context.baseURL}/scim/v2`,
+        expiresAt: created.credential.expiresAt.toISOString(),
       });
     },
   );
 }
-
-const tokensCreateBodySchema = z.object({ orgId: z.string(), providerId: z.string() });
-
-function buildTokensCreateEndpoint() {
-  return createAuthEndpoint(
-    "/enterprise/scim/tokens/create",
-    { method: "POST", use: [sessionMiddleware], body: tokensCreateBodySchema },
-    async (ctx) => {
-      const fullCtx = ctx as unknown as GenericEndpointContext;
-      const { orgId, providerId } = ctx.body;
-      // Owner only (M-01): a SCIM token is the second half of the
-      // admin→owner escalation (write `groupRoleMap`, mint a token, add
-      // yourself to the mapped group). `../gate.ts` enforces the same rule
-      // on the upstream `/scim/generate-token` path this forwards to, so the
-      // escalation is closed whether an attacker calls the wrapper or
-      // upstream directly. Admins keep list/revoke.
-      await requireOwner(fullCtx, orgId);
-      await requireFeature(fullCtx, orgId, "scim");
-
-      const { status, data } = await forwardJson(fullCtx, "POST", "/scim/generate-token", {
-        providerId,
-        organizationId: orgId,
-      });
-      if (status < 200 || status >= 300 || !data) {
-        relayStatus(ctx, status);
-        return ctx.json(data);
-      }
-      return ctx.json({ scimToken: data.scimToken, baseUrl: `${ctx.context.baseURL}/scim/v2` });
-    },
-  );
-}
-
-const tokensRevokeBodySchema = z.object({ orgId: z.string(), providerId: z.string() });
-
-function buildTokensRevokeEndpoint() {
-  return createAuthEndpoint(
-    "/enterprise/scim/tokens/revoke",
-    { method: "POST", use: [sessionMiddleware], body: tokensRevokeBodySchema },
-    async (ctx) => {
-      const fullCtx = ctx as unknown as GenericEndpointContext;
-      const { orgId, providerId } = ctx.body;
-      await requireOwnerOrAdmin(fullCtx, orgId);
-      await requireFeature(fullCtx, orgId, "scim");
-
-      const { status, data } = await forwardJson(
-        fullCtx,
-        "POST",
-        "/scim/delete-provider-connection",
-        {
-          providerId,
-          organizationId: orgId,
-        },
-      );
-      if (status < 200 || status >= 300) {
-        relayStatus(ctx, status);
-        return ctx.json(data);
-      }
-      return ctx.json({ ok: true });
-    },
-  );
-}
-
-// No `EnterpriseOptions` parameter — see `./sso.ts`'s `buildSsoEndpoints`.
 export function buildScimEndpoints() {
   return {
-    enterpriseScimTokens: buildTokensListEndpoint(),
-    enterpriseScimTokensCreate: buildTokensCreateEndpoint(),
-    enterpriseScimTokensRevoke: buildTokensRevokeEndpoint(),
+    enterpriseScimTokens: createAuthEndpoint(
+      "/enterprise/scim/tokens",
+      {
+        method: "GET",
+        use: [sessionMiddleware],
+        query: z.object({ orgId: orgIdSchema }),
+      },
+      async (ctx) => {
+        const full = ctx as unknown as GenericEndpointContext;
+        await authorize(full, ctx.query.orgId);
+        return ctx.json({
+          tokens: (await connections(full, ctx.query.orgId))
+            .filter((c) => c.status !== "decommissioned")
+            .map((c) => ({
+              providerId: label(c),
+              connectionId: c.connectionId,
+              createdAt: c.createdAt.toISOString(),
+              lastUsedAt: null,
+              status: c.status,
+            })),
+        });
+      },
+    ),
+    enterpriseScimTokensCreate: mintEndpoint(false),
+    enterpriseScimTokensRotate: mintEndpoint(true),
+    enterpriseScimTokensRevoke: createAuthEndpoint(
+      "/enterprise/scim/tokens/revoke",
+      {
+        method: "POST",
+        use: [sessionMiddleware],
+        body,
+      },
+      async (ctx) => {
+        const full = ctx as unknown as GenericEndpointContext;
+        const { orgId, providerId } = ctx.body;
+        await authorize(full, orgId);
+        const connection = await findConnection(full, orgId, providerId);
+        const result = await api(full).decommissionSCIMManagedConnection({
+          body: {
+            connectionId: connection.connectionId,
+            provisioningDomainId: orgId,
+            actorId: ctx.context.session.user.id,
+          },
+        });
+        // Native catalog events preserve the authoritative credential audit even
+        // when this application audit write fails. Decommission can be retried.
+        if (connection.status === "active")
+          await writeAudit(full, {
+            orgId,
+            actorType: "user",
+            actorId: ctx.context.session.user.id,
+            action: "scim.token_revoked",
+            targetType: "scim_connection",
+            targetId: connection.connectionId,
+          });
+        if (result.decommission.status !== "complete") ctx.setStatus(202);
+        return ctx.json({
+          ok: result.decommission.status === "complete",
+          status: result.decommission.status,
+          retryAfter: result.decommission.retryAfter,
+        });
+      },
+    ),
   };
 }

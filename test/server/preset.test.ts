@@ -8,6 +8,7 @@ describe("enterprisePreset", () => {
     const plugins = enterprisePreset({
       product: "test",
       secretsKey: "s".repeat(32),
+      scimCredentialHashSecret: "catalog-test-key-".repeat(3),
       resolveEntitlements: async () => new Set(),
     });
 
@@ -22,7 +23,7 @@ describe("enterprisePreset", () => {
       "enterprise-gate",
       "enterprise-audit",
       "enterprise-policy",
-      "enterprise-scim-groups",
+      "enterprise-scim-membership",
       "enterprise-api",
     ]);
   });

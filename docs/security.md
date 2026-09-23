@@ -1,42 +1,26 @@
 # Security
 
-## Accepted advisories
+## Patched SCIM dependency
 
-### GHSA-j8v8-g9cx-5qf4 — `@better-auth/scim` account/provider takeover via missing owner binding
+GHSA-j8v8-g9cx-5qf4 affects `@better-auth/scim >=1.5.0 <1.7.0-beta.4`.
+The complete Better Auth peer set is now pinned to **1.7.5**. The audit suppression
+has been removed. This is a breaking provisioning migration; see
+[the migration guide](./migration-1-7.md). Legacy management endpoints and the
+custom Groups bearer parser are no longer mounted or exported.
 
-- **Affected versions:** `@better-auth/scim` `>=1.5.0 <1.7.0-beta.4`. This package is pinned
-  exact to `1.6.33` (see the [better-auth version pin](../README.md)); the fix ships only in
-  the `1.7` line, which this repo does not yet track.
-- **Why it does not apply here:** the advisory is that a SCIM provider created _without_ an
-  `organizationId` (a "personal" provider) has no owner binding and can be taken over. This
-  package never allows that state to exist:
-  - `enterpriseGate` (`src/server/gate.ts`) requires `organizationId` explicitly in the request
-    body for `/scim/generate-token` and `/scim/delete-provider-connection` — unlike every other
-    gated path, it never falls back to the session's active organization. A request without an
-    explicit `organizationId` is rejected before it reaches `@better-auth/scim`, so no
-    org-less ("personal") provider row is ever created.
-  - The preset (`src/server/preset.ts`) additionally passes
-    `scim({ providerOwnership: { enabled: true } })`, binding each provider connection to the
-    user who generated its token as defense in depth, and `scim({ storeSCIMToken: "hashed" })`
-    so a leaked database row is never itself a usable bearer token — neither flag is
-    configurable through `EnterpriseOptions`.
-- **Test that guards it:** `test/server/gate.test.ts`, describe block "SCIM provider paths
-  never fall back to the session's active org" — specifically "POST /scim/generate-token
-  without organizationId returns 400 ORG_REQUIRED, even with an active org, and creates no
-  scimProvider row". If this test ever starts failing (or is removed), the advisory applies
-  again and this acceptance must be revisited.
-- **Suppressed via:** `pnpm.auditConfig.ignoreGhsas` in `package.json`, so `pnpm audit` — and
-  the hub CI `quality / audit` gate — stay green without hiding any _other_ finding.
-- **Revisit trigger:** when the fleet moves its better-auth peer set off the `1.6.x` line onto
-  `1.7.x` or later (which ships the fix), drop this entry and the `ignoreGhsas` suppression, and
-  re-run `pnpm audit` to confirm it is clear on its own.
+The portal authorizes every catalog request against the explicit organization.
+Only owners mint or rotate tokens; owners and admins may list or decommission.
+Native bearer authentication binds a credential to one connection and provisioning
+domain. Users and Groups enforce the same `scim` entitlement before mutation.
 
 ## Secrets and token storage
 
-- **SCIM bearer tokens** are stored hashed (`storeSCIMToken: "hashed"`, non-configurable — see
-  above) and bound to the organization that generated them. A token is shown to the admin
-  exactly once at creation time (`<ab-scim-tokens>`); it cannot be retrieved again, only revoked
-  and replaced.
+- **SCIM bearer tokens** use the native catalog's HMAC digest. Supply an independent
+  `scimCredentialHashSecret` of at least 32 characters; never reuse `secretsKey`.
+  Credentials expire after 365 days. Creation and rotation show the token once and
+  return `Cache-Control: no-store`. Rotation invalidates old credentials in the same
+  transaction as the new credential and audit write. Decommission revokes access
+  and may require continuation until reconciliation completes.
 - **`secretsKey`** (`EnterpriseOptions.secretsKey`, minimum 32 characters) encrypts the
   **per-provider** secret material on the `ssoProvider` row at rest: `oidcConfig.clientSecret`,
   and `samlConfig`'s `privateKey`, `privateKeyPass`, `decryptionPvk`, `encPrivateKey` and
@@ -46,7 +30,7 @@
 - **What is _not_ encrypted.** Everything else on `ssoProvider` is stored exactly as upstream
   stores it, in the clear: `samlConfig`'s `cert`, `idpMetadata` and `entryPoint`, the issuer, the
   domain. That is public IdP material, not secrets. And the **`samlSpKeys` option is reserved and
-  unused** — `enterprisePreset` cannot pass it to `@better-auth/sso@1.6.x`, which has no
+  unused** — `enterprisePreset` cannot pass it to `@better-auth/sso@1.7.5`, which has no
   plugin-level slot for a shared SP signing identity, so its value never reaches the database and
   no at-rest guarantee applies to it. If you set it, read it back yourself and put it in your own
   `/sso/register` body's `samlConfig.spMetadata`, where the per-provider encryption above does
@@ -90,7 +74,7 @@
   anchor always takes the `seq` one below every row the org currently holds. (Before this, a
   crash between the delete and the anchor's creation left the prefix gone with nothing to
   re-anchor on, and `verify` reported tampering for that org permanently, with no recovery
-  path.) No transaction is used: better-auth's generic adapter does not expose one.
+  path.) The compaction algorithm remains unchanged; SCIM operations use native transactions.
 - **Compaction is triggered by a read.** It runs on `GET /enterprise/audit/list` — already
   owner/admin-only and feature-gated — because a deployment with no scheduler has no other
   reliable trigger, and on demand via `POST /enterprise/audit/compact` (same authorization).

@@ -26,15 +26,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export function migrationFilePath(): string {
+export function migrationFilePath(file = "0001_enterprise.sql"): string {
   const here = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    join(here, "sql", "0001_enterprise.sql"),
-    join(here, "..", "..", "sql", "0001_enterprise.sql"),
-  ];
+  const candidates = [join(here, "sql", file), join(here, "..", "..", "sql", file)];
   const found = candidates.find((candidate) => existsSync(candidate));
   if (!found) {
-    throw new Error(`0001_enterprise.sql not found (looked in: ${candidates.join(", ")})`);
+    throw new Error(`${file} not found (looked in: ${candidates.join(", ")})`);
   }
   return found;
 }
@@ -122,7 +119,9 @@ async function tableInfo(client: Client, table: string) {
 }
 
 export async function applyMigration(client: Client): Promise<void> {
-  const sql = readFileSync(migrationFilePath(), "utf8");
+  const sql = ["0001_enterprise.sql", "0002_scim_1_7.sql"]
+    .map((file) => readFileSync(migrationFilePath(file), "utf8"))
+    .join("\n");
 
   for (const statement of splitStatements(sql)) {
     const addColumn = ADD_COLUMN_STATEMENT.exec(statement);

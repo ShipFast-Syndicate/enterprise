@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { coreUserId } from "../security/helpers";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
 
 async function setUpScimUser(
@@ -8,22 +9,26 @@ async function setUpScimUser(
   email = "scim.user@acme.test",
 ) {
   const tokenRes = await t.api.post(
-    "/scim/generate-token",
-    { providerId: "okta", organizationId: orgId },
+    "/enterprise/scim/tokens/create",
+    { providerId: "okta", orgId },
     { cookie },
   );
-  expect(tokenRes.status).toBe(201);
+  expect(tokenRes.status).toBe(200);
   const { scimToken } = (await tokenRes.json()) as { scimToken: string };
   const bearer = { authorization: `Bearer ${scimToken}` };
 
   const createRes = await t.api.post(
     "/scim/v2/Users",
-    { userName: email, emails: [{ value: email, primary: true }] },
+    {
+      schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
+      userName: email,
+      emails: [{ value: email, primary: true }],
+    },
     bearer,
   );
   expect(createRes.status).toBe(201);
   const created = (await createRes.json()) as { id: string };
-  return { bearer, userId: created.id };
+  return { bearer, scimId: created.id, userId: await coreUserId(t, created.id) };
 }
 
 /**
@@ -67,7 +72,7 @@ describe("SCIM deprovision cascade", () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t);
     const { orgId } = await createOrg(t, cookie);
-    const { bearer, userId } = await setUpScimUser(t, cookie, orgId);
+    const { bearer, userId, scimId } = await setUpScimUser(t, cookie, orgId);
 
     const userCookie = await insertSessionCookie(t, userId);
     const apiKeyRes = await t.api.post(
@@ -89,14 +94,14 @@ describe("SCIM deprovision cascade", () => {
     expect(sessionsBefore.rows.length).toBe(1); // the forged session, pre-deactivation
 
     const patchRes = await t.api.patch(
-      `/scim/v2/Users/${userId}`,
+      `/scim/v2/Users/${scimId}`,
       {
         schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
         Operations: [{ op: "replace", path: "active", value: false }],
       },
       bearer,
     );
-    expect(patchRes.status).toBe(204);
+    expect(patchRes.status).toBe(200);
 
     // Sessions: not this hook's job — asserting upstream's own
     // `deleteUserSessions` (patchSCIMUser, `@better-auth/scim`) already ran,
@@ -122,7 +127,7 @@ describe("SCIM deprovision cascade", () => {
     expect(auditRows.rows[0]!.target_type).toBe("user");
     expect(auditRows.rows[0]!.target_id).toBe(userId);
     expect(auditRows.rows[0]!.actor_type).toBe("scim");
-    expect(auditRows.rows[0]!.actor_id).toBe("okta");
+    expect(auditRows.rows[0]!.actor_id).toBeNull();
 
     // The generic audit hook (`../audit/plugin.ts`) still writes its own
     // `scim.user_updated` row for this same PATCH — a different action, not
@@ -138,7 +143,7 @@ describe("SCIM deprovision cascade", () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t);
     const { orgId } = await createOrg(t, cookie);
-    const { bearer, userId } = await setUpScimUser(t, cookie, orgId);
+    const { bearer, userId, scimId } = await setUpScimUser(t, cookie, orgId);
     const userCookie = await insertSessionCookie(t, userId);
     await t.api.post(
       "/api-key/create",
@@ -147,14 +152,14 @@ describe("SCIM deprovision cascade", () => {
     );
 
     const patchRes = await t.api.patch(
-      `/scim/v2/Users/${userId}`,
+      `/scim/v2/Users/${scimId}`,
       {
         schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
         Operations: [{ op: "replace", path: "name.givenName", value: "New" }],
       },
       bearer,
     );
-    expect(patchRes.status).toBe(204);
+    expect(patchRes.status).toBe(200);
 
     const keys = await t.client.execute({
       sql: `SELECT * FROM apikey WHERE referenceId = ?`,
@@ -173,7 +178,7 @@ describe("SCIM deprovision cascade", () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t);
     const { orgId } = await createOrg(t, cookie);
-    const { bearer, userId } = await setUpScimUser(t, cookie, orgId);
+    const { bearer, userId, scimId } = await setUpScimUser(t, cookie, orgId);
     const userCookie = await insertSessionCookie(t, userId);
     await t.api.post(
       "/api-key/create",
@@ -181,7 +186,7 @@ describe("SCIM deprovision cascade", () => {
       { cookie: userCookie },
     );
 
-    const deleteRes = await t.api.delete(`/scim/v2/Users/${userId}`, bearer);
+    const deleteRes = await t.api.delete(`/scim/v2/Users/${scimId}`, bearer);
     expect(deleteRes.status).toBe(204);
 
     const keysAfter = await t.client.execute({
@@ -200,6 +205,6 @@ describe("SCIM deprovision cascade", () => {
       sql: `SELECT * FROM audit_event WHERE org_id = ? AND action = 'scim.user_deactivated'`,
       args: [orgId],
     });
-    expect(deactivatedRows.rows.length).toBe(0);
+    expect(deactivatedRows.rows.length).toBe(1);
   });
 });

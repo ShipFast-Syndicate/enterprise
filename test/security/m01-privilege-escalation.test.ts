@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
-import { insertMemberRow, mintScimToken, setPolicy } from "./helpers";
+import { insertMemberRow, mintScimToken, createScimUser, coreUserId, setPolicy } from "./helpers";
 
 async function code(res: Response): Promise<string> {
   return ((await res.json()) as { code: string }).code;
@@ -69,8 +69,7 @@ describe("M-01 — the admin→owner escalation is closed at every step", () => 
       { providerId: "hris", organizationId: orgId },
       { cookie: admin.cookie },
     );
-    expect(upstream.status).toBe(403);
-    expect(await code(upstream)).toBe("NOT_ORG_OWNER");
+    expect(upstream.status).toBe(404);
 
     const wrapper = await t.api.post(
       "/enterprise/scim/tokens/create",
@@ -95,13 +94,17 @@ describe("M-01 — the admin→owner escalation is closed at every step", () => 
     });
     const owner = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, owner.cookie);
-    const victimOfEscalation = await signUpOwner(t, "climber@acme.test");
-    await insertMemberRow(t, orgId, victimOfEscalation.userId, "member");
     const bearer = await mintScimToken(t, owner.cookie, orgId);
+    const scimId = await createScimUser(t, bearer, "climber@acme.test");
+    const victimOfEscalation = { userId: await coreUserId(t, scimId) };
 
     const created = await t.api.post(
       "/scim/v2/Groups",
-      { displayName: "Bosses", members: [{ value: victimOfEscalation.userId }] },
+      {
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        displayName: "Bosses",
+        members: [{ value: scimId }],
+      },
       bearer,
     );
     expect(created.status).toBe(201);
@@ -117,9 +120,9 @@ describe("M-01 — the admin→owner escalation is closed at every step", () => 
     const t = await makeAuth();
     const owner = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, owner.cookie);
-    const climber = await signUpOwner(t, "climber@acme.test");
-    await insertMemberRow(t, orgId, climber.userId, "member");
     const bearer = await mintScimToken(t, owner.cookie, orgId);
+    const scimId = await createScimUser(t, bearer, "climber@acme.test");
+    const climber = { userId: await coreUserId(t, scimId) };
 
     // Written directly, the way a row predating M-01 (or a hand-edited
     // database) would look.
@@ -131,7 +134,11 @@ describe("M-01 — the admin→owner escalation is closed at every step", () => 
 
     const created = await t.api.post(
       "/scim/v2/Groups",
-      { displayName: "Bosses", members: [{ value: climber.userId }] },
+      {
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+        displayName: "Bosses",
+        members: [{ value: scimId }],
+      },
       bearer,
     );
     expect(created.status).toBe(201);

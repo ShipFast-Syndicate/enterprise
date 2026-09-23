@@ -12,6 +12,7 @@
 // role the invitation named.
 //
 // (e) "SSO only for SCIM-active users" (`src/server/policy/scim-required.ts`).
+import { mintScimToken, createScimUser, coreUserId } from "../security/helpers";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getNoRedirect, startOidcIssuer, type OidcIssuer } from "../helpers/oidc-issuer";
 import { registerOidcProvider } from "../helpers/sso";
@@ -104,6 +105,68 @@ describe("SSO only for SCIM-active users (SCIM_PROVISIONING_REQUIRED)", () => {
     await issuer.close();
   });
 
+  it("allows a provisioned verified SSO identity, then blocks deactivation and preserves manual bans", async () => {
+    const t = await makeAuth({ trustedOrigins: [issuer.issuerUrl] });
+    const owner = await signUpOwner(t);
+    const { orgId } = await createOrg(t, owner.cookie);
+    await registerOidcProvider(t, owner.cookie, orgId, issuer, "provisioned-sso");
+    const bearer = await mintScimToken(t, owner.cookie, orgId, "provisioned-sso");
+    const mutation = await t.api.post(
+      "/sso/update-provider",
+      { providerId: "provisioned-sso", issuer: "https://attacker.example" },
+      { cookie: owner.cookie },
+    );
+    expect(mutation.status).toBe(409);
+    const deletion = await t.api.post(
+      "/sso/delete-provider",
+      { providerId: "provisioned-sso" },
+      { cookie: owner.cookie },
+    );
+    expect(deletion.status).toBe(409);
+    const email = "provisioned@acme.test";
+    const scimId = await createScimUser(t, bearer, email, "stable-subject");
+    const userId = await coreUserId(t, scimId);
+    issuer.setUser({ sub: "stable-subject", email });
+    const signedIn = await driveSsoSignIn(t, issuer, "provisioned-sso");
+    expect(extractCookie(signedIn), signedIn.headers.get("location") ?? "").toContain(
+      "session_token",
+    );
+    const sessionCookie = extractCookie(signedIn);
+    const change = async (active: boolean) =>
+      t.api.patch(
+        `/scim/v2/Users/${scimId}`,
+        {
+          schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+          Operations: [{ op: "replace", path: "active", value: active }],
+        },
+        bearer,
+      );
+    expect((await change(false)).status).toBe(200);
+    expect(await (await t.api.get("/get-session", { cookie: sessionCookie })).json()).toBeNull();
+    const blocked = await driveSsoSignIn(t, issuer, "provisioned-sso");
+    expect(extractCookie(blocked)).not.toContain("session_token");
+    expect((await change(true)).status).toBe(200);
+    expect(extractCookie(await driveSsoSignIn(t, issuer, "provisioned-sso"))).toContain(
+      "session_token",
+    );
+    await t.client.execute({
+      sql: "UPDATE user SET banned=1,banReason='Manual investigation' WHERE id=?",
+      args: [userId],
+    });
+    await change(false);
+    await change(true);
+    const row = (
+      await t.client.execute({
+        sql: "SELECT banned,banReason FROM user WHERE id=?",
+        args: [userId],
+      })
+    ).rows[0];
+    expect(row).toMatchObject({ banned: 1, banReason: "Manual investigation" });
+    expect(extractCookie(await driveSsoSignIn(t, issuer, "provisioned-sso"))).not.toContain(
+      "session_token",
+    );
+  });
+
   it("refuses JIT with a redirect error and creates no user row once the org has a SCIM provider", async () => {
     const t = await makeAuth({ trustedOrigins: [issuer.issuerUrl] });
     const { cookie: ownerCookie } = await signUpOwner(t, "owner@acme.test");
@@ -111,11 +174,11 @@ describe("SSO only for SCIM-active users (SCIM_PROVISIONING_REQUIRED)", () => {
     await registerOidcProvider(t, ownerCookie, orgId, issuer, "oidc-scim-gate");
 
     const scimRes = await t.api.post(
-      "/scim/generate-token",
-      { providerId: "hris", organizationId: orgId },
+      "/enterprise/scim/tokens/create",
+      { providerId: "hris", orgId },
       { cookie: ownerCookie },
     );
-    expect(scimRes.status).toBe(201);
+    expect(scimRes.status).toBe(200);
 
     const email = "blocked-jit@acme.test";
     issuer.setUser({ sub: "blocked-jit-1", email });
@@ -154,7 +217,7 @@ describe("SSO only for SCIM-active users (SCIM_PROVISIONING_REQUIRED)", () => {
     // error`, which `handleOIDCCallback` then puts straight into the
     // redirect's `error=` query param — so that's what ends up here too.
     const metadata = JSON.parse(failedRows.rows[0]!.metadata as string) as { error?: string };
-    expect(metadata.error).toBe("Your account was not provisioned by your IT admin");
+    expect(metadata.error).toBe("SCIM_PROVISIONING_REQUIRED");
   });
 
   it("does not block JIT for an org with no SCIM provider (control case)", async () => {

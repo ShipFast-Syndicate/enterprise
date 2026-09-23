@@ -1,16 +1,11 @@
-// Alpha Bros enterprise layer — schema entry point.
-//
-// Drizzle sqlite table definitions for the enterprise layer's own tables
-// (org security policy, the tamper-evident audit log, and our SCIM Groups
-// mapping — better-auth 1.6 has no SCIM Groups), plus the matching SQL
-// migration (`sql/0001_enterprise.sql`), the `verify`/`migrate` helpers
-// built on it, and the static `EXPECTED_TABLES` snapshot they check
-// against.
+// Enterprise-owned SQLite models. Native SCIM models come from Better Auth 1.7.5.
+// SQL migrations preserve legacy tables and add the projection ownership marker.
 
 import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const orgPolicy = sqliteTable("org_policy", {
-  orgId: text("org_id").primaryKey(),
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull().unique(),
   require2fa: integer("require_2fa", { mode: "boolean" }).notNull().default(false),
   ssoEnforced: integer("sso_enforced", { mode: "boolean" }).notNull().default(false),
   breakGlassUserId: text("break_glass_user_id"),
@@ -46,22 +41,15 @@ export const auditEvent = sqliteTable(
   ],
 );
 
-export const scimGroup = sqliteTable(
-  "scim_group",
-  {
-    teamId: text("team_id").primaryKey(),
-    orgId: text("org_id").notNull(),
-    externalId: text("external_id"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
-  },
-  (t) => [
-    index("scim_group_org").on(t.orgId),
-    uniqueIndex("scim_group_org_external").on(t.orgId, t.externalId),
-  ],
-);
+export const enterpriseScimMember = sqliteTable("enterprise_scim_member", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull(),
+  userId: text("user_id").notNull(),
+  memberId: text("member_id").notNull().unique(),
+  lastRole: text("last_role").notNull(),
+});
 
-export const enterpriseSchema = { orgPolicy, auditEvent, scimGroup };
+export const enterpriseSchema = { orgPolicy, auditEvent, enterpriseScimMember };
 
 export { EXPECTED_TABLES } from "./expected";
 export { verifyDatabase, type MissingItem, type VerifyResult } from "./verify";

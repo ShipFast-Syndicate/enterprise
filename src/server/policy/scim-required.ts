@@ -1,7 +1,7 @@
 // Alpha Bros enterprise layer — "SSO only for SCIM-active users" (Task 8,
 // controller ruling (e)).
 //
-// Once an org has provisioned any SCIM connection (a `scimProvider` row
+// Once an org has provisioned any SCIM connection (a `scimManagedConnection` row
 // exists for it — SCIM is how its IT admin manages that org's user
 // lifecycle), JIT account creation via a plain SSO sign-in must not run
 // behind SCIM's back: an employee off-boarded in the IdP but not yet
@@ -18,7 +18,7 @@
 // *verified* email domain (`findOrgByEmailDomain`, `./home-realm.ts` — the
 // same lookup the home-realm endpoint and `./enforcement.ts`'s policy
 // resolution both already use), and refuses account creation when that org
-// has any `scimProvider` row.
+// has any `scimManagedConnection` row.
 //
 // `ctx.path` at a `databaseHooks` call site cannot be trusted to be either
 // the registered route *pattern* or the concrete resolved path (see
@@ -69,11 +69,14 @@ export function buildScimRequiredUserCreateBeforeHook() {
     const match = await findOrgByEmailDomain(ctx, email);
     if (!match) return;
 
-    const scimProvider = await ctx.context.adapter.findOne({
-      model: "scimProvider",
-      where: [{ field: "organizationId", value: match.orgId }],
+    const scimManagedConnection = await ctx.context.adapter.findOne({
+      model: "scimManagedConnection",
+      where: [
+        { field: "provisioningDomainId", value: match.orgId },
+        { field: "status", value: "decommissioned", operator: "ne" },
+      ],
     });
-    if (!scimProvider) return;
+    if (!scimManagedConnection) return;
 
     throw new APIError("FORBIDDEN", {
       code: "SCIM_PROVISIONING_REQUIRED",
