@@ -1,5 +1,7 @@
 """Exercise the exact Python embedded in the reusable workflow; no network."""
+import contextlib
 import copy
+import io
 import runpy
 import tempfile
 from pathlib import Path
@@ -15,6 +17,7 @@ with tempfile.TemporaryDirectory() as directory:
     module.write_text('\n'.join(line[10:] for line in source.splitlines()))
     namespace = runpy.run_path(str(module), run_name='gate_test')
 evaluate = namespace['evaluate']
+report = namespace.get('report')  # soft: a regression fails the Report tests, not the import
 HEAD = 'a' * 40
 REPO = 'ShipFast-Syndicate/example'
 
@@ -338,6 +341,43 @@ class AggregatedCI(unittest.TestCase):
         self.assertIsNone(self.select())
         self.prs = [dict(self.prs[0], head={'sha':'invalid', 'repo':{'full_name':REPO}})]
         self.assertIsNone(self.select())
+
+class Report(unittest.TestCase):
+    """A hold must never end green and silent (the gate exits 0 on a hold)."""
+    def run_report(self, outcome, summary_path=None):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            report(outcome, summary_path)
+        return out.getvalue()
+
+    def test_hold_is_annotated_and_summarized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / 'summary.md'
+            out = self.run_report('hold: current-head CI is missing, pending or unsuccessful', str(summary))
+            self.assertIn('hold: current-head CI is missing, pending or unsuccessful\n', out)
+            self.assertIn('::warning::Dependabot auto-merge did not merge - hold: current-head CI is missing, pending or unsuccessful', out)
+            self.assertEqual(summary.read_text(), '**Dependabot auto-merge:** hold: current-head CI is missing, pending or unsuccessful\n')
+
+    def test_non_hold_outcome_is_summarized_without_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            summary = Path(directory) / 'summary.md'
+            out = self.run_report('merged exact head', str(summary))
+            self.assertNotIn('::warning::', out)
+            self.assertIn('merged exact head', summary.read_text())
+
+    def test_missing_or_unwritable_summary_never_fails_the_outcome(self):
+        self.assertNotIn('::warning::Could not', self.run_report('hold: x'))
+        with tempfile.TemporaryDirectory() as directory:
+            out = self.run_report('hold: x', directory)  # a directory cannot be appended to
+            self.assertIn('::warning::Could not write the job summary', out)
+
+    def test_gate_outcome_goes_through_report_and_no_pr_stays_quiet(self):
+        main = source.split("if __name__ == '__main__':", 1)[1]
+        self.assertNotIn('print(run_gate(', main)
+        self.assertEqual(main.count('report('), 1)
+        # Fires on every green CI run in the repo; must never annotate (hub parity).
+        self.assertIn("print('hold: no unique current Dependabot PR", main)
+        self.assertNotIn("report('hold: no unique", main)
 
 if __name__ == '__main__':
     unittest.main()
