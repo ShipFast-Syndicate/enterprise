@@ -1,4 +1,9 @@
-# Reviewed source: ShipFast-Syndicate/.github@c31964060a6d6022743151716149c38fc62dbafc
+# Reviewed source: ShipFast-Syndicate/.github@c31964060a6d6022743151716149c38fc62dbafc,
+# plus hold visibility (::warning:: + step summary) from
+# @79416e50a4754e7a7b94288c0d532cc7f822be9f, refactored here into report()
+# with a best-effort summary write (an OSError never changes the outcome).
+# The hub's settled() mergeability wait at that revision is intentionally not
+# ported: after_ci below already re-reads the same head for two minutes.
 # Owned local copy because this public repository cannot call the private hub.
 name: Reusable — Dependabot Auto-merge
 
@@ -234,6 +239,22 @@ jobs:
                       return result
                   sleep(20)
 
+          def report(outcome, summary_path=None):
+              # A hold used to print and exit 0, so the check went green while
+              # nothing merged. Keep exit 0 (a hold is not a PR failure and must
+              # not red-X every Dependabot PR) but make the reason visible.
+              print(outcome)
+              if outcome.startswith('hold:'):
+                  print(f'::warning::Dependabot auto-merge did not merge - {outcome}')
+              if summary_path:
+                  # Best effort: the outcome is already decided (and a merge may
+                  # already be done), so a summary write must never turn it red.
+                  try:
+                      with open(summary_path, 'a') as fh:
+                          fh.write(f'**Dependabot auto-merge:** {outcome}\n')
+                  except OSError:
+                      print('::warning::Could not write the job summary for this outcome')
+
           if __name__ == '__main__':
               try:
                   repo, head = os.environ['REPO'], os.environ['HEAD_SHA']
@@ -243,10 +264,13 @@ jobs:
                       target = ci_pull_request(api, repo, os.environ['CI_RUN_ID'], head)
                       number, head, summary_run_url = target if target else (None, head, None)
                   if not number:
+                      # Every green CI run reaches here via workflow_run, human pushes and
+                      # PRs included: not a Dependabot hold, so no annotation (hub parity).
                       print('hold: no unique current Dependabot PR for the completed CI head')
                   else:
                       run_gate = after_ci if os.environ['EVENT_NAME'] == 'workflow_run' else evaluate
-                      print(run_gate(api, repo, number, head, os.environ.get('APPLY') == 'true', os.environ['ALLOWED'], summary_run_url))
+                      report(run_gate(api, repo, number, head, os.environ.get('APPLY') == 'true', os.environ['ALLOWED'], summary_run_url),
+                             os.environ.get('GITHUB_STEP_SUMMARY'))
               except (KeyError, ValueError, TypeError, OSError, urllib.error.URLError):
                   print('::error::Unable to verify exact-head merge gate; no fallback merge attempted.', file=sys.stderr)
                   sys.exit(1)
