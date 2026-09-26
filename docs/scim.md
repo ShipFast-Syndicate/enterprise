@@ -13,9 +13,13 @@ Use the portal's `/enterprise/scim/tokens` endpoints with an explicit `orgId`:
 - `GET /tokens?orgId=…`: owner/admin metadata listing; no bearer or digest.
 - `POST /tokens/create { orgId, providerId }`: owner-only, one-time bearer and expiry.
 - `POST /tokens/rotate { orgId, providerId }`: owner-only; old token stops immediately.
-- `POST /tokens/revoke { orgId, providerId }`: owner/admin decommission, including
-  the access this connection provisioned. `202` means cleanup is in progress;
-  continue the same request until `ok: true`. The portal exposes Continue removal.
+- `POST /tokens/revoke { orgId, providerId }`: owner-only decommission, including
+  the access this connection provisioned (since 1.1.0; it was owner/admin before —
+  a decommission replays every provisioned user as inactive, which is a
+  platform-wide deprovision). A user who holds an `owner` membership anywhere is
+  never banned or stripped of API keys by that replay. `202` means cleanup is in
+  progress; continue the same request until `ok: true`. The portal exposes
+  Continue removal.
 
 Provider labels have a maximum of 64 characters and are unique among active
 connections within an organization. The same label in another organization is

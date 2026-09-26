@@ -79,3 +79,29 @@ export async function coreUserId(t: TestAuth, scimUserId: string): Promise<strin
   });
   return String(result.rows[0]!.userId);
 }
+
+/**
+ * Forges a signed session cookie for a user who has no password/magic-link
+ * account (a SCIM-provisioned user). Same signing as `setSignedCookie`
+ * (HMAC-SHA256 over the token, base64, appended as `<token>.<sig>`) — see
+ * `test/server/deprovision.test.ts` for the derivation.
+ */
+export async function insertSessionCookie(t: TestAuth, userId: string): Promise<string> {
+  const token = `test_session_token_${userId}_${Math.random().toString(36).slice(2)}`;
+  const now = Date.now();
+  await t.client.execute({
+    sql: `INSERT INTO session (id, expiresAt, token, createdAt, updatedAt, userId) VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [`sess_${userId}_${now}`, now + 24 * 60 * 60 * 1000, token, now, now, userId],
+  });
+  const secret = (t.auth.options as { secret: string }).secret;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(token));
+  const base64 = btoa(String.fromCharCode(...new Uint8Array(signature)));
+  return `better-auth.session_token=${encodeURIComponent(`${token}.${base64}`)}`;
+}

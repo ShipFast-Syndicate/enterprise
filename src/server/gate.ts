@@ -59,10 +59,15 @@ export const GATED_PATHS: Record<string, Feature> = {
 // come from the stored provider, independent of the caller's active organization.
 const PROVIDER_DOMAIN_PATHS = new Set(["/sso/request-domain-verification", "/sso/verify-domain"]);
 
-// Credential management is tenant-authorized; only owners may mint or rotate.
+// Credential management is tenant-authorized; only owners may mint, rotate or
+// revoke. Revoke joined the set for F-07: since 1.7 it is a *decommission*
+// that replays every user the connection provisioned as inactive — a global
+// ban, session wipe and API-key wipe — so an admin could lock a manually
+// promoted owner out of the whole platform.
 const OWNER_ONLY_PATHS = new Set([
   "/enterprise/scim/tokens/create",
   "/enterprise/scim/tokens/rotate",
+  "/enterprise/scim/tokens/revoke",
 ]);
 
 // No explicit `: BetterAuthPlugin` return-type annotation (client task-9 fix
@@ -92,7 +97,19 @@ export function enterpriseGate(opts: EnterpriseOptions) {
     // every `@better-auth/sso` read/write of `ssoProvider`. See
     // `./secrets.ts`.
     init(context) {
-      return { context: { adapter: withSecretEncryption(context.adapter, opts.secretsKey) } };
+      return {
+        context: {
+          adapter: withSecretEncryption(context.adapter, opts.secretsKey, {
+            // F-06: an undecryptable secret is an operator problem (rotated
+            // key, corrupted row), reported through the product's logger —
+            // never a request failure for every tenant.
+            onUndecryptable: ({ providerId, field }) =>
+              context.logger.error(
+                `ssoProvider "${providerId}" field "${field}" could not be decrypted (wrong or rotated secretsKey, or a corrupted/transplanted ciphertext); the value is left sealed and this provider's IdP exchange will fail until the secret is re-entered.`,
+              ),
+          }),
+        },
+      };
     },
     hooks: {
       before: [

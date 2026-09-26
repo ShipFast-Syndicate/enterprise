@@ -155,7 +155,8 @@ export function buildScimEndpoints() {
       async (ctx) => {
         const full = ctx as unknown as GenericEndpointContext;
         const { orgId, providerId } = ctx.body;
-        await authorize(full, orgId);
+        // F-07: decommission is owner-only (see `../gate.ts` OWNER_ONLY_PATHS).
+        await authorize(full, orgId, true);
         const connection = await findConnection(full, orgId, providerId);
         const result = await api(full).decommissionSCIMManagedConnection({
           body: {
