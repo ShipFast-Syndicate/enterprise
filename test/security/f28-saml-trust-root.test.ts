@@ -217,12 +217,20 @@ function locationOf(res: Response): string {
 }
 
 async function failedSignIns(t: TestAuth): Promise<Array<{ orgId: string; error: string | null }>> {
+  // A stored row the operator's allow-list/pins no longer cover is refused
+  // by policy (`SSO_ISSUER_NOT_ALLOWED`), which PR-6 audits as
+  // `auth.sign_in_refused` (code in `metadata.code`) rather than as a failed
+  // SSO sign-in — and never as both.
+  const failed = await t.client.execute({
+    sql: `SELECT count(*) AS n FROM audit_event WHERE action = 'auth.sso_sign_in_failed'`,
+  });
+  expect(Number(failed.rows[0]!.n)).toBe(0);
   const rows = await t.client.execute({
-    sql: `SELECT org_id, metadata FROM audit_event WHERE action = 'auth.sso_sign_in_failed'`,
+    sql: `SELECT org_id, metadata FROM audit_event WHERE action = 'auth.sign_in_refused'`,
   });
   return rows.rows.map((r) => ({
     orgId: String(r.org_id),
-    error: (JSON.parse(String(r.metadata)) as { error?: string | null }).error ?? null,
+    error: (JSON.parse(String(r.metadata)) as { code?: string | null }).code ?? null,
   }));
 }
 
@@ -480,7 +488,7 @@ describe("F-28 (round 3) — sso.allowedIssuers pins the SAML trust root, fail c
     });
   });
 
-  it("sign-in time (SAML): a stored row whose certificate the operator's pins do not cover is refused at the ACS — no session, no user row, audited as auth.sso_sign_in_failed — and honoured again once its certificate is pinned", async () => {
+  it("sign-in time (SAML): a stored row whose certificate the operator's pins do not cover is refused at the ACS — no session, no user row, audited as auth.sign_in_refused — and honoured again once its certificate is pinned", async () => {
     const t = await makeAuth({ sso: LIST });
     const o = await owner(t);
     expect(

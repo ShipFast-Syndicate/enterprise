@@ -521,7 +521,7 @@ async function hashMagicLinkToken(token: string): Promise<string> {
  * to the `databaseHooks.session.create.before` backstop) for a custom
  * hasher or an already-consumed/unknown token.
  */
-async function resolveMagicLinkEmail(
+export async function resolveMagicLinkEmail(
   ctx: GenericEndpointContext,
   query: { token?: unknown } | undefined,
 ): Promise<string | null> {
@@ -1012,6 +1012,7 @@ export function buildTwoFactorEnrollmentGate(opts?: EnterpriseOptions) {
         orgIds: eff.sources.require2faBy,
         userId,
         email,
+        kind: "session",
       });
       throw standing === "enrollment-required"
         ? twoFactorEnrollmentRequiredError(allowed)

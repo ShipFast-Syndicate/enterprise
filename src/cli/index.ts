@@ -27,16 +27,31 @@
 //                                        missing table/column; exit 1 if
 //                                        anything is missing
 //   ab-enterprise audit-verify --org <id> [--url] [--token]
+//                              [--expect-head <seq>:<hash> | <head JSON>]
 //                                        verify an org's audit_event hash
 //                                        chain; exit 0 if it verifies, 1 if
-//                                        broken (prints brokenAtSeq)
+//                                        broken (prints brokenAtSeq). A keyed
+//                                        chain (audit.chainKey) is verified
+//                                        with the key from AB_AUDIT_CHAIN_KEY
+//                                        (never argv). --expect-head: the
+//                                        chain must still hold the row an
+//                                        earlier GET /enterprise/audit/head
+//                                        reported (same seq, same hash;
+//                                        with its signature checked under
+//                                        the key when one is given)
 import { parseArgs } from "node:util";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createClient, type Row } from "@libsql/client";
 import { verifyDatabase } from "../schema/verify";
 import { MIGRATION_FILES, migrationFilePath } from "../schema/migrate";
-import { verifyChain, type AuditRow } from "../server/audit/chain";
+import {
+  RETENTION_COMPACTED_ACTION,
+  RETENTION_COMPACTING_ACTION,
+  verifyChain,
+  verifyChainHeadSignature,
+  type AuditRow,
+} from "../server/audit/chain";
 
 const MIGRATION_FILE_RE = /^(\d{4})_.*\.sql$/;
 
@@ -477,6 +492,46 @@ function rowToAuditRow(row: Row): AuditRow {
   };
 }
 
+interface ExpectedHead {
+  seq: number;
+  hash: string;
+  orgId?: string;
+  signature?: string | null;
+}
+
+/**
+ * `--expect-head` accepts `<seq>:<hash>` or the JSON `GET
+ * /enterprise/audit/head` answered (`{ head: { orgId, seq, hash }, signature }`,
+ * or just its `head` object with an optional `signature`).
+ */
+function parseExpectedHead(raw: string): ExpectedHead | null {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        head?: { orgId?: unknown; seq?: unknown; hash?: unknown } | null;
+        orgId?: unknown;
+        seq?: unknown;
+        hash?: unknown;
+        signature?: unknown;
+      };
+      const head = parsed.head ?? parsed;
+      if (typeof head.seq !== "number" || typeof head.hash !== "string") return null;
+      return {
+        seq: head.seq,
+        hash: head.hash,
+        orgId: typeof head.orgId === "string" ? head.orgId : undefined,
+        signature: typeof parsed.signature === "string" ? parsed.signature : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+  const match = /^(-?\d+):(\S+)$/.exec(trimmed);
+  if (!match) return null;
+  return { seq: Number(match[1]), hash: match[2]! };
+}
+
 async function cmdAuditVerify(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
@@ -484,6 +539,7 @@ async function cmdAuditVerify(argv: string[]): Promise<number> {
       org: { type: "string" },
       url: { type: "string" },
       token: { type: "string" },
+      "expect-head": { type: "string" },
     },
   });
   if (!values.org) {
@@ -498,6 +554,44 @@ async function cmdAuditVerify(argv: string[]): Promise<number> {
     );
     return 1;
   }
+  // The chain key is a secret: environment only, like TURSO_AUTH_TOKEN
+  // without the argv fallback.
+  const chainKey = process.env.AB_AUDIT_CHAIN_KEY || undefined;
+  let expected: ExpectedHead | null = null;
+  if (values["expect-head"] !== undefined) {
+    expected = parseExpectedHead(values["expect-head"]);
+    if (!expected) {
+      console.error(
+        "ab-enterprise audit-verify: --expect-head takes <seq>:<hash> or the JSON GET /enterprise/audit/head returned",
+      );
+      return 1;
+    }
+    if (expected.orgId !== undefined && expected.orgId !== values.org) {
+      console.log(
+        `audit-verify: expected head belongs to org ${expected.orgId}, not ${values.org}`,
+      );
+      return 1;
+    }
+    if (expected.signature) {
+      if (!chainKey) {
+        console.log(
+          "audit-verify: the expected head is signed; set AB_AUDIT_CHAIN_KEY to check its signature",
+        );
+        return 1;
+      }
+      const valid = await verifyChainHeadSignature(
+        chainKey,
+        { orgId: values.org, seq: expected.seq, hash: expected.hash },
+        expected.signature,
+      );
+      if (!valid) {
+        console.log(
+          "audit-verify: the expected head's signature does not verify under AB_AUDIT_CHAIN_KEY",
+        );
+        return 1;
+      }
+    }
+  }
 
   const client = createClient(token ? { url, authToken: token } : { url });
   try {
@@ -506,13 +600,47 @@ async function cmdAuditVerify(argv: string[]): Promise<number> {
       args: [values.org],
     });
     const rows = result.rows.map(rowToAuditRow);
-    const verdict = await verifyChain(rows);
-    if (verdict.ok) {
-      console.log(`audit-verify: chain ok (${rows.length} rows)`);
+    const verdict = await verifyChain(rows, chainKey);
+    if (!verdict.ok) {
+      console.log(
+        verdict.reason === "keyed_row_without_key"
+          ? `audit-verify: chain is keyed from seq ${verdict.brokenAtSeq}; set AB_AUDIT_CHAIN_KEY to verify it`
+          : `audit-verify: chain broken at seq ${verdict.brokenAtSeq}`,
+      );
+      return 1;
+    }
+    if (expected) {
+      const row = rows.find((r) => r.seq === expected.seq);
+      if (row) {
+        if (row.hash !== expected.hash) {
+          console.log(
+            `audit-verify: the row at seq ${expected.seq} no longer carries the expected head hash — the chain was rewritten`,
+          );
+          return 1;
+        }
+      } else {
+        // Gone: compacted away (the anchor records the hash of the last
+        // compacted row only), or truncated. Either way the head cannot be
+        // confirmed — fail closed.
+        const anchor = rows.find(
+          (r) =>
+            (r.action === RETENTION_COMPACTED_ACTION || r.action === RETENTION_COMPACTING_ACTION) &&
+            (r.metadata as { compactedThroughSeq?: unknown }).compactedThroughSeq === expected.seq,
+        );
+        if (!anchor || (anchor.metadata as { lastHash?: unknown }).lastHash !== expected.hash) {
+          console.log(
+            `audit-verify: the chain no longer holds the expected head (seq ${expected.seq}) — truncated, or compacted past it`,
+          );
+          return 1;
+        }
+      }
+      console.log(
+        `audit-verify: chain ok (${rows.length} rows), expected head at seq ${expected.seq} present`,
+      );
       return 0;
     }
-    console.log(`audit-verify: chain broken at seq ${verdict.brokenAtSeq}`);
-    return 1;
+    console.log(`audit-verify: chain ok (${rows.length} rows)`);
+    return 0;
   } finally {
     client.close();
   }
@@ -530,13 +658,13 @@ async function main(): Promise<number> {
     case undefined:
       console.error("ab-enterprise: no command given");
       console.error(
-        "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>]",
+        "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>] [--expect-head <seq>:<hash>]",
       );
       return 1;
     default:
       console.error(`ab-enterprise: unknown command "${command}"`);
       console.error(
-        "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>]",
+        "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>] [--expect-head <seq>:<hash>]",
       );
       return 1;
   }

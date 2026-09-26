@@ -8,6 +8,7 @@ import { requireFeature } from "../entitlements";
 import { requireOwner, requireOwnerOrAdmin } from "../policy/store";
 import { scimConnectionLabel as label } from "../scim-connection";
 import { writeAudit } from "../audit/chain";
+import { sessionActor } from "../audit/plugin";
 
 const orgIdSchema = z.string().min(1).max(100);
 const body = z.object({ orgId: orgIdSchema, providerId: z.string().trim().min(1).max(64) });
@@ -99,10 +100,12 @@ function mintEndpoint(rotate: boolean) {
             },
           });
         }
+        const actor = sessionActor(ctx.context.session);
         await writeAudit(full, {
           orgId,
-          actorType: "user",
-          actorId: policy.actorId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          metadata: actor.metadata,
           action: rotate ? "scim.token_rotated" : "scim.token_created",
           targetType: "scim_connection",
           targetId: result.connection.connectionId,
@@ -170,8 +173,8 @@ export function buildScimEndpoints() {
         if (connection.status === "active")
           await writeAudit(full, {
             orgId,
-            actorType: "user",
-            actorId: ctx.context.session.user.id,
+            // Impersonation-aware (F-12): `actorType`, `actorId`, `metadata`.
+            ...sessionActor(ctx.context.session),
             action: "scim.token_revoked",
             targetType: "scim_connection",
             targetId: connection.connectionId,

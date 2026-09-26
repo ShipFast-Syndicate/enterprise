@@ -17,7 +17,7 @@ import { getMemberRoles } from "./policy/store";
 import { withSecretEncryption } from "./secrets";
 import { buildSsoDomainGuardHook } from "./sso-domain";
 import { assertEnterpriseOptions, takeDomainBindingOffUnlistedWarning } from "./options";
-import { assertNotApiKeyRequest, isApiKeyRefusedPath, isServerOnlyPath } from "./api-keys";
+import { assertNotApiKeyRequest, isApiKeyRefusedPath, isServerOnlyCall } from "./api-keys";
 
 export const GATED_PATHS: Record<string, Feature> = {
   "/sso/register": "sso",
@@ -145,8 +145,9 @@ export function enterpriseGate(opts: EnterpriseOptions) {
           // all) has no HTTP route, and with the mock session on it is the
           // validator layer that decides (`isApiKeyVerifyCall`) — without
           // it the header is inert there.
-          matcher: (ctx) =>
-            !!ctx.path && !isServerOnlyPath(ctx.path) && isApiKeyRefusedPath(ctx.path),
+          // A literal `/` product route is an HTTP request, not the
+          // server-only sentinel (`isServerOnlyCall` checks the `Request`).
+          matcher: (ctx) => !!ctx.path && !isServerOnlyCall(ctx) && isApiKeyRefusedPath(ctx.path),
           handler: createAuthMiddleware(async (ctx) => {
             assertNotApiKeyRequest(ctx);
           }),

@@ -1,9 +1,10 @@
 # @alphabros/enterprise
 
 Alpha Bros studio enterprise layer for [better-auth](https://www.better-auth.com/) `1.7.5`:
-SSO (SAML + OIDC), SCIM 2.0 provisioning (Users + Groups), organizations, a tamper-evident
-audit log, security policy enforcement, and a framework-agnostic admin portal — as one
-package with four subpath entry points and a CLI.
+SSO (SAML + OIDC), SCIM 2.0 provisioning (Users + Groups), organizations, a hash-chained
+audit log (tamper-evident against database writers when keyed with `audit.chainKey` and its
+head exported off-box — see `docs/security.md`), security policy enforcement, and a
+framework-agnostic admin portal — as one package with four subpath entry points and a CLI.
 
 ## Status
 
@@ -387,8 +388,12 @@ ab-enterprise verify --url $TURSO_DATABASE_URL --token $TURSO_AUTH_TOKEN
 # CLI flags are visible in `ps` output and shell history.
 
 # Recompute an org's audit_event hash chain and confirm nothing was tampered
-# with (within the retention window — see docs/security.md).
+# with (within the retention window — see docs/security.md). A keyed chain
+# (audit.chainKey) is verified with the key from AB_AUDIT_CHAIN_KEY (env only);
+# --expect-head checks the chain still holds a head exported earlier from
+# GET /enterprise/audit/head (catches truncation and wholesale rewrites).
 ab-enterprise audit-verify --org org_123 --url $TURSO_DATABASE_URL
+AB_AUDIT_CHAIN_KEY=... ab-enterprise audit-verify --org org_123 --expect-head "$(cat head.json)"
 ```
 
 Run `ab-enterprise verify` after every deploy (fleet migrations have historically not reached

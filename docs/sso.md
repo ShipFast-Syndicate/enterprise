@@ -32,9 +32,16 @@ machine (`WizardStep` in `src/portal/ab-sso-wizard.ts`):
    on**, so an org can never lock itself out of its own SSO setup.
 6. **`done`**.
 
-Every step writes an `audit_event` row (via the underlying
-`/enterprise/sso/*` endpoints and `/enterprise/policy/set`, both wrapped by
-`auditLog()`).
+Every step that changes something writes an `audit_event` row into the
+provider's own organization — whatever organization the admin's session has
+active: `sso.provider_registered` (step 2, via `/sso/register`),
+`sso.domain_verification_requested` and `sso.domain_verified` (step 3),
+`sso.test_login_passed` (step 4) and `policy.updated` (step 5). Later changes
+to the provider are recorded too (`sso.provider_updated` with the changed keys,
+never a value; `sso.provider_deleted` with the number of linked accounts it took
+with it), and every SSO sign-in lands in the provider's org and the user's own
+(`auth.sso_sign_in`, `auth.sso_sign_in_failed`, `auth.sign_in_refused`) — see
+`docs/security.md`, "Audit log coverage".
 
 ### Who may do which step
 

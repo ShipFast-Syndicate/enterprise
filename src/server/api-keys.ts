@@ -33,7 +33,8 @@
 
 import type { AuthContext, BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import { APIError, createAuthMiddleware, getSessionFromCtx, isAPIError } from "better-auth/api";
-import { writeAudit, type ChainWriteOptions } from "./audit/chain";
+import { writeAudit, type AuditActorType, type ChainWriteOptions } from "./audit/chain";
+import { sessionActor } from "./audit/plugin";
 import {
   resolvePolicyOrgsForUser,
   resolveTwoFactorStanding,
@@ -321,8 +322,10 @@ export function apiKeySessionStanding() {
 }
 
 export interface ApiKeyRevocationActor {
-  actorType: "user" | "scim" | "system";
+  actorType: AuditActorType;
   actorId: string | null;
+  /** Merged into each row's metadata (e.g. `{ impersonatedBy }` from `sessionActor`). */
+  metadata?: Record<string, unknown>;
 }
 
 /**
@@ -408,7 +411,7 @@ export async function revokeUserApiKeys(
           action: "api_key.revoked",
           targetType: "api_key",
           targetId: keyId,
-          metadata: { reason, userId },
+          metadata: { ...actor.metadata, reason, userId },
         },
         { chainKey: options.chainKey },
       );
@@ -515,7 +518,8 @@ export function apiKeyLifecycle(
             await revokeUserApiKeys(
               full,
               userId,
-              { actorType: "user", actorId: full.context.session?.user.id ?? null },
+              // Impersonation-aware (F-12), like every audited actor.
+              sessionActor(full.context.session),
               reason,
               { chainKey, orgIds: Array.isArray(stashed) ? (stashed as string[]) : [] },
             );
@@ -577,6 +581,16 @@ export function isServerOnlyPath(path: string): boolean {
   return SERVER_ONLY_PATHS.has(path);
 }
 
+/**
+ * Whether `ctx` is a path-less server-only call: a `SERVER_ONLY_PATHS` path
+ * **and** no `Request`. An HTTP request always carries one, so a product
+ * route declared at the literal path `/` (which is also the sentinel a
+ * path-less call shows inside a hook) is never mistaken for one.
+ */
+export function isServerOnlyCall(ctx: { path?: string; request?: unknown }): boolean {
+  return !ctx.request && typeof ctx.path === "string" && isServerOnlyPath(ctx.path);
+}
+
 /** Whether `path` is one of `API_KEY_ALLOWED_PATHS` (exact match). */
 export function isApiKeyAllowedPath(path: string): boolean {
   return API_KEY_ALLOWED_PATHS.has(path);
@@ -612,12 +626,18 @@ export function isApiKeyRefusedPath(path: string): boolean {
  * endpoint declares none, and deliberately *not* as "any server-only call":
  * the other path-less endpoints upstream mounts (`viewBackupCodes`,
  * `generateTOTP`, SCIM token minting, JWT signing, …) stay refused for a
- * key even when a product forwards the request headers into them. Over HTTP
- * `ctx.path` is always the route's path, so this never matches an HTTP
- * request.
+ * key even when a product forwards the request headers into them. An HTTP
+ * request never matches: it carries a `Request` (checked first), whatever
+ * its path — a product route declared at the literal `/` included.
  */
-export function isApiKeyVerifyCall(ctx: { path?: string; body?: unknown }, key: string): boolean {
-  if (typeof ctx.path !== "string" || !isServerOnlyPath(ctx.path)) return false;
+export function isApiKeyVerifyCall(
+  ctx: { path?: string; body?: unknown; request?: unknown },
+  key: string,
+): boolean {
+  // `isServerOnlyCall`: without the `Request` check, a product endpoint
+  // declared at the literal path `/` would be read as the verify call when a
+  // request carries the key in both the header and `body.key`.
+  if (!isServerOnlyCall(ctx)) return false;
   const body = ctx.body as { key?: unknown } | null | undefined;
   return typeof body?.key === "string" && body.key === key;
 }

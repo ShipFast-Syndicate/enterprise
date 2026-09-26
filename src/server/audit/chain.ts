@@ -37,9 +37,17 @@ import type { Where } from "@better-auth/core/db/adapter";
 
 type AuditAdapter = AuthContext["adapter"];
 
+/**
+ * Who performed an audited action. `impersonated` is a user action taken
+ * through an impersonation session (`admin` plugin): `actorId` is the user
+ * being impersonated and `metadata.impersonatedBy` the staff member actually
+ * driving the session, so the row never reads as the user's own act.
+ */
+export type AuditActorType = "user" | "scim" | "system" | "impersonated";
+
 export interface AuditInput {
   orgId: string;
-  actorType: "user" | "scim" | "system";
+  actorType: AuditActorType;
   actorId?: string | null;
   action: string;
   targetType: string;
@@ -449,11 +457,52 @@ function nextSeqBaseOf(row: {
 
 /**
  * Options shared by the two chain writers. `chainKey` (`audit.chainKey`)
- * makes every link this call produces an HMAC link — see the header. Callers
- * that pass nothing get the byte-identical unkeyed behaviour.
+ * makes every link this call produces an HMAC link — see the header.
+ *
+ * A caller that passes no `chainKey` gets the one the deployment is
+ * configured with (`auditChainKeyOf`, read off the auth context the call
+ * runs in), not an unkeyed link: once an org's chain holds a keyed row, one
+ * unkeyed row after it breaks verification for good (monotonic rule), so no
+ * writer may be able to forget the key. Only a context without a configured
+ * key — no enterprise plugin carrying `audit.chainKey` — writes unkeyed.
+ *
+ * `actor` is the caller a compaction anchor is attributed to (the operator
+ * or admin who ran it); without one the anchor is a `system` row.
  */
 export interface ChainWriteOptions {
   chainKey?: string;
+  actor?: { actorType: AuditActorType; actorId: string | null };
+}
+
+/** Plugin ids whose `options` carry the deployment's `EnterpriseOptions` (and so `audit.chainKey`). */
+const OPTION_CARRYING_PLUGIN_IDS = ["enterprise-audit", "enterprise-gate"] as const;
+
+/**
+ * The `audit.chainKey` the running auth instance is configured with, read
+ * from the enterprise plugins mounted on it (the same way `requireFeature`
+ * reads `resolveEntitlements` back off `ctx.context.options.plugins`), or
+ * `undefined` when none carries one.
+ */
+export function auditChainKeyOf(context: unknown): string | undefined {
+  const plugins = (context as { options?: { plugins?: unknown } } | null | undefined)?.options
+    ?.plugins;
+  if (!Array.isArray(plugins)) return undefined;
+  for (const id of OPTION_CARRYING_PLUGIN_IDS) {
+    const plugin = plugins.find((p: unknown) => (p as { id?: unknown } | null)?.id === id) as
+      { options?: { audit?: { chainKey?: unknown } } } | undefined;
+    const key = plugin?.options?.audit?.chainKey;
+    if (typeof key === "string" && key.length > 0) return key;
+  }
+  return undefined;
+}
+
+/** The context shape the chain writers need: the adapter, and the options they read `chainKey` from. */
+export interface AuditWriteContext {
+  context: Pick<AuthContext, "adapter"> & { options?: unknown };
+}
+
+function effectiveChainKey(ctx: AuditWriteContext, options: ChainWriteOptions): string | undefined {
+  return options.chainKey ?? auditChainKeyOf(ctx.context);
 }
 
 async function insertNextRow(
@@ -521,17 +570,18 @@ async function insertNextRow(
  * this `seq`) retries once with a freshly recomputed `seq`, then rethrows.
  */
 export async function writeAudit(
-  ctx: { context: Pick<AuthContext, "adapter"> },
+  ctx: AuditWriteContext,
   input: AuditInput,
   options: ChainWriteOptions = {},
 ): Promise<AuditRow> {
   const adapter = ctx.context.adapter as unknown as AuditAdapter;
+  const chainKey = effectiveChainKey(ctx, options);
   return withOrgLock(input.orgId, async () => {
     try {
-      return await insertNextRow(adapter, input, options.chainKey);
+      return await insertNextRow(adapter, input, chainKey);
     } catch (err) {
       if (!isUniqueViolation(err)) throw err;
-      return await insertNextRow(adapter, input, options.chainKey);
+      return await insertNextRow(adapter, input, chainKey);
     }
   });
 }
@@ -573,12 +623,13 @@ export interface CompactionResult {
  * per-org lock as `writeAudit`, so it can never interleave with an append.
  */
 export async function compactChain(
-  ctx: { context: Pick<AuthContext, "adapter"> },
+  ctx: AuditWriteContext,
   orgId: string,
   cutoff: Date,
   options: ChainWriteOptions = {},
 ): Promise<CompactionResult | null> {
   const adapter = ctx.context.adapter as unknown as AuditAdapter;
+  const chainKey = effectiveChainKey(ctx, options);
   return withOrgLock(orgId, async () => {
     const expired = await adapter.findMany<{ seq: number; hash: string }>({
       model: "auditEvent",
@@ -623,8 +674,10 @@ export async function compactChain(
     const rowForHash: AuditRowForHash = {
       orgId,
       seq: anchorSeq,
-      actorType: "system",
-      actorId: null,
+      // The caller who ran the compaction (F-13): an anchor that stands in
+      // for deleted rows must say who deleted them.
+      actorType: options.actor?.actorType ?? "system",
+      actorId: options.actor?.actorId ?? null,
       action: RETENTION_COMPACTING_ACTION,
       targetType: "organization",
       targetId: orgId,
@@ -639,7 +692,7 @@ export async function compactChain(
     };
 
     // Phase 1 — write the anchor, marked pending.
-    const pendingHash = await hashRow(through.hash, rowForHash, options.chainKey);
+    const pendingHash = await hashRow(through.hash, rowForHash, chainKey);
     const anchorRow = await adapter.create<AuditEventDbRow>({
       model: "auditEvent",
       data: {
@@ -662,7 +715,7 @@ export async function compactChain(
       where: [{ field: "id", value: anchorRow.id }],
       update: {
         action: RETENTION_COMPACTED_ACTION,
-        hash: await hashRow(through.hash, completed, options.chainKey),
+        hash: await hashRow(through.hash, completed, chainKey),
       },
     });
 
@@ -672,4 +725,74 @@ export async function compactChain(
       lastHash: through.hash,
     };
   });
+}
+
+/**
+ * The newest row of an org's chain — what an operator exports off-box to
+ * detect a later truncation or a consistent rewrite of the whole chain
+ * (`GET /enterprise/audit/head`, `ab-enterprise audit-verify
+ * --expect-head`). `null` for an org without rows.
+ */
+export interface ChainHead {
+  orgId: string;
+  seq: number;
+  hash: string;
+  /** Epoch milliseconds. */
+  createdAt: number;
+}
+
+export async function readChainHead(
+  ctx: { context: Pick<AuthContext, "adapter"> },
+  orgId: string,
+): Promise<ChainHead | null> {
+  const adapter = ctx.context.adapter as unknown as AuditAdapter;
+  const rows = await adapter.findMany<{ seq: number; hash: string; createdAt: Date | number }>({
+    model: "auditEvent",
+    where: [{ field: "orgId", value: orgId }],
+    sortBy: { field: "seq", direction: "desc" },
+    limit: 1,
+  });
+  const row = rows[0];
+  if (!row) return null;
+  const createdAt = row.createdAt instanceof Date ? row.createdAt.getTime() : Number(row.createdAt);
+  return { orgId, seq: Number(row.seq), hash: row.hash, createdAt };
+}
+
+/** Domain separation for head signatures, so a head signature can never double as a chain link. */
+const HEAD_SIGNATURE_CONTEXT = "ab-enterprise-audit-head:v1";
+
+function headSignaturePayload(head: Pick<ChainHead, "orgId" | "seq" | "hash">): string {
+  return `${HEAD_SIGNATURE_CONTEXT}\n${head.orgId}\n${head.seq}\n${head.hash}`;
+}
+
+/**
+ * `hmac:` + hex HMAC-SHA256 under `chainKey` over the org id, `seq` and
+ * `hash` of a head — binds an exported head to its org and position, so a
+ * holder of the key can later prove the value was issued by the deployment
+ * (and was not, say, copied from another org's chain).
+ */
+export async function signChainHead(
+  key: string,
+  head: Pick<ChainHead, "orgId" | "seq" | "hash">,
+): Promise<string> {
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await hmacKeyFor(key),
+    new TextEncoder().encode(headSignaturePayload(head)),
+  );
+  return `${KEYED_HASH_PREFIX}${toHex(signature)}`;
+}
+
+/** Constant-time comparison of a presented head signature with the one `key` produces. */
+export async function verifyChainHeadSignature(
+  key: string,
+  head: Pick<ChainHead, "orgId" | "seq" | "hash">,
+  signature: string,
+): Promise<boolean> {
+  const expected = await signChainHead(key, head);
+  if (expected.length !== signature.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++)
+    diff |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
+  return diff === 0;
 }

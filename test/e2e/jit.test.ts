@@ -211,9 +211,13 @@ describe("SSO only for SCIM-active users (SCIM_PROVISIONING_REQUIRED)", () => {
     });
     expect(userRows.rows.length).toBe(0);
 
-    // A blocked JIT is audited as a failed sign-in, never as a successful
+    // A blocked JIT is audited as a refused sign-in, never as a successful
     // one — no session was created, so there's no user to (mis)attribute a
-    // `auth.sso_sign_in` row to.
+    // `auth.sso_sign_in` row to. `SCIM_PROVISIONING_REQUIRED` is a policy
+    // refusal, so since PR-6 (R6) the row is `auth.sign_in_refused` (code in
+    // `metadata.code`, the provider in `metadata.providerId`; no user row
+    // exists, and the SCIM gate refuses before one is attempted) — and not
+    // also an `auth.sso_sign_in_failed` row.
     const signInRows = await t.client.execute({
       sql: `SELECT * FROM audit_event WHERE action = 'auth.sso_sign_in' AND org_id = ?`,
       args: [orgId],
@@ -223,18 +227,27 @@ describe("SSO only for SCIM-active users (SCIM_PROVISIONING_REQUIRED)", () => {
       sql: `SELECT * FROM audit_event WHERE action = 'auth.sso_sign_in_failed' AND org_id = ?`,
       args: [orgId],
     });
-    expect(failedRows.rows.length).toBe(1);
-    expect(failedRows.rows[0]!.actor_type).toBe("system");
-    expect(failedRows.rows[0]!.actor_id).toBeNull();
-    expect(failedRows.rows[0]!.target_type).toBe("sso_provider");
-    expect(failedRows.rows[0]!.target_id).toBe("oidc-scim-gate");
+    expect(failedRows.rows.length).toBe(0);
+    const refusedRows = await t.client.execute({
+      sql: `SELECT * FROM audit_event WHERE action = 'auth.sign_in_refused' AND org_id = ?`,
+      args: [orgId],
+    });
+    expect(refusedRows.rows.length).toBe(1);
+    expect(refusedRows.rows[0]!.actor_type).toBe("system");
+    expect(refusedRows.rows[0]!.actor_id).toBeNull();
+    expect(refusedRows.rows[0]!.target_type).toBe("user");
+    expect(refusedRows.rows[0]!.target_id).toBeNull();
     // `handleOAuthUserInfo` (`node_modules/better-auth/dist/oauth2/
     // link-account.mjs`) catches our hook's thrown `APIError` and surfaces
     // `e.message` (the human-readable `message`, not `code`) as `linked.
     // error`, which `handleOIDCCallback` then puts straight into the
     // redirect's `error=` query param — so that's what ends up here too.
-    const metadata = JSON.parse(failedRows.rows[0]!.metadata as string) as { error?: string };
-    expect(metadata.error).toBe("SCIM_PROVISIONING_REQUIRED");
+    const metadata = JSON.parse(refusedRows.rows[0]!.metadata as string) as {
+      code?: string;
+      providerId?: string;
+    };
+    expect(metadata.code).toBe("SCIM_PROVISIONING_REQUIRED");
+    expect(metadata.providerId).toBe("oidc-scim-gate");
   });
 
   it("does not block JIT for an org with no SCIM provider (control case)", async () => {

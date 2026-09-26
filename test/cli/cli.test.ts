@@ -25,13 +25,16 @@ import { migrate } from "drizzle-orm/libsql/migrator";
 import { applyMigration } from "../../src/schema";
 import { migrationFilePath, splitStatements } from "../../src/schema/migrate";
 import { baseAuthOptions as baseOptions, runMigrations } from "../helpers/auth";
-import { hashRow, type AuditRowForHash } from "../../src/server/audit/chain";
+import { hashRow, signChainHead, type AuditRowForHash } from "../../src/server/audit/chain";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const cliPath = join(repoRoot, "dist", "cli", "index.js");
 
-function runCli(args: string[]) {
-  return spawnSync(process.execPath, [cliPath, ...args], { encoding: "utf8" });
+function runCli(args: string[], env: Record<string, string> = {}) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
 }
 
 describe("ab-enterprise CLI (built binary)", () => {
@@ -160,6 +163,130 @@ describe("ab-enterprise CLI (built binary)", () => {
     expect(broken.status).toBe(1);
     expect(broken.stdout).toMatch(/chain broken at seq 2/);
 
+    client.close();
+  });
+
+  /** Writes a `count`-row chain for `orgId` (HMAC links when `key` is given); returns the rows' hashes. */
+  async function seedChain(dbFile: string, orgId: string, count: number, key?: string) {
+    const client = createClient({ url: `file:${join(workDir, dbFile)}` });
+    await runMigrations({ options: baseOptions() }, client);
+    await applyMigration(client);
+    const hashes: string[] = [];
+    let prevHash = "GENESIS";
+    for (let seq = 1; seq <= count; seq++) {
+      const row: AuditRowForHash = {
+        orgId,
+        seq,
+        actorType: "user",
+        actorId: "user_1",
+        action: "member.invited",
+        targetType: "member",
+        targetId: `inv_${seq}`,
+        ip: null,
+        userAgent: null,
+        metadata: {},
+        createdAt: 1_700_000_000_000 + seq,
+      };
+      const hash = await hashRow(prevHash, row, key);
+      await client.execute({
+        sql: `INSERT INTO audit_event (id, org_id, seq, actor_type, actor_id, action, target_type, target_id, ip, user_agent, metadata, created_at, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          `evt_${seq}`,
+          row.orgId,
+          row.seq,
+          row.actorType,
+          row.actorId,
+          row.action,
+          row.targetType,
+          row.targetId,
+          row.ip,
+          row.userAgent,
+          JSON.stringify(row.metadata),
+          row.createdAt,
+          prevHash,
+          hash,
+        ],
+      });
+      hashes.push(hash);
+      prevHash = hash;
+    }
+    return { client, hashes, url: `file:${join(workDir, dbFile)}` };
+  }
+
+  it("audit-verify verifies a keyed chain with the key from AB_AUDIT_CHAIN_KEY (never argv), and says so when the key is missing or wrong", async () => {
+    const key = "c".repeat(40);
+    const orgId = "org_cli_keyed";
+    const { client, url } = await seedChain("audit-keyed.db", orgId, 3, key);
+    const withoutKey = runCli(["audit-verify", "--org", orgId, "--url", url], {
+      AB_AUDIT_CHAIN_KEY: "",
+    });
+    expect(withoutKey.status).toBe(1);
+    expect(withoutKey.stdout).toMatch(/chain is keyed from seq 1; set AB_AUDIT_CHAIN_KEY/);
+    const wrongKey = runCli(["audit-verify", "--org", orgId, "--url", url], {
+      AB_AUDIT_CHAIN_KEY: "w".repeat(40),
+    });
+    expect(wrongKey.status).toBe(1);
+    expect(wrongKey.stdout).toMatch(/chain broken at seq 1/);
+    const ok = runCli(["audit-verify", "--org", orgId, "--url", url], { AB_AUDIT_CHAIN_KEY: key });
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toMatch(/chain ok \(3 rows\)/);
+    // The key is not an option: parseArgs refuses an unknown flag.
+    const argv = runCli(["audit-verify", "--org", orgId, "--url", url, "--chain-key", key]);
+    expect(argv.status).toBe(1);
+    client.close();
+  });
+
+  it("audit-verify --expect-head: a truncated or rewritten chain no longer matches an exported head; a signed head is checked under the key", async () => {
+    const key = "h".repeat(40);
+    const orgId = "org_cli_head";
+    const { client, hashes, url } = await seedChain("audit-head.db", orgId, 3, key);
+    const env = { AB_AUDIT_CHAIN_KEY: key };
+    const head = { orgId, seq: 3, hash: hashes[2]! };
+
+    const plain = runCli(
+      ["audit-verify", "--org", orgId, "--url", url, "--expect-head", `3:${hashes[2]}`],
+      env,
+    );
+    expect(plain.status).toBe(0);
+    expect(plain.stdout).toMatch(/expected head at seq 3 present/);
+
+    const signed = JSON.stringify({ head, signature: await signChainHead(key, head) });
+    expect(
+      runCli(["audit-verify", "--org", orgId, "--url", url, "--expect-head", signed], env).status,
+    ).toBe(0);
+    const forged = JSON.stringify({ head, signature: await signChainHead("f".repeat(40), head) });
+    const forgedRun = runCli(
+      ["audit-verify", "--org", orgId, "--url", url, "--expect-head", forged],
+      env,
+    );
+    expect(forgedRun.status).toBe(1);
+    expect(forgedRun.stdout).toMatch(/signature does not verify/);
+    const otherOrg = JSON.stringify({ head: { ...head, orgId: "org_other" }, signature: null });
+    expect(
+      runCli(["audit-verify", "--org", orgId, "--url", url, "--expect-head", otherOrg], env).status,
+    ).toBe(1);
+
+    // Tail truncation: the remaining chain is internally consistent (verify
+    // alone says ok), but the exported head is gone.
+    await client.execute({
+      sql: `DELETE FROM audit_event WHERE org_id = ? AND seq = 3`,
+      args: [orgId],
+    });
+    const truncatedVerify = runCli(["audit-verify", "--org", orgId, "--url", url], env);
+    expect(truncatedVerify.status).toBe(0);
+    const truncated = runCli(
+      ["audit-verify", "--org", orgId, "--url", url, "--expect-head", `3:${hashes[2]}`],
+      env,
+    );
+    expect(truncated.status).toBe(1);
+    expect(truncated.stdout).toMatch(/no longer holds the expected head/);
+
+    const bad = runCli(
+      ["audit-verify", "--org", orgId, "--url", url, "--expect-head", "nonsense"],
+      env,
+    );
+    expect(bad.status).toBe(1);
+    expect(bad.stderr).toMatch(/--expect-head takes/);
     client.close();
   });
 

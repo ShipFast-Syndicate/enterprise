@@ -413,8 +413,97 @@ SELECT k.id, k.referenceId, k.name, u.email FROM apikey k JOIN user u ON u.id = 
 WHERE k.expiresAt IS NULL;
 ```
 
+## Audit log coverage
+
+Every endpoint the preset mounts is in exactly one of three tables in
+`src/server/audit/routes.ts` — audited by the plugin (`AUDITED_PATHS`), auditing itself
+(`SELF_AUDITED_PATHS`), or deliberately unaudited with the reason (`UNAUDITED_PATHS`,
+`UNAUDITED_SERVER_ONLY_ENDPOINTS`) — and `test/security/audit-cluster-routes.test.ts` fails for
+any mounted endpoint and method in none of them, so an upstream bump that adds an endpoint is a
+failing test until someone decides. Independently of the tables, **any** request that mints a
+session is recorded as `auth.sign_in` (with `metadata.path` when the path is not in the table)
+and any request that ends in a policy refusal as `auth.sign_in_refused` — a product's own
+sign-in plugin (email OTP, generic OAuth, …) is never a silent way in.
+
+**Which chain a row goes to — one row per organization, each in its own chain.** A caller's
+`?orgId=` / body `orgId` is never consulted, except by the two endpoints that themselves
+require the caller to be an owner or admin of exactly that org (`/enterprise/policy/set`, and
+the export, which records itself).
+
+| Scope         | Organizations written to                                                                                                                                                                                                            |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subject`     | every org with a claim on the user the event is about — their memberships **and** every org owning a verified SSO domain for their e-mail (the union policy uses); for a failed sign-in of an unknown address, the domain orgs only |
+| `target-user` | every org of the user an `/admin/*` action targets, resolved before the endpoint runs (removal deletes the memberships)                                                                                                             |
+| `resource`    | the org of the member/invitation/team/organization the endpoint acted on (a join lands in the org joined); else the org the request named **only if** the caller belonged to it before the request                                  |
+| `provider`    | the org owning the SSO provider (read before the endpoint runs, so a deletion is still attributed); SSO sign-ins go to the provider's org as well as the user's                                                                     |
+| `scim`        | the SCIM bearer's own provisioning org                                                                                                                                                                                              |
+| `request-org` | the org in the request body, written only when the endpoint (owner/admin of exactly that org) succeeded                                                                                                                             |
+
+**Actions.** Sign-in steps (`*`): success = a session was minted (a refreshed or re-issued
+session is not); a 2FA challenge instead of a session is `auth.sign_in_2fa_pending`; an error is
+`auth.sign_in_failed` (`auth.sso_sign_in_failed` on the SSO callbacks), or
+`auth.sign_in_refused` when it carries a policy code (`SSO_REQUIRED`, `METHOD_NOT_ALLOWED`,
+`TWO_FACTOR_REQUIRED`, `TWO_FACTOR_ENROLLMENT_REQUIRED`, `SSO_DOMAIN_NOT_ALLOWED`,
+`SSO_PROVIDER_UNRESOLVED`, `SSO_ISSUER_NOT_ALLOWED`, `SCIM_PROVISIONING_REQUIRED`,
+`SCIM_USER_NOT_ACTIVE` — `POLICY_REFUSAL_CODES`). A refused SSO sign-in reaches the org owning
+the asserted address's domain too, not only the signing provider's org. A refusal thrown by a
+`hooks.before` handler (the `/magic-link/verify` pre-flight) is written by `auditRefusal` before
+the throw and flagged, so it is recorded once; the `require2fa` enrolment gate records
+`auth.session_refused` once per user, code and org every 10 minutes per process, not on every
+request of a confined session.
+
+| Scope         | Path → action                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subject`     | `/sign-in/email`\*, `/sign-in/social`\* (idToken), `/callback/:id`\*, `/magic-link/verify`\*, `/passkey/verify-authentication`\*, `/two-factor/verify-totp\|otp\|backup-code`\* → `auth.sign_in` (with a session already present, TOTP/OTP enrolment → `two_factor.enabled`); `/sign-up/email`\* → `auth.sign_up`; `/verify-email`\* → `auth.sign_in` or `user.email_verified`; `/sso/callback[/:providerId]`\*, `/sso/saml2/sp/acs/:providerId`\* → `auth.sso_sign_in`; `/sign-in/magic-link` → `auth.magic_link_requested`; `/request-password-reset` → `user.password_reset_requested`; `/reset-password` → `user.password_reset`; `/sign-out`, `/sso/saml2/logout/:providerId` → `auth.sign_out`; `/change-password` → `user.password_changed`; `/change-email` → `user.email_change_requested`; `/update-user` → `user.updated`; `/delete-user[/callback]` → `user.deleted` / `user.deletion_requested`; `/revoke-session[s]`, `/revoke-other-sessions` → `session.revoked[_all\|_others]` (never a token); `/link-social` → `account.link_requested`; `/unlink-account` → `account.unlinked`; `/two-factor/enable` → `two_factor.enrollment_started`; `/two-factor/disable` → `two_factor.disabled`; `/two-factor/generate-backup-codes` → `two_factor.backup_codes_generated`; `/passkey/verify-registration\|update-passkey\|delete-passkey` → `passkey.registered\|updated\|deleted`; `/api-key/create\|update\|delete` → `api_key.created\|updated\|revoked` |
+| `resource`    | `/organization/update` → `org.updated`; `/organization/delete` → `org.deleted` (the org's terminal row — rows outlive the organization); `/organization/leave` → `member.left`; `/organization/invite-member\|cancel-invitation\|reject-invitation\|accept-invitation\|remove-member\|update-member-role` → `member.invited\|invitation_canceled\|invitation_rejected\|joined\|removed\|role_changed`; `/organization/create-team\|update-team\|remove-team\|add-team-member\|remove-team-member` → `team.created\|updated\|removed\|member_added\|member_removed`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `target-user` | `/admin/create-user\|update-user\|set-role\|set-user-password\|ban-user\|unban-user\|remove-user\|revoke-user-session\|revoke-user-sessions` → `admin.user_created\|user_updated\|user_role_changed\|user_password_set\|user_banned\|user_unbanned\|user_removed\|user_session_revoked\|user_sessions_revoked`; `/admin/impersonate-user` → `admin.impersonation_started`; `/admin/stop-impersonating` → `admin.impersonation_stopped` (actor = the staff member — the only trace once upstream deletes the impersonation session)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `provider`    | `/sso/register\|update-provider\|delete-provider\|request-domain-verification\|verify-domain` → `sso.provider_registered\|provider_updated\|provider_deleted\|domain_verification_requested\|domain_verified` (`provider_updated` records the changed keys, never a value; `provider_deleted` the number of linked accounts deleted with it); `/sso/saml2/sp/slo/:providerId` → `auth.sso_logout`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `scim`        | `/scim/v2/Users` POST → `scim.user_created`; `/scim/v2/Users/:userId` PUT/PATCH/DELETE → `scim.user_updated\|user_deleted`; `/scim/v2/Groups[/:groupId]` → `scim.group_created\|group_updated\|group_deleted`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `request-org` | `/enterprise/policy/set` → `policy.updated` (changed keys)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+
+Self-audited: `/enterprise/audit/export` → `audit.exported` (row count and range, written after
+the CSV is built, so an export never contains its own row; an export that cannot be recorded is
+not handed out); `/enterprise/audit/compact` and the compaction `/enterprise/audit/list`
+triggers → the retention anchor names the caller as its actor; `/enterprise/scim/tokens/*` →
+`scim.token_created|rotated|revoked`; `/enterprise/sso/test-login/finish` →
+`sso.test_login_passed`; `/enterprise/sso/register` forwards to `/sso/register`.
+
+**Actors.** The actor is the session making the request, never a field of the response (a role
+change is attributed to the admin who made it; the member whose role changed is the target,
+their user id in `metadata.targetUserId`). A request made through an impersonation session is
+`actorType: "impersonated"` with `actorId` = the impersonated user and
+`metadata.impersonatedBy` = the staff member; the explicit writers (`scim.token_*`,
+`sso.test_login_passed`, `api_key.revoked` from `/admin/*`) follow the same rule. Failed and
+refused sign-ins and 2FA-pending sign-ins are `actorType: "system"`, `actorId: null`, the user
+(when known) as the target, the address in `metadata.email` only when no user exists.
+
+**Not audited, by decision** (reasons in `UNAUDITED_PATHS`): reads, flow starts
+(`/sign-in/sso`, passkey option generation, `/two-factor/send-otp`, …), session preferences
+(`/organization/set-active`, `/update-session`), `/organization/create` (a new tenant; its chain
+starts with its first governed change), and path-less server-only endpoints (`auth.api.*`
+calls the product's own code makes — audit those where they are made). A social account link
+completes at `/callback/:id` without a session being minted and is recorded at
+`/link-social` only.
+
 ## Audit chain limits
 
+- **Unkeyed by default, which proves consistency, not authenticity.** Without
+  `audit.chainKey`, `hash = sha256(prev_hash + "\n" + canonical(row))`: anyone with database
+  write access — the DBA, a leaked database token, the very insider the log is meant to catch —
+  can rewrite an org's whole chain consistently (or drop its newest rows) and `verify` still
+  says `ok`. Two opt-in controls close that: **`audit.chainKey`** (≥ 32 characters, from your
+  secret store, independent of `secretsKey`/`scimCredentialHashSecret`) turns every link into
+  `hmac:` + HMAC-SHA256, which cannot be recomputed without the key — every writer in the
+  package uses it (the plugin, refusal rows, SCIM, API-key revocation, the portal wrappers;
+  they read it off the running instance, so none can forget it), and `/enterprise/audit/verify`
+  and `ab-enterprise audit-verify` (key from `AB_AUDIT_CHAIN_KEY`, never argv) verify under
+  it; and **head export** — `GET /enterprise/audit/head?orgId=` (owner/admin, `audit_log`)
+  returns the newest row's `seq`/`hash` and, with a key, a signature over them — which you store
+  off-box on a schedule and later check with `ab-enterprise audit-verify --org <id>
+--expect-head '<the JSON>'` (or `<seq>:<hash>`): a truncated or rewritten chain no longer holds
+  that row. **Adoption is monotonic**: once an org's chain has a keyed row, an unkeyed row after
+  it (or verification without the key) is reported as broken — so set the key once and never
+  remove it; rows written before it stay unkeyed and still verify.
 - The hash chain (`audit_event.prev_hash`/`hash`) is **per organization**, not global — `seq`
   restarts at 1 for each org, and `ab-enterprise audit-verify --org <id>` verifies one org's
   chain at a time.
@@ -457,7 +546,9 @@ WHERE k.expiresAt IS NULL;
   `metadata.lastHash` match the next row's `prev_hash`, and its `compactedCount` is
   unverifiable. That is weaker than the pre-C-02 chain for that one scenario and much stronger
   for the one that actually happens (routine retention, which used to report tampering
-  forever). A periodic signed off-box checkpoint is the post-v0.1 fix for both.
+  forever). With `audit.chainKey` the forged anchor needs the key; a head exported before the
+  compaction (`--expect-head`) is still checked against the anchor's `lastHash` when it was the
+  last row compacted, and is reported as unconfirmable otherwise.
 - **A sign-in-path audit write failure does not block sign-in.** Per the design's error-handling
   rule, an audit write failure on any admin/config-changing path fails that action; on the
   sign-in path specifically it is logged (`enterprise-audit: failed to write audit row`) and the
@@ -474,8 +565,10 @@ WHERE k.expiresAt IS NULL;
 the same `audit.retentionDays` setting described above (default 365 days, rolling deletion, per
 org). A product embedding this package is responsible for setting a retention period consistent
 with its own privacy policy and any data-subject-deletion obligations — this package has no
-separate "delete this user's audit history on request" primitive; a full org-level purge (delete
-the organization) removes its `audit_event` rows along with everything else scoped to that org.
+separate "delete this user's audit history on request" primitive. Deleting an organization does
+**not** delete its `audit_event` rows — its chain ends with an `org.deleted` row, so the
+deletion itself stays on record; a full purge deletes the org's `audit_event` rows explicitly
+(`DELETE FROM audit_event WHERE org_id = ?`) once your retention obligations allow it.
 
 ## Trusted publishing and npm provenance
 

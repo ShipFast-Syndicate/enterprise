@@ -66,11 +66,27 @@ describe("F-01 — JIT sign-up is bound to the signing provider's verified domai
     expect(await userRowsFor(t, "ceo@acme.test")).toBe(0);
     expect(provisionUser).not.toHaveBeenCalled();
 
-    // The failure is attributed to the *attacker's* org in the audit log.
+    // The refusal is a policy refusal (`SSO_DOMAIN_NOT_ALLOWED`), audited as
+    // `auth.sign_in_refused` (PR-6, R6) — in the *attacker's* org (the
+    // signing provider's) **and** in the victim org that owns the domain of
+    // the address the IdP asserted, which before saw nothing of the squat.
+    // No `auth.sso_sign_in_failed` row is written for it on top.
+    const refusedRows = await t.client.execute({
+      sql: `SELECT org_id, target_id, metadata FROM audit_event WHERE action = 'auth.sign_in_refused' ORDER BY org_id`,
+    });
+    expect(refusedRows.rows.map((r) => r.org_id)).toEqual([evilOrg, acmeOrg].sort());
+    for (const row of refusedRows.rows) {
+      expect(row.target_id).toBeNull(); // no user was created
+      expect(JSON.parse(String(row.metadata))).toMatchObject({
+        code: "SSO_DOMAIN_NOT_ALLOWED",
+        providerId: "evil-oidc",
+        email: "ceo@acme.test",
+      });
+    }
     const failed = await t.client.execute({
       sql: `SELECT org_id FROM audit_event WHERE action = 'auth.sso_sign_in_failed'`,
     });
-    expect(failed.rows.map((r) => r.org_id)).toEqual([evilOrg]);
+    expect(failed.rows).toEqual([]);
 
     issuer.setUser({ sub: "ceo-real", email: "ceo@acme.test" });
     const real = await driveSsoSignIn(t, issuer, "acme-oidc");

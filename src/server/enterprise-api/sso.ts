@@ -440,10 +440,13 @@ function buildTestLoginFinishEndpoint() {
       // path to forward through): `writeAudit` is `../audit/chain.ts`'s
       // public, framework-agnostic append primitive, safe to call directly.
       const { writeAudit } = await import("../audit/chain");
+      const { sessionActor } = await import("../audit/plugin");
+      const actor = sessionActor(session);
       await writeAudit(fullCtx, {
         orgId,
-        actorType: "user",
-        actorId: session.user.id,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        metadata: actor.metadata,
         action: "sso.test_login_passed",
         targetType: "sso_provider",
         targetId: providerId,
