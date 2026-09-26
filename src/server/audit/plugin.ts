@@ -76,7 +76,14 @@ import {
   type AuditRow,
   type CompactionResult,
 } from "./chain";
-import { auditStashOf, SIGN_IN_REFUSED_ACTION, type EnterpriseAuditStash } from "./refusal";
+import { auditInBackground } from "./background";
+import { auditChangedKeys, auditCode, auditEmail, auditToken, auditUserAgent } from "./bounds";
+import {
+  auditStashOf,
+  isNotedPolicyRefusal,
+  SIGN_IN_REFUSED_ACTION,
+  type EnterpriseAuditStash,
+} from "./refusal";
 import {
   auditEntryFor,
   POLICY_REFUSAL_CODES,
@@ -259,7 +266,9 @@ const TWO_FACTOR_COOKIE = "two_factor";
  * will read it: the body's `email`, the magic link's pending verification
  * value, the 2FA challenge cookie's verification value, the password-reset
  * token's verification value, the e-mail-verification token's address.
- * Read-only — nothing is consumed.
+ * Read-only — nothing is consumed. An address is taken only when it is a
+ * valid e-mail address (`auditEmail`): anything else names no subject, so
+ * no organization is resolved from it and no row records it.
  */
 async function subjectHintOf(
   ctx: GenericEndpointContext,
@@ -268,7 +277,9 @@ async function subjectHintOf(
   const body = record(ctx.body);
   const query = record(ctx.query);
   if (path === "/magic-link/verify") {
-    const email = await resolveMagicLinkEmail(ctx, query as { token?: unknown } | undefined);
+    const email = auditEmail(
+      await resolveMagicLinkEmail(ctx, query as { token?: unknown } | undefined),
+    );
     return email ? { email } : null;
   }
   if (path.startsWith("/two-factor/verify-")) {
@@ -287,11 +298,11 @@ async function subjectHintOf(
     return str(value?.value) ? { userId: value!.value } : null;
   }
   if (path === "/verify-email") {
-    const email = emailFromVerificationJwt(query?.token);
+    const email = auditEmail(emailFromVerificationJwt(query?.token));
     return email ? { email } : null;
   }
-  const email = str(body?.email);
-  return email ? { email: email.toLowerCase() } : null;
+  const email = auditEmail(body?.email);
+  return email ? { email } : null;
 }
 
 async function providerOf(
@@ -436,19 +447,27 @@ interface Failure {
  * success *and* failure alike, so a redirect is a failure only when its
  * target carries an `error` parameter; any other `APIError` is a failure
  * with its body `code` (or its status).
+ *
+ * A redirect's target starts with a URL the caller supplied
+ * (`errorCallbackURL`/`callbackURL`), which may already carry `error=`
+ * parameters of its own; upstream *appends* its error to it
+ * (`appendQueryParams`, the SSO plugin's `errorRedirectUrl`), so the code
+ * is the **last** `error` value. Whatever it is, it is only a label
+ * (bounded by `auditCode`): whether a failure is a policy refusal is never
+ * read from it (`isPolicyRefusal`).
  */
 function failureOf(returned: unknown): Failure | null {
   if (!isAPIError(returned)) return null;
   const headers = (returned as { headers?: unknown }).headers;
   const location = headers instanceof Headers ? headers.get("location") : null;
   if (location) {
-    let error: string | null = null;
+    let error: string | undefined;
     try {
-      error = new URL(location, "http://localhost").searchParams.get("error");
+      error = new URL(location, "http://localhost").searchParams.getAll("error").at(-1);
     } catch {
-      error = null;
+      error = undefined;
     }
-    return error ? { code: error, redirect: true } : null;
+    return error ? { code: auditCode(error), redirect: true } : null;
   }
   const body = (returned as { body?: { code?: unknown } }).body;
   const code =
@@ -458,7 +477,18 @@ function failureOf(returned: unknown): Failure | null {
         (returned as { statusCode?: unknown }).statusCode ??
         "ERROR",
     );
-  return { code, redirect: false };
+  return { code: auditCode(code), redirect: false };
+}
+
+/**
+ * A failure is a policy refusal only when this package's own code refused
+ * the request with that code (`policyRefusal`, `../audit/refusal.ts`) —
+ * never because the code appears in a redirect URL or an error body, which
+ * a caller can shape (a callback URL carrying `?error=SSO_REQUIRED`, an IdP
+ * error response naming a policy code).
+ */
+function isPolicyRefusal(ctx: GenericEndpointContext, failure: Failure): boolean {
+  return POLICY_REFUSAL_CODES.has(failure.code) && isNotedPolicyRefusal(ctx, failure.code);
 }
 
 /**
@@ -482,7 +512,10 @@ const SSO_CALLBACK_PATHS = new Set([
  * Paths where an audit-write failure is logged and swallowed rather than
  * failing the request (ruling e): the sign-in family and the other
  * unauthenticated account flows — an audit hiccup must never block
- * sign-in/out. Everything else answers 500 `AUDIT_WRITE_FAILED`.
+ * sign-in/out. Everything else answers 500 `AUDIT_WRITE_FAILED` — after the
+ * endpoint's change is already committed (the after-hook runs once it has
+ * returned), so the 500 reports a missing row, it does not undo the change.
+ * docs/security.md ("Audit log coverage") lists both sets.
  */
 function writeFailureIsSoft(path: string, entry: AuditedPath | null): boolean {
   if (!entry || entry.kind === "session") return true;
@@ -497,7 +530,7 @@ function writeFailureIsSoft(path: string, entry: AuditedPath | null): boolean {
 }
 
 /** Keys (never values) a write request changed: top-level body keys, and one level into nested objects. */
-function changedKeys(body: unknown, exclude: readonly string[]): string[] {
+function changedKeyPaths(body: unknown, exclude: readonly string[]): string[] {
   const source = record(body);
   if (!source) return [];
   const keys: string[] = [];
@@ -516,10 +549,18 @@ function changedKeys(body: unknown, exclude: readonly string[]): string[] {
   return keys.sort();
 }
 
+/** `{ changed, changedCount? }` for the keys a write request changed, bounded (`auditChangedKeys`). */
+function changedKeys(
+  body: unknown,
+  exclude: readonly string[],
+): { changed: string[]; changedCount?: number } {
+  return auditChangedKeys(changedKeyPaths(body, exclude));
+}
+
 function requestMeta(ctx: GenericEndpointContext): { ip: string | null; userAgent: string | null } {
   return {
     ip: ctx.request ? (getIP(ctx.request, ctx.context.options) ?? null) : null,
-    userAgent: ctx.request?.headers.get("user-agent") ?? null,
+    userAgent: auditUserAgent(ctx.request?.headers.get("user-agent")),
   };
 }
 
@@ -616,6 +657,11 @@ function methodOf(a: AuditCtx, userId: string | null): string | null {
       : null;
 }
 
+/** The provider an SSO callback names, as recorded (a short token, else `null`). */
+async function callbackProviderId(ctx: GenericEndpointContext): Promise<string | null> {
+  return auditToken(await resolveSsoCallbackProviderId(ctx).catch(() => null));
+}
+
 async function auditSessionMinted(a: AuditCtx, minted: MintedSession): Promise<void> {
   const { ctx, path, entry, stash } = a;
   const userId = minted.user.id;
@@ -626,7 +672,7 @@ async function auditSessionMinted(a: AuditCtx, minted: MintedSession): Promise<v
     action = "user.email_verified";
   }
   const sso = SSO_CALLBACK_PATHS.has(path);
-  const providerId = sso ? await resolveSsoCallbackProviderId(ctx).catch(() => null) : null;
+  const providerId = sso ? await callbackProviderId(ctx) : null;
   const orgIds = await safeOrgIds(ctx, { userId, email: minted.user.email ?? null });
   if (sso) orgIds.push(...[await providerOrgId(ctx, providerId)].filter((x): x is string => !!x));
   const actor = sessionActor({ session: minted.session, user: minted.user });
@@ -654,23 +700,23 @@ async function auditSessionMinted(a: AuditCtx, minted: MintedSession): Promise<v
 
 /**
  * Failed, refused and 2FA-pending sign-ins are about an address the caller
- * chose; the lookups and writes behind them go through better-auth's
- * `runInBackgroundOrAwait`, so a product that configures
- * `advanced.backgroundTasks` answers in the same time whether or not the
- * address has an account or organizations (without it they are awaited, as
- * upstream awaits its own e-mail sends).
+ * chose; the lookups and writes behind them always run off the response
+ * path (`auditInBackground` — better-auth's `runInBackground`: the product's
+ * `advanced.backgroundTasks.handler`, else a detached promise), so the
+ * response takes the same time whether or not the address has an account or
+ * organizations.
  */
-async function auditSignInFailure(a: AuditCtx, failure: Failure): Promise<void> {
+function auditSignInFailure(a: AuditCtx, failure: Failure): void {
   const { ctx, stash } = a;
   if (stash.refusalWritten) return; // a `hooks.before` handler already recorded this refusal
-  await ctx.context.runInBackgroundOrAwait(writeSignInFailure(a, failure));
+  const refused = isPolicyRefusal(ctx, failure);
+  auditInBackground(ctx, () => writeSignInFailure(a, failure, refused));
 }
 
-async function writeSignInFailure(a: AuditCtx, failure: Failure): Promise<void> {
+async function writeSignInFailure(a: AuditCtx, failure: Failure, refused: boolean): Promise<void> {
   const { ctx, path, stash } = a;
-  const refused = POLICY_REFUSAL_CODES.has(failure.code);
   const sso = SSO_CALLBACK_PATHS.has(path);
-  const providerId = sso ? await resolveSsoCallbackProviderId(ctx).catch(() => null) : null;
+  const providerId = sso ? await callbackProviderId(ctx) : null;
   const subject = await failedSubject(ctx, stash);
   const orgIds = await safeOrgIds(ctx, subject);
   if (sso) orgIds.push(...[await providerOrgId(ctx, providerId)].filter((x): x is string => !!x));
@@ -716,8 +762,8 @@ async function writeSignInFailure(a: AuditCtx, failure: Failure): Promise<void> 
   );
 }
 
-async function auditTwoFactorPending(a: AuditCtx): Promise<void> {
-  await a.ctx.context.runInBackgroundOrAwait(writeTwoFactorPending(a));
+function auditTwoFactorPending(a: AuditCtx): void {
+  auditInBackground(a.ctx, () => writeTwoFactorPending(a));
 }
 
 async function writeTwoFactorPending(a: AuditCtx): Promise<void> {
@@ -743,33 +789,39 @@ async function writeTwoFactorPending(a: AuditCtx): Promise<void> {
 }
 
 async function auditSignInStep(a: AuditCtx): Promise<void> {
-  const { ctx, path, stash, returned, entry } = a;
+  const { ctx, path, stash, returned } = a;
   const minted = await mintedSession(ctx, stash);
   if (minted) return auditSessionMinted(a, minted);
   if (record(returned)?.twoFactorRedirect === true) return auditTwoFactorPending(a);
   const failure = failureOf(returned);
   if (failure) return auditSignInFailure(a, failure);
-  // Succeeded without minting a session.
+  // Succeeded without minting a session — a sign-up that answers the same
+  // way for a taken address (upstream's generic duplicate response), or a
+  // verification link: off the response path like the failures.
   if (path === "/sign-up/email" || path === "/verify-email") {
-    const userId =
-      extractId(record(returned)?.user) ?? (await failedSubject(ctx, stash)).userId ?? null;
-    if (!userId) return;
-    await writeRows(
-      ctx,
-      await safeOrgIds(ctx, { userId }),
-      {
-        actorType: "system",
-        actorId: null,
-        action:
-          path === "/sign-up/email" ? (entry?.action ?? "auth.sign_up") : "user.email_verified",
-        targetType: "user",
-        targetId: userId,
-        ...requestMeta(ctx),
-        metadata: {},
-      },
-      { soft: true, expectOrg: false, path },
-    );
+    auditInBackground(ctx, () => writeSignUpOrVerification(a));
   }
+}
+
+async function writeSignUpOrVerification(a: AuditCtx): Promise<void> {
+  const { ctx, path, stash, returned, entry } = a;
+  const userId =
+    extractId(record(returned)?.user) ?? (await failedSubject(ctx, stash)).userId ?? null;
+  if (!userId) return;
+  await writeRows(
+    ctx,
+    await safeOrgIds(ctx, { userId }),
+    {
+      actorType: "system",
+      actorId: null,
+      action: path === "/sign-up/email" ? (entry?.action ?? "auth.sign_up") : "user.email_verified",
+      targetType: "user",
+      targetId: userId,
+      ...requestMeta(ctx),
+      metadata: {},
+    },
+    { soft: true, expectOrg: false, path },
+  );
 }
 
 function routeParamId(ctx: GenericEndpointContext): string | null {
@@ -781,7 +833,7 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
   const { ctx, path, stash, returned } = a;
   const failure = failureOf(returned);
   if (failure) {
-    if (POLICY_REFUSAL_CODES.has(failure.code)) await auditSignInFailure(a, failure);
+    if (isPolicyRefusal(ctx, failure)) auditSignInFailure(a, failure);
     return;
   }
   const body = record(ctx.body);
@@ -808,7 +860,7 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
     case "request-org":
       orgIds = [str(body?.orgId) ?? str(body?.organizationId)];
       targetId = orgIds[0] ?? null;
-      metadata.changed = changedKeys(body, ["orgId", "organizationId"]);
+      Object.assign(metadata, changedKeys(body, ["orgId", "organizationId"]));
       break;
     case "provider": {
       const providerId = stash.provider?.providerId ?? str(body?.providerId) ?? routeParamId(ctx);
@@ -819,7 +871,7 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
       orgIds = [orgId];
       targetId = providerId;
       if (path === "/sso/update-provider") {
-        metadata.changed = changedKeys(body, ["providerId"]);
+        Object.assign(metadata, changedKeys(body, ["providerId"]));
       }
       if (path === "/sso/delete-provider") {
         metadata.linkedAccounts = stash.provider?.linkedAccounts ?? 0;
@@ -843,7 +895,7 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
           : sessionActor(stash.session);
       }
       if (path === "/admin/set-role") metadata.role = body?.role ?? null;
-      if (path === "/admin/update-user") metadata.changed = changedKeys(body?.data, []);
+      if (path === "/admin/update-user") Object.assign(metadata, changedKeys(body?.data, []));
       break;
     }
     case "resource": {
@@ -851,7 +903,7 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
       const returnedBody = record(returned);
       if (path === "/organization/update" || path === "/organization/delete") {
         targetId = orgIds[0] ?? null;
-        if (path === "/organization/update") metadata.changed = changedKeys(body?.data, []);
+        if (path === "/organization/update") Object.assign(metadata, changedKeys(body?.data, []));
       } else if (path === "/organization/update-member-role") {
         // F-09: the target is the member whose role changed, the actor the
         // caller — never the `userId` on the returned member row.
@@ -884,32 +936,30 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
       if (REQUEST_NAMES_SUBJECT.has(path)) {
         // The address/token in the request is who this is about — never the
         // session of whoever sent it. An outcome for an arbitrary address:
-        // looked up and written off the response path when the product runs
-        // background tasks, so the response time does not depend on whether
-        // the address has an account or organizations.
+        // looked up and written off the response path (`auditInBackground`),
+        // so the response time does not depend on whether the address has
+        // an account or organizations.
         const requestActor = actor;
-        await ctx.context.runInBackgroundOrAwait(
-          (async () => {
-            const subject = await failedSubject(ctx, stash);
-            await writeRows(
-              ctx,
-              await safeOrgIds(ctx, subject),
-              {
-                actorType: requestActor.actorType,
-                actorId: requestActor.actorId,
-                action,
-                targetType,
-                targetId: subject.userId,
-                ...meta,
-                metadata: {
-                  ...requestActor.metadata,
-                  ...(subject.userId === null && subject.email ? { email: subject.email } : {}),
-                },
+        auditInBackground(ctx, async () => {
+          const subject = await failedSubject(ctx, stash);
+          await writeRows(
+            ctx,
+            await safeOrgIds(ctx, subject),
+            {
+              actorType: requestActor.actorType,
+              actorId: requestActor.actorId,
+              action,
+              targetType,
+              targetId: subject.userId,
+              ...meta,
+              metadata: {
+                ...requestActor.metadata,
+                ...(subject.userId === null && subject.email ? { email: subject.email } : {}),
               },
-              { soft: true, expectOrg: false, path },
-            );
-          })(),
-        );
+            },
+            { soft: true, expectOrg: false, path },
+          );
+        });
         return;
       }
       const subject = stash.session
@@ -920,12 +970,12 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
       if (path === "/delete-user" && record(returned)?.message === "Verification email sent") {
         action = "user.deletion_requested";
       }
-      if (path === "/update-user") metadata.changed = changedKeys(body, []);
+      if (path === "/update-user") Object.assign(metadata, changedKeys(body, []));
       if (path === "/unlink-account") metadata.providerId = str(body?.providerId);
       if (path.startsWith("/api-key/")) {
         targetType = "api_key";
         targetId = extractId(returned) ?? str(body?.keyId);
-        if (path === "/api-key/update") metadata.changed = changedKeys(body, ["keyId"]);
+        if (path === "/api-key/update") Object.assign(metadata, changedKeys(body, ["keyId"]));
       }
       if (path.startsWith("/passkey/")) {
         targetId = extractId(returned) ?? str(body?.id) ?? null;
@@ -956,7 +1006,7 @@ async function auditUnlistedPath(a: AuditCtx): Promise<void> {
   const minted = await mintedSession(ctx, stash);
   if (minted) return auditSessionMinted(a, minted);
   const failure = failureOf(returned);
-  if (failure && POLICY_REFUSAL_CODES.has(failure.code)) await auditSignInFailure(a, failure);
+  if (failure && isPolicyRefusal(ctx, failure)) auditSignInFailure(a, failure);
 }
 
 /**
@@ -978,11 +1028,12 @@ async function compactExpired(
 ): Promise<CompactionResult | null> {
   const retentionDays = opts.audit?.retentionDays ?? 365;
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
-  // The anchor that replaces the deleted rows names who deleted them (F-13).
+  // The anchor that replaces the deleted rows names who deleted them (F-13)
+  // — under impersonation, the staff member too (`metadata.impersonatedBy`).
   const actor = sessionActor(ctx.context.session as SessionLike | null);
   return compactChain(ctx, orgId, cutoff, {
     chainKey: opts.audit?.chainKey,
-    actor: { actorType: actor.actorType, actorId: actor.actorId },
+    actor: { actorType: actor.actorType, actorId: actor.actorId, metadata: actor.metadata },
   });
 }
 
@@ -1066,7 +1117,7 @@ const listQuerySchema = z.object({
   actorId: z.string().optional(),
   from: z.coerce.number().optional(),
   to: z.coerce.number().optional(),
-  cursor: z.string().optional(),
+  cursor: z.coerce.number().int().optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
@@ -1139,7 +1190,7 @@ export function auditLog(opts: EnterpriseOptions) {
       await compactExpired(ctx as unknown as GenericEndpointContext, orgId, opts);
 
       const where = buildWhere(orgId, { action, actorId, from, to });
-      if (cursor) where.push({ field: "seq", value: Number(cursor), operator: "lt" });
+      if (cursor !== undefined) where.push({ field: "seq", value: cursor, operator: "lt" });
 
       const rows = await ctx.context.adapter.findMany<AuditEventRow>({
         model: "auditEvent",
@@ -1345,9 +1396,8 @@ export function auditLog(opts: EnterpriseOptions) {
                   user: { email?: unknown },
                   ctx: GenericEndpointContext | null | undefined,
                 ) => {
-                  if (ctx?.context && typeof user.email === "string") {
-                    stashOf(ctx).dbUserEmail = user.email.toLowerCase();
-                  }
+                  const email = auditEmail(user.email);
+                  if (ctx?.context && email) stashOf(ctx).dbUserEmail = email;
                 },
               },
             },

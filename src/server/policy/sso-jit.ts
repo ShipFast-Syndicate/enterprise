@@ -41,6 +41,7 @@
 
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, getOAuthState } from "better-auth/api";
+import { policyRefusal } from "../audit/refusal";
 import type { EnterpriseOptions } from "../types";
 import { issuerNotAllowedError, storedProviderAllowed } from "../sso-domain";
 import { domainMatches, emailDomain } from "./domains";
@@ -171,17 +172,21 @@ export function providerAuthorizesEmail(
 }
 
 export function ssoProviderUnresolvedError(): APIError {
-  return new APIError("FORBIDDEN", {
-    code: "SSO_PROVIDER_UNRESOLVED",
-    message: "The SSO provider for this sign-in could not be determined.",
-  });
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "SSO_PROVIDER_UNRESOLVED",
+      message: "The SSO provider for this sign-in could not be determined.",
+    }),
+  );
 }
 
 export function ssoDomainNotAllowedError(): APIError {
-  return new APIError("FORBIDDEN", {
-    code: "SSO_DOMAIN_NOT_ALLOWED",
-    message: "This identity provider is not verified for your e-mail domain.",
-  });
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "SSO_DOMAIN_NOT_ALLOWED",
+      message: "This identity provider is not verified for your e-mail domain.",
+    }),
+  );
 }
 
 /** `true` unless the operator switched the binding off (`sso.domainBinding: "off"`, warned about at construction — `../options.ts`). */

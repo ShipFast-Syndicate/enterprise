@@ -467,11 +467,17 @@ function nextSeqBaseOf(row: {
  * key — no enterprise plugin carrying `audit.chainKey` — writes unkeyed.
  *
  * `actor` is the caller a compaction anchor is attributed to (the operator
- * or admin who ran it); without one the anchor is a `system` row.
+ * or admin who ran it); without one the anchor is a `system` row. Its
+ * `metadata` (e.g. `{ impersonatedBy }` for an impersonation session) is
+ * merged into the anchor's metadata, under the anchor's own keys.
  */
 export interface ChainWriteOptions {
   chainKey?: string;
-  actor?: { actorType: AuditActorType; actorId: string | null };
+  actor?: {
+    actorType: AuditActorType;
+    actorId: string | null;
+    metadata?: Record<string, unknown>;
+  };
 }
 
 /** Plugin ids whose `options` carry the deployment's `EnterpriseOptions` (and so `audit.chainKey`). */
@@ -684,6 +690,9 @@ export async function compactChain(
       ip: null,
       userAgent: null,
       metadata: {
+        // Who ran it first, so the anchor's own keys — the ones
+        // `verifyChainPage` re-anchors on — can never be overridden.
+        ...options.actor?.metadata,
         compactedThroughSeq: through.seq,
         compactedCount,
         lastHash: through.hash,

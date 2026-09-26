@@ -35,6 +35,7 @@ import type { AuthContext, BetterAuthPlugin, GenericEndpointContext } from "bett
 import { APIError, createAuthMiddleware, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { writeAudit, type AuditActorType, type ChainWriteOptions } from "./audit/chain";
 import { sessionActor } from "./audit/plugin";
+import { policyRefusal } from "./audit/refusal";
 import {
   resolvePolicyOrgsForUser,
   resolveTwoFactorStanding,
@@ -160,17 +161,19 @@ export async function apiKeyOwnerTwoFactorStanding(
 }
 
 function apiKeyTwoFactorError(standing: Exclude<TwoFactorStanding, "ok">): APIError {
-  return standing === "enrollment-required"
-    ? new APIError("FORBIDDEN", {
-        code: "TWO_FACTOR_ENROLLMENT_REQUIRED",
-        message:
-          "The owner of this API key must enrol a second factor, which their organization requires, before the key can be used.",
-      })
-    : new APIError("FORBIDDEN", {
-        code: "TWO_FACTOR_REQUIRED",
-        message:
-          "This API key was created before its owner's organization required two-factor authentication. Create a new key from a session that satisfies the requirement.",
-      });
+  return policyRefusal(
+    standing === "enrollment-required"
+      ? new APIError("FORBIDDEN", {
+          code: "TWO_FACTOR_ENROLLMENT_REQUIRED",
+          message:
+            "The owner of this API key must enrol a second factor, which their organization requires, before the key can be used.",
+        })
+      : new APIError("FORBIDDEN", {
+          code: "TWO_FACTOR_REQUIRED",
+          message:
+            "This API key was created before its owner's organization required two-factor authentication. Create a new key from a session that satisfies the requirement.",
+        }),
+  );
 }
 
 /**

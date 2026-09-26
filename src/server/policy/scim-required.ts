@@ -47,6 +47,7 @@
 
 import type { GenericEndpointContext } from "better-auth";
 import { APIError } from "better-auth/api";
+import { policyRefusal } from "../audit/refusal";
 import { findOrgsByEmailDomain } from "./home-realm";
 
 export function isSsoCallbackPath(path: string | undefined): boolean {
@@ -88,10 +89,12 @@ export function buildScimRequiredUserCreateBeforeHook() {
       });
       if (!scimManagedConnection) continue;
 
-      throw new APIError("FORBIDDEN", {
-        code: "SCIM_PROVISIONING_REQUIRED",
-        message: "Your account was not provisioned by your IT admin",
-      });
+      throw policyRefusal(
+        new APIError("FORBIDDEN", {
+          code: "SCIM_PROVISIONING_REQUIRED",
+          message: "Your account was not provisioned by your IT admin",
+        }),
+      );
     }
   };
 }

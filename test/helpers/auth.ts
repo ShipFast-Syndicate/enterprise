@@ -15,6 +15,7 @@ import { drizzle } from "drizzle-orm/libsql";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import { applyMigration, enterpriseSchema } from "../../src/schema";
 import { enterprisePreset } from "../../src/server/preset";
+import { flushAuditWrites } from "../../src/server/audit/background";
 import type { EnterpriseOptions, Feature } from "../../src/server/types";
 
 const databases: { client: Client; directory: string }[] = [];
@@ -263,6 +264,19 @@ export async function makeAuth(
     database: drizzleAdapter(db, { provider: "sqlite", transaction: true }),
     ...baseOptions,
   });
+  // Audit rows about an address the caller chose (failed/refused/2FA-pending
+  // sign-ins, magic-link and password-reset requests) are written off the
+  // response path (`src/server/audit/background.ts`). The test handler waits
+  // for them after every response — what a product's
+  // `advanced.backgroundTasks` (e.g. `waitUntil`) does for the runtime — so
+  // assertions read a settled chain; `rawHandler` answers without waiting,
+  // for the tests that measure exactly that.
+  const rawHandler = auth.handler.bind(auth);
+  auth.handler = async (request: Request) => {
+    const response = await rawHandler(request);
+    await flushAuditWrites();
+    return response;
+  };
   await applyMigrations(ddl, client);
   // Real migration (ruling (a)): creates org_policy/audit_event/scim_group
   // and adds the two studio_ref columns, now that user/organization exist.
@@ -337,7 +351,7 @@ export async function makeAuth(
       ),
   };
 
-  return { auth, db, client, api, entitled };
+  return { auth, db, client, api, entitled, rawHandler };
 }
 
 export type TestAuth = Awaited<ReturnType<typeof makeAuth>>;

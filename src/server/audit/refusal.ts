@@ -17,13 +17,18 @@
 // not write a second one if the refusal reaches it anyway.
 
 import type { GenericEndpointContext } from "better-auth";
-import { getIP } from "better-auth/api";
+import { getIP, type APIError } from "better-auth/api";
+import { tryGetCurrentAuthEndpointContext } from "@better-auth/core/context";
+import { auditInBackground } from "./background";
+import { auditEmail, auditUserAgent } from "./bounds";
 import { writeAudit } from "./chain";
 
 /** Per-request scratch the audit hooks share (kept on the request's own `ctx.context`). */
 export interface EnterpriseAuditStash {
   /** Set once a `hooks.before` handler already wrote the refusal row for this request. */
   refusalWritten?: boolean;
+  /** Policy codes this package's own code refused the request with (`policyRefusal`). */
+  policyRefusalCodes?: Set<string>;
   /** Anything the audit plugin's own `hooks.before` resolved before the endpoint ran. */
   [key: string]: unknown;
 }
@@ -40,6 +45,36 @@ export function auditStashOf(ctx: { context: unknown }): EnterpriseAuditStash {
     context[AUDIT_STASH_KEY] = stash;
   }
   return stash;
+}
+
+/**
+ * Marks `error` — a policy refusal this package raises — on the audit stash
+ * of the request it is raised in, and returns it unchanged. The audit
+ * after-hook records a failure as a refusal (`auth.sign_in_refused`) only
+ * when its code was marked this way during the same request, never because
+ * a code appears in a redirect URL or an error body: callers can put any
+ * `error=` they like into a callback URL or an IdP error response, but only
+ * this package's own code can mark the stash. The request is the one
+ * better-auth is dispatching (`tryGetCurrentAuthEndpointContext`, the
+ * endpoint context the hooks and `databaseHooks` of that request share).
+ */
+export function policyRefusal<E extends APIError>(error: E): E {
+  const code = (error.body as { code?: unknown } | undefined)?.code;
+  if (typeof code === "string") notePolicyRefusal(code);
+  return error;
+}
+
+/** `policyRefusal` for a refusal this package hands to upstream as a code (the SSO `resolveUser` hook). */
+export function notePolicyRefusal(code: string): void {
+  const endpointCtx = tryGetCurrentAuthEndpointContext();
+  if (!endpointCtx?.context) return;
+  const stash = auditStashOf(endpointCtx);
+  (stash.policyRefusalCodes ??= new Set()).add(code);
+}
+
+/** Whether this package's own code refused the request with `code` (see `policyRefusal`). */
+export function isNotedPolicyRefusal(ctx: { context: unknown }, code: string): boolean {
+  return auditStashOf(ctx).policyRefusalCodes?.has(code) === true;
 }
 
 /** A refused **sign-in** (no session was minted). */
@@ -99,7 +134,12 @@ export function resetSessionRefusalThrottleForTest(): void {
  * policy produced it, keyed with the deployment's `audit.chainKey`. Never
  * throws — a failure to audit must not turn a refusal into a success — and
  * must be awaited *before* the caller throws its `APIError`. Sets the
- * request's `refusalWritten` flag once a row was written.
+ * request's `refusalWritten` flag.
+ *
+ * A refused sign-in is about an address the caller chose, so its rows are
+ * written off the response path (`auditInBackground`). An address that is
+ * not a valid e-mail address (`auditEmail`) names no subject: with no known
+ * user, nothing is written.
  */
 export async function auditRefusal(
   ctx: GenericEndpointContext,
@@ -108,23 +148,25 @@ export async function auditRefusal(
   const kind = input.kind ?? "sign-in";
   const action = kind === "session" ? SESSION_REFUSED_ACTION : SIGN_IN_REFUSED_ACTION;
   const userId = input.userId ?? null;
+  const email = auditEmail(input.email);
+  if (userId === null && input.email != null && email === null) {
+    ctx.context.logger.debug(
+      `enterprise-audit: ${action} (${input.code}) on ${input.path} names no valid address; nothing written`,
+    );
+    return;
+  }
   const request = ctx.request;
   const ip = request ? (getIP(request, ctx.context.options) ?? null) : null;
-  const userAgent = request?.headers.get("user-agent") ?? null;
+  const userAgent = auditUserAgent(request?.headers.get("user-agent"));
   const metadata: Record<string, unknown> = {
     ...input.metadata,
     code: input.code,
     path: input.path,
     ...(input.method ? { method: input.method } : {}),
-    ...(userId === null && input.email ? { email: input.email } : {}),
+    ...(userId === null && email ? { email } : {}),
   };
-  const now = Date.now();
-  let wrote = false;
-  for (const orgId of new Set(input.orgIds)) {
-    if (kind === "session" && throttledSessionRefusal(`${orgId}\n${userId}\n${input.code}`, now)) {
-      wrote = true; // already on record for this window — the request still counts as audited
-      continue;
-    }
+  const orgIds = [...new Set(input.orgIds)];
+  const write = async (orgId: string): Promise<boolean> => {
     try {
       await writeAudit(ctx, {
         orgId,
@@ -137,13 +179,31 @@ export async function auditRefusal(
         userAgent,
         metadata,
       });
-      wrote = true;
+      return true;
     } catch (err) {
       ctx.context.logger.error(
         `enterprise-audit: failed to write ${action} (${input.code}) for org ${orgId}`,
         err,
       );
+      return false;
     }
+  };
+  if (kind === "sign-in") {
+    if (orgIds.length === 0) return;
+    auditStashOf(ctx).refusalWritten = true;
+    auditInBackground(ctx, async () => {
+      for (const orgId of orgIds) await write(orgId);
+    });
+    return;
+  }
+  const now = Date.now();
+  let wrote = false;
+  for (const orgId of orgIds) {
+    if (throttledSessionRefusal(`${orgId}\n${userId}\n${input.code}`, now)) {
+      wrote = true; // already on record for this window — the request still counts as audited
+      continue;
+    }
+    if (await write(orgId)) wrote = true;
   }
   if (wrote) auditStashOf(ctx).refusalWritten = true;
 }

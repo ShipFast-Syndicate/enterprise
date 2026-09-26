@@ -38,7 +38,7 @@
 
 import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
-import { auditRefusal } from "../audit/refusal";
+import { auditRefusal, policyRefusal } from "../audit/refusal";
 import type { EnterpriseOptions } from "../types";
 import { findOrgsByEmailDomain } from "./home-realm";
 import { isSsoCallbackPath } from "./scim-required";
@@ -274,17 +274,21 @@ export function deriveSessionCreateMethod(
 // --- shared refusal helpers ------------------------------------------------
 
 function ssoRequiredError(): APIError {
-  return new APIError("FORBIDDEN", {
-    code: "SSO_REQUIRED",
-    message: "Your organization requires SSO through its own identity provider",
-  });
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "SSO_REQUIRED",
+      message: "Your organization requires SSO through its own identity provider",
+    }),
+  );
 }
 
 function methodNotAllowedError(method: string): APIError {
-  return new APIError("FORBIDDEN", {
-    code: "METHOD_NOT_ALLOWED",
-    message: `Sign-in method "${method}" is not allowed for this organization.`,
-  });
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "METHOD_NOT_ALLOWED",
+      message: `Sign-in method "${method}" is not allowed for this organization.`,
+    }),
+  );
 }
 
 /**
@@ -317,10 +321,12 @@ export function twoFactorSatisfiedBy(opts?: EnterpriseOptions): readonly string[
 }
 
 function twoFactorRequiredError(method: string): APIError {
-  return new APIError("FORBIDDEN", {
-    code: "TWO_FACTOR_REQUIRED",
-    message: `Your organization requires two-factor authentication; sign-in method "${method}" does not provide one.`,
-  });
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "TWO_FACTOR_REQUIRED",
+      message: `Your organization requires two-factor authentication; sign-in method "${method}" does not provide one.`,
+    }),
+  );
 }
 
 /**
@@ -860,12 +866,14 @@ export function twoFactorEnrollmentAllowedPaths(opts?: EnterpriseOptions): Reado
 }
 
 function twoFactorEnrollmentRequiredError(allowed: ReadonlySet<string>): APIError {
-  return new APIError("FORBIDDEN", {
-    code: "TWO_FACTOR_ENROLLMENT_REQUIRED",
-    message:
-      "Your organization requires two-factor authentication. Enrol a second factor to continue.",
-    enrollmentPaths: [...allowed],
-  });
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "TWO_FACTOR_ENROLLMENT_REQUIRED",
+      message:
+        "Your organization requires two-factor authentication. Enrol a second factor to continue.",
+      enrollmentPaths: [...allowed],
+    }),
+  );
 }
 
 /**
@@ -875,11 +883,13 @@ function twoFactorEnrollmentRequiredError(allowed: ReadonlySet<string>): APIErro
  * `TWO_FACTOR_REQUIRED`, the same code the create hook uses.
  */
 export function sessionTwoFactorRequiredError(): APIError {
-  return new APIError("FORBIDDEN", {
-    code: "TWO_FACTOR_REQUIRED",
-    message:
-      "Your organization requires two-factor authentication, which this session was not signed in with. Sign in again.",
-  });
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "TWO_FACTOR_REQUIRED",
+      message:
+        "Your organization requires two-factor authentication, which this session was not signed in with. Sign in again.",
+    }),
+  );
 }
 
 /**

@@ -55,6 +55,7 @@ import * as samlifyNamespace from "samlify";
 import samlifyDefault from "samlify";
 import type { GenericEndpointContext } from "better-auth";
 import type { EnterpriseOptions } from "./types";
+import { policyRefusal } from "./audit/refusal";
 import {
   findOrgsByEmailDomain,
   listVerifiedProviders,
@@ -554,10 +555,12 @@ function domainTakenError(mine: readonly string[], taken: VerifiedProviderRow[])
 }
 
 export function issuerNotAllowedError(issuer: string): APIError {
-  return new APIError("FORBIDDEN", {
-    code: "SSO_ISSUER_NOT_ALLOWED",
-    message: `The issuer ${JSON.stringify(issuer)}, an identity-provider endpoint the configuration points at, or a SAML signing certificate it carries, is not on this deployment's SSO issuer allow-list.`,
-  });
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "SSO_ISSUER_NOT_ALLOWED",
+      message: `The issuer ${JSON.stringify(issuer)}, an identity-provider endpoint the configuration points at, or a SAML signing certificate it carries, is not on this deployment's SSO issuer allow-list.`,
+    }),
+  );
 }
 
 type Body = Record<string, unknown>;

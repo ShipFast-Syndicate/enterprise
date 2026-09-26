@@ -37,6 +37,7 @@ export {
   type AuditedPath,
   type AuditScope,
 } from "./audit/plugin";
+export { flushAuditWrites } from "./audit/background";
 export {
   auditRefusal,
   SESSION_REFUSED_ACTION,

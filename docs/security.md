@@ -442,10 +442,16 @@ the export, which records itself).
 **Actions.** Sign-in steps (`*`): success = a session was minted (a refreshed or re-issued
 session is not); a 2FA challenge instead of a session is `auth.sign_in_2fa_pending`; an error is
 `auth.sign_in_failed` (`auth.sso_sign_in_failed` on the SSO callbacks), or
-`auth.sign_in_refused` when it carries a policy code (`SSO_REQUIRED`, `METHOD_NOT_ALLOWED`,
-`TWO_FACTOR_REQUIRED`, `TWO_FACTOR_ENROLLMENT_REQUIRED`, `SSO_DOMAIN_NOT_ALLOWED`,
-`SSO_PROVIDER_UNRESOLVED`, `SSO_ISSUER_NOT_ALLOWED`, `SCIM_PROVISIONING_REQUIRED`,
-`SCIM_USER_NOT_ACTIVE` — `POLICY_REFUSAL_CODES`). A refused SSO sign-in reaches the org owning
+`auth.sign_in_refused` when this package refused it with a policy code (`SSO_REQUIRED`,
+`METHOD_NOT_ALLOWED`, `TWO_FACTOR_REQUIRED`, `TWO_FACTOR_ENROLLMENT_REQUIRED`,
+`SSO_DOMAIN_NOT_ALLOWED`, `SSO_PROVIDER_UNRESOLVED`, `SSO_ISSUER_NOT_ALLOWED`,
+`SCIM_PROVISIONING_REQUIRED`, `SCIM_USER_NOT_ACTIVE` — `POLICY_REFUSAL_CODES`). A refusal is
+recognised only from the package's own code, which marks the request it refuses
+(`policyRefusal`), never from the text of the error: a redirect's `error=` starts from a
+callback URL the caller chose, and an IdP error response names whatever code it likes, so a
+policy code arriving that way is a failed sign-in with that code as its label. On a redirect the
+recorded code is the **last** `error` parameter (upstream appends its own after the caller's
+URL). A refused SSO sign-in reaches the org owning
 the asserted address's domain too, not only the signing provider's org. A refusal thrown by a
 `hooks.before` handler (the `/magic-link/verify` pre-flight) is written by `auditRefusal` before
 the throw and flagged, so it is recorded once; the `require2fa` enrolment gate records
@@ -473,9 +479,49 @@ change is attributed to the admin who made it; the member whose role changed is 
 their user id in `metadata.targetUserId`). A request made through an impersonation session is
 `actorType: "impersonated"` with `actorId` = the impersonated user and
 `metadata.impersonatedBy` = the staff member; the explicit writers (`scim.token_*`,
-`sso.test_login_passed`, `api_key.revoked` from `/admin/*`) follow the same rule. Failed and
-refused sign-ins and 2FA-pending sign-ins are `actorType: "system"`, `actorId: null`, the user
-(when known) as the target, the address in `metadata.email` only when no user exists.
+`sso.test_login_passed`, `api_key.revoked` from `/admin/*`) follow the same rule, and so does a
+retention anchor written under an impersonation session (`metadata.impersonatedBy` next to the
+anchor's own keys). Failed and refused sign-ins and 2FA-pending sign-ins are
+`actorType: "system"`, `actorId: null`, the user (when known) as the target, the address in
+`metadata.email` only when no user exists.
+
+**What a row takes from the request is bounded** (`src/server/audit/bounds.ts`). An address is
+recorded — and used to find the organizations a request is about — only when it is a valid
+e-mail address of at most 254 characters, lower-cased; a request whose address is not one (a
+400 validation failure, an IdP asserting a malformed address) names no subject and writes no
+row. `metadata.changed` lists at most 64 key names, each a short identifier, with the total in
+`metadata.changedCount` whenever anything was left out; error codes and provider ids are
+recorded only as short tokens (`UNRECOGNIZED_ERROR` otherwise); the user agent is cut at 512
+characters.
+
+**Which rows can hold up a response, and which can fail it.** Rows about an address the caller
+chose — failed, refused and 2FA-pending sign-ins, `/sign-in/magic-link`,
+`/request-password-reset`, `/reset-password`, and a sign-up or e-mail verification that did not
+mint a session — are always written off the response path through better-auth's
+`runInBackground`, so a response takes the same time whether or not the address has an account
+or organizations. With `advanced.backgroundTasks.handler` set, the product's handler receives
+them; without it they run as detached promises. **On a serverless host (Vercel, Cloudflare
+Workers, …) set `advanced.backgroundTasks: { handler: waitUntil }`** (or your platform's
+equivalent): a detached promise can be cut short when the instance is frozen after the
+response, and the row is then lost. `flushAuditWrites()` (server export) resolves once every
+such row this process started has been written — for graceful shutdown and tests. A failure to
+write one of these rows is logged, never answered. The other rows are written before the
+response:
+
+- **Soft — logged, never answered:** every sign-in step (`*` above) and any session minted on
+  an unlisted path, `/sign-out`, `/sign-in/magic-link`, `/request-password-reset`,
+  `/reset-password`, `/sso/saml2/logout/:providerId`, `/sso/saml2/sp/slo/:providerId`, and
+  refusal rows (`auth.sign_in_refused`, `auth.session_refused`).
+- **Hard — 500 `AUDIT_WRITE_FAILED`:** every other path in `AUDITED_PATHS` — among them
+  `/update-user`, `/change-password`, `/change-email`, `/delete-user[/callback]`,
+  `/revoke-session[s]`, `/revoke-other-sessions`, `/link-social`, `/unlink-account`,
+  `/two-factor/enable|disable|generate-backup-codes`, `/passkey/*`, `/api-key/*`, every
+  `/admin/*` entry, `/sso/register|update-provider|delete-provider|request-domain-verification|verify-domain`,
+  every `/organization/*` entry, `/scim/v2/*` and `/enterprise/policy/set`. The after-hook runs
+  once the endpoint has returned, so the change **is already committed** when this 500 is
+  answered: it reports a change the log does not hold, it does not undo it. A client that sees
+  it should re-read the state rather than retry blindly. `/enterprise/audit/export` answers the
+  same 500 instead of the CSV when its `audit.exported` row cannot be written.
 
 **Not audited, by decision** (reasons in `UNAUDITED_PATHS`): reads, flow starts
 (`/sign-in/sso`, passkey option generation, `/two-factor/send-otp`, …), session preferences
