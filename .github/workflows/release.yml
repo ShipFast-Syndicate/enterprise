@@ -47,6 +47,15 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           # Keep the installation token scoped to this repository.
           repositories: ${{ github.event.repository.name }}
+          # Request only what the release plugins use instead of inheriting
+          # every permission of the App installation (metadata: read is
+          # implicit): contents for the release commit, tag, notes and GitHub
+          # release (@semantic-release/git, @semantic-release/github);
+          # issues and pull-requests for the released comments/labels and the
+          # failure issue (@semantic-release/github). Nothing else.
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
       - name: Run semantic-release
         env:
           GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}

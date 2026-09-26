@@ -263,6 +263,92 @@ class Gate(unittest.TestCase):
                 return run
             self.assertIsNone(namespace['ci_pull_request'](reader, REPO, 99, HEAD))
 
+def metadata(*entries):
+    """Dependabot commit metadata; each entry is (name, update_type, group)."""
+    lines = []
+    for name, update, group in entries:
+        lines += [f'- dependency-name: {name}', '  dependency-version: 9.9.9',
+                  '  dependency-type: direct:development', f'  update-type: {update}']
+        if group:
+            lines.append(f'  dependency-group: {group}')
+    return 'bump\n\n---\nupdated-dependencies:\n' + '\n'.join(lines) + '\n...\n'
+
+class MaintainerHolds(unittest.TestCase):
+    """Auth peers and release-job tooling are opened by Dependabot but never auto-merged."""
+    reader = Gate.reader
+    check = Gate.check
+    HELD = 'hold: release tooling or auth dependency needs maintainer review'
+
+    def setUp(self):
+        Gate.setUp(self)
+
+    def gate(self, *entries):
+        self.setUp()
+        self.commits[0]['commit']['message'] = metadata(*entries)
+        return evaluate(self.reader, REPO, 1, HEAD, True)
+
+    def test_better_auth_group_pr_is_held(self):
+        patch, minor = 'version-update:semver-patch', 'version-update:semver-minor'
+        for entries in [
+                [('better-auth', minor, 'better-auth'), ('"@better-auth/core"', minor, 'better-auth'),
+                 ('"@better-auth/sso"', minor, 'better-auth'), ('better-call', patch, 'better-auth')],
+                [('better-auth', patch, None)],
+                [("'@better-fetch/fetch'", patch, None)],
+                [('some-new-peer', patch, 'better-auth')]]:
+            with self.subTest(entries=entries):
+                self.assertEqual(self.gate(*entries), self.HELD)
+                self.assertEqual(self.writes, [])
+
+    def test_release_tooling_pr_is_held(self):
+        patch = 'version-update:semver-patch'
+        for name in ['semantic-release', '"@semantic-release/github"', '"@semantic-release/git"',
+                     'conventional-changelog-conventionalcommits', 'tsup', 'esbuild',
+                     '"@esbuild/linux-x64"', 'typescript', 'TypeScript',
+                     'actions/create-github-app-token', 'actions/checkout', 'pnpm/action-setup']:
+            with self.subTest(name=name):
+                self.assertEqual(self.gate((name, patch, None)), self.HELD)
+                self.assertEqual(self.writes, [])
+        self.assertEqual(self.gate(('anything', patch, 'release-tooling')), self.HELD)
+
+    def test_one_held_dependency_holds_a_whole_grouped_pr(self):
+        patch = 'version-update:semver-patch'
+        self.assertEqual(self.gate(('vitest', patch, 'dev-tooling'), ('tsup', patch, 'dev-tooling')), self.HELD)
+        self.assertEqual(self.writes, [])
+
+    def test_maintainer_hold_is_final_not_retried(self):
+        self.setUp()
+        self.commits[0]['commit']['message'] = metadata(('tsup', 'version-update:semver-patch', None))
+        waits = []
+        self.assertEqual(namespace['after_ci'](self.reader, REPO, 1, HEAD, apply=True, sleep=waits.append), self.HELD)
+        self.assertEqual(waits, [])
+        self.assertEqual(self.writes, [])
+
+    def test_normal_dev_patch_still_merges(self):
+        patch = 'version-update:semver-patch'
+        for entries in [[('vitest', patch, 'dev-tooling'), ('"@types/node"', patch, 'dev-tooling')],
+                        [('typescript-eslint', patch, 'dev-tooling')], [('prettier', patch, None)],
+                        [('actions/upload-artifact', patch, None)]]:
+            with self.subTest(entries=entries):
+                self.assertTrue(self.gate(*entries).startswith('merged:'))
+                self.assertEqual(self.writes, [(f'repos/{REPO}/pulls/1/merge', 'PUT', {'sha': HEAD, 'merge_method': 'squash'})])
+
+    def test_dependabot_groups_stay_inside_the_hold_policy(self):
+        # Every pattern of the held Dependabot groups must be held by the gate too.
+        config = (ROOT / '.github/dependabot.yml').read_text()
+        held = set(namespace['MAINTAINER_DEPENDENCIES'])
+        for group in namespace['MAINTAINER_GROUPS']:
+            block = config.split(f'\n      {group}:\n', 1)[1].split('\n    labels:', 1)[0]
+            block = block.split('patterns:\n', 1)[1]
+            patterns = []
+            for line in block.splitlines():
+                if not line.startswith('          - '):
+                    break
+                patterns.append(line[12:].strip('"'))
+            self.assertTrue(patterns, group)
+            self.assertLessEqual(set(patterns), held, group)
+            for pattern in patterns:
+                self.assertIn(pattern, config.split('exclude-patterns:\n', 1)[1].split('\n      release-tooling:', 1)[0])
+
 class AggregatedCI(unittest.TestCase):
     reader = Gate.reader
     check = Gate.check
