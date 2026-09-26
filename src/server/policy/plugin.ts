@@ -349,7 +349,7 @@ export function orgPolicy(opts: EnterpriseOptions) {
     endpoints: { ...buildPolicyEndpoints(opts), enterpriseHomeRealm: homeRealmEndpoint },
     rateLimit: [HOME_REALM_RATE_LIMIT],
     hooks: {
-      before: [buildSignInBeforeHook()],
+      before: [buildSignInBeforeHook(opts)],
       after: [buildRequire2faAfterHook()],
     },
     // `databaseHooks` is wired via `init()` returning `{options:
@@ -376,7 +376,7 @@ export function orgPolicy(opts: EnterpriseOptions) {
               // F-05: `/get-session`'s refresh rewrites `expiresAt` to the
               // global lifetime; the clamp keeps it within `sessionMaxAgeS`.
               update: {
-                before: buildSessionUpdateBeforeHook(),
+                before: buildSessionUpdateBeforeHook(opts),
               },
             },
             // Task 8, controller ruling (e): "SSO only for SCIM-active

@@ -238,10 +238,18 @@ function methodNotAllowedError(method: string): APIError {
 
 /**
  * `allowedMethods` binds only once some contributing org actually narrowed
- * the list (`sources.allowedMethodsBy`). An org that never touched it — or
- * stored the full closed set — allows every method, including ones a
- * product declares through `policy.signInMethods` that the closed set cannot
- * name; a narrowed org allows exactly its list.
+ * the list (`sources.allowedMethodsBy`, computed by `getEffectivePolicy`
+ * against the **full** method vocabulary — the 8 built-ins plus every
+ * `policy.signInMethods` name the product declared, `allowedMethodValues`).
+ * The rule per org: a declared method is allowed only if the org's stored
+ * list contains it, or the org has no `org_policy` row at all, or its row
+ * lists the full vocabulary. A row that stores exactly the 8 built-ins while
+ * the product declares `email_otp` therefore *excludes* `email_otp` — an org
+ * must be able to exclude a declared method without also dropping a
+ * built-in — and declaring a new `signInMethods` entry means orgs with an
+ * existing row must add the name before their members can use it. Only a
+ * method name outside the vocabulary altogether (a social provider id the
+ * product never declared) is left alone for an un-narrowed org.
  */
 function methodRefusedBy(eff: EffectivePolicy, method: string): boolean {
   return eff.sources.allowedMethodsBy.length > 0 && !eff.allowedMethods.includes(method);
@@ -318,12 +326,13 @@ async function enforceForEmail(
   path: string,
   email: string,
   method: string,
+  opts: EnterpriseOptions | undefined,
 ): Promise<void> {
   const targetUser = await ctx.context.internalAdapter.findUserByEmail(email);
   const userId = targetUser?.user.id ?? null;
   const orgIds = await resolvePolicyOrgsForUser(ctx, { userId, email });
   if (orgIds.length === 0) return;
-  const eff = await getEffectivePolicy(ctx, orgIds, userId);
+  const eff = await getEffectivePolicy(ctx, orgIds, userId, opts);
 
   const refuse = async (error: APIError): Promise<never> => {
     await auditRefusal(ctx, {
@@ -341,7 +350,7 @@ async function enforceForEmail(
   if (methodRefusedBy(eff, method)) await refuse(methodNotAllowedError(method));
 }
 
-export function buildSignInBeforeHook() {
+export function buildSignInBeforeHook(opts?: EnterpriseOptions) {
   return {
     matcher: (ctx: { path?: string }) => !!ctx.path && SIGNIN_ENFORCEMENT_PATHS.has(ctx.path),
     handler: createAuthMiddleware(async (ctx) => {
@@ -352,7 +361,7 @@ export function buildSignInBeforeHook() {
         ctx.query as { token?: unknown } | undefined,
       );
       if (!email) return; // custom hasher or an already-consumed/unknown token: the backstop still applies
-      await enforceForEmail(fullCtx, path, email, "magic_link");
+      await enforceForEmail(fullCtx, path, email, "magic_link", opts);
     }),
   };
 }
@@ -377,7 +386,9 @@ function sessionExpiryMs(session: { expiresAt?: unknown }, ctx: GenericEndpointC
  * Rules, in order, against the **effective** policy of every org with a
  * claim on the user (`resolvePolicyOrgsForUser` + `getEffectivePolicy`):
  * 1. `ssoEnforced` and this is not an SSO callback → `SSO_REQUIRED`.
- * 2. a named method some org excluded → `METHOD_NOT_ALLOWED`.
+ * 2. a named method some org excluded → `METHOD_NOT_ALLOWED` (`methodRefusedBy`;
+ *    narrowing is judged against the full method vocabulary, `opts` threaded
+ *    into `getEffectivePolicy`).
  * 3. a path this layer cannot classify, for a user under any restriction →
  *    `METHOD_NOT_ALLOWED` (fail closed; declare it in
  *    `policy.signInMethods`). Continuations are never refused here — and a
@@ -404,7 +415,7 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
       activeOrganizationId,
     });
     if (orgIds.length === 0) return;
-    const eff = await getEffectivePolicy(ctx, orgIds, session.userId);
+    const eff = await getEffectivePolicy(ctx, orgIds, session.userId, opts);
 
     const isSsoPath = typeof ctx.path === "string" && ctx.path.startsWith("/sso/");
     if (eff.ssoEnforced && !isSsoPath) throw ssoRequiredError();
@@ -443,7 +454,7 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
  * Writes that do not touch `expiresAt` (`/organization/set-active`, …) and
  * writes outside a request context pass through untouched.
  */
-export function buildSessionUpdateBeforeHook() {
+export function buildSessionUpdateBeforeHook(opts?: EnterpriseOptions) {
   return async (
     data: { expiresAt?: unknown } & Record<string, unknown>,
     ctx: GenericEndpointContext | null,
@@ -460,7 +471,7 @@ export function buildSessionUpdateBeforeHook() {
       activeOrganizationId: current.session.activeOrganizationId ?? null,
     });
     if (orgIds.length === 0) return;
-    const eff = await getEffectivePolicy(ctx, orgIds, current.session.userId);
+    const eff = await getEffectivePolicy(ctx, orgIds, current.session.userId, opts);
     if (eff.sessionMaxAgeS == null) return;
 
     const createdAt = new Date(current.session.createdAt).getTime();

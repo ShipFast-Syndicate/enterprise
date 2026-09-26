@@ -56,16 +56,25 @@ export const ALLOWED_METHOD_VALUES = [
   "passkey",
 ] as const;
 
-/**
- * The vocabulary `POST /enterprise/policy/set` accepts for `allowedMethods`:
- * the closed set above plus every method name the product declared through
- * `policy.signInMethods` (`../types.ts`) — so an org can list `email_otp`
- * once the product maps `/sign-in/email-otp` to it. De-duplicated, closed
- * set first. Validation of the option itself lives in `../options.ts`.
- */
-export function allowedMethodValues(opts?: {
+/** The slice of `EnterpriseOptions` (`../types.ts`) the method vocabulary is derived from. */
+export interface MethodVocabularyOptions {
   policy?: { signInMethods?: Record<string, string> };
-}): string[] {
+}
+
+/**
+ * The **full method vocabulary**: the closed set above plus every method
+ * name the product declared through `policy.signInMethods` (`../types.ts`)
+ * — so an org can list `email_otp` once the product maps
+ * `/sign-in/email-otp` to it. De-duplicated, closed set first.
+ *
+ * Both the write side (`POST /enterprise/policy/set` accepts exactly these
+ * values, `./plugin.ts`) and the read side (`getEffectivePolicy` decides
+ * whether an org's stored list *narrows* sign-in by comparing it against
+ * this vocabulary, not against the 8 built-ins alone) use it, so an org can
+ * exclude a declared method without also dropping a built-in. Validation of
+ * the option itself lives in `../options.ts`.
+ */
+export function allowedMethodValues(opts?: MethodVocabularyOptions): string[] {
   const declared = Object.values(opts?.policy?.signInMethods ?? {});
   return [...new Set<string>([...ALLOWED_METHOD_VALUES, ...declared])];
 }
@@ -142,8 +151,15 @@ export async function getOrgPolicy(ctx: GenericEndpointContext, orgId: string): 
  *   session cap is a compliance control, not a sign-in gate).
  * - `require2fa` — OR over **all** orgs.
  * - `restricted` — whether any contributing org narrows sign-in at all
- *   (`ssoEnforced` or an `allowedMethods` list smaller than the closed set);
- *   the fail-closed switch for sign-in paths that can't be classified.
+ *   (`ssoEnforced`, or an `allowedMethods` row that omits any value of the
+ *   full method vocabulary — `allowedMethodValues(opts)`, the 8 built-ins
+ *   plus every product-declared `policy.signInMethods` name); the
+ *   fail-closed switch for sign-in paths that can't be classified. An org
+ *   with **no** `org_policy` row never narrows anything; an org whose row
+ *   lists exactly the 8 built-ins while the product declared `email_otp`
+ *   *does* narrow (it excludes `email_otp`) — the allow-list is what the
+ *   row says, so a row written before the product declared a method keeps
+ *   excluding it until an admin lists the name.
  * - `sources` — which org contributed each constraint, for error messages
  *   and audit rows.
  *
@@ -173,9 +189,19 @@ export async function getEffectivePolicy(
   ctx: GenericEndpointContext,
   orgIds: readonly string[],
   userId: string | null,
+  opts?: MethodVocabularyOptions,
 ): Promise<EffectivePolicy> {
   const ids = [...new Set(orgIds)];
-  const policies = await Promise.all(ids.map((orgId) => getOrgPolicy(ctx, orgId)));
+  const vocabulary = allowedMethodValues(opts);
+  const rows = await Promise.all(ids.map((orgId) => findPolicyRow(ctx, orgId)));
+  // An org with no row has never narrowed anything: it allows the *whole*
+  // vocabulary (declared methods included), not merely the built-in default
+  // `toOrgPolicy(null, …)` reports for the read endpoint.
+  const policies = rows.map((row, i) => {
+    const orgId = ids[i] as string;
+    const policy = toOrgPolicy(row, orgId);
+    return row ? policy : { ...policy, allowedMethods: [...vocabulary] };
+  });
 
   const sources: EffectivePolicy["sources"] = {
     ssoEnforcedBy: [],
@@ -195,7 +221,7 @@ export async function getEffectivePolicy(
     if (!isBreakGlass) {
       if (policy.ssoEnforced) sources.ssoEnforcedBy.push(policy.orgId);
       const methods = new Set(policy.allowedMethods);
-      if (!ALLOWED_METHOD_VALUES.every((m) => methods.has(m))) {
+      if (!vocabulary.every((m) => methods.has(m))) {
         sources.allowedMethodsBy.push(policy.orgId);
       }
       methodSets.push(methods);
@@ -221,7 +247,7 @@ export async function getEffectivePolicy(
   const first = methodSets[0];
   const allowedMethods =
     first === undefined
-      ? [...ALLOWED_METHOD_VALUES]
+      ? [...vocabulary]
       : [...first].filter((m) => methodSets.every((set) => set.has(m)));
   return {
     orgIds: ids,

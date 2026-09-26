@@ -73,6 +73,36 @@ describe("getEffectivePolicy", () => {
     expect(eff.allowedMethods).toEqual([...ALLOWED_METHOD_VALUES]);
   });
 
+  it("narrowing is judged against the full vocabulary: a no-row org allows declared methods, a built-ins-only row excludes them", async () => {
+    const opts = { policy: { signInMethods: { "/sign-in/email-otp": "email_otp" } } };
+    const t = await makeAuth(opts as never);
+    const { cookie, userId } = await signUpOwner(t, "owner@acme.test");
+    const { orgId: rowOrg } = await createOrg(t, cookie, "acme-row");
+    await ok(
+      await setPolicy(t, cookie, { orgId: rowOrg, allowedMethods: [...ALLOWED_METHOD_VALUES] }),
+    );
+
+    const noRow = await getEffectivePolicy(await ctxOf(t), ["org_no_row"], userId, opts);
+    expect(noRow.restricted).toBe(false);
+    expect(noRow.sources.allowedMethodsBy).toEqual([]);
+    expect(noRow.allowedMethods).toEqual([...ALLOWED_METHOD_VALUES, "email_otp"]);
+    // No contributing org at all: the permissive default is the whole vocabulary too.
+    expect((await getEffectivePolicy(await ctxOf(t), [], userId, opts)).allowedMethods).toEqual([
+      ...ALLOWED_METHOD_VALUES,
+      "email_otp",
+    ]);
+
+    const withRow = await getEffectivePolicy(await ctxOf(t), ["org_no_row", rowOrg], userId, opts);
+    expect(withRow.restricted).toBe(true);
+    expect(withRow.sources.allowedMethodsBy).toEqual([rowOrg]);
+    expect(withRow.allowedMethods).toEqual([...ALLOWED_METHOD_VALUES]);
+
+    // Without the product's declaration the same row is the full vocabulary: not narrowed.
+    const builtInsOnly = await getEffectivePolicy(await ctxOf(t), [rowOrg], userId);
+    expect(builtInsOnly.restricted).toBe(false);
+    expect(builtInsOnly.sources.allowedMethodsBy).toEqual([]);
+  });
+
   it("allowedMethods is the intersection across orgs; the narrowing orgs are named in sources", async () => {
     const t = await makeAuth();
     const { cookie, userId } = await signUpOwner(t, "owner@acme.test");

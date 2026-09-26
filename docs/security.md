@@ -94,8 +94,16 @@ never against one "chosen" org:
   when the request already carries a session for the same user. A product that ships a sign-in
   plugin this preset does not (e-mail OTP, phone, username, generic OAuth, SIWE, …) declares it in
   `policy.signInMethods` (`"/sign-in/email-otp": "email_otp"`, or a prefix `"/phone/*": "phone"`);
-  the declared names become valid `allowedMethods` values on `POST /enterprise/policy/set`. An org
-  that never narrowed `allowedMethods` allows every method, declared or not.
+  the declared names become valid `allowedMethods` values on `POST /enterprise/policy/set`. Whether
+  an org _narrows_ sign-in is judged against the **full method vocabulary** (the 8 built-ins plus
+  every declared name), not the built-ins alone: an org allows a declared method only if its stored
+  `allowedMethods` list contains it, or the org has no `org_policy` row at all, or its row lists the
+  full vocabulary. A row that stores exactly the 8 built-ins while the product declares `email_otp`
+  excludes `email_otp` — an org must be able to exclude a declared method without also dropping a
+  built-in. Consequently, declaring a new `signInMethods` entry requires every org with an existing
+  `org_policy` row (written for _any_ field — the row stores the built-in default list when
+  `allowedMethods` was never sent) to add the name before its members can sign in with it; orgs with
+  no row are unaffected.
   - _Integrator note._ A product that sets `emailVerification.autoSignInAfterVerification` and an
     org that excludes `magic_link` from `allowedMethods` will see that org's members refused
     (`METHOD_NOT_ALLOWED`) on the verification link's auto-sign-in; the e-mail is still marked

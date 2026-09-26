@@ -18,6 +18,7 @@ import {
   buildScimRequiredUserCreateBeforeHook,
   isSsoCallbackPath,
 } from "../../src/server/policy/scim-required";
+import { ALLOWED_METHOD_VALUES, getEffectivePolicy } from "../../src/server/policy/store";
 import { makeAuth, signUpOwner, createOrg, extractCookie, type TestAuth } from "../helpers/auth";
 import { enrollTotp, insertMemberRow, mintScimToken, setPolicy } from "./helpers";
 
@@ -486,16 +487,82 @@ describe("gap 4 — unknown sign-in methods are not silently exempt", () => {
   });
 
   it("an unclassified path is still allowed for a user whose orgs never narrowed sign-in", async () => {
-    const t = await makeAuth();
+    // "Never narrowed" means an org with NO org_policy row, or a row that
+    // lists the FULL vocabulary (built-ins + every declared method) — not a
+    // row that merely happens to list the built-ins.
+    const opts = { policy: { signInMethods: { "/email-otp/verify-email": "email_otp" } } };
+    const t = await makeAuth(opts as never);
+    const { cookie, userId } = await signUpOwner(t, "owner@acme.test");
+    const { orgId: noRowOrg } = await createOrg(t, cookie, "acme-no-row");
+    const context = await authContext(t);
+    const hook = buildSessionCreateBeforeHook(opts as never);
+
+    // No policy row at all: the whole vocabulary is allowed, nothing narrows.
+    const noRow = await getEffectivePolicy({ context } as never, [noRowOrg], userId, opts as never);
+    expect(noRow.restricted).toBe(false);
+    expect(noRow.sources.allowedMethodsBy).toEqual([]);
+    expect(noRow.allowedMethods).toEqual([...ALLOWED_METHOD_VALUES, "email_otp"]);
+    await expect(
+      hook({ userId } as never, { path: "/phone/verify", context } as never),
+    ).resolves.toBeUndefined();
+
+    // A row listing the full vocabulary (written for another field) is the same thing.
+    const { orgId: fullRowOrg } = await createOrg(t, cookie, "acme-full-row");
+    expect(
+      (
+        await setPolicy(t, cookie, {
+          orgId: fullRowOrg,
+          require2fa: true,
+          allowedMethods: [...ALLOWED_METHOD_VALUES, "email_otp"],
+        })
+      ).status,
+    ).toBe(200);
+    const fullRow = await getEffectivePolicy(
+      { context } as never,
+      [noRowOrg, fullRowOrg],
+      userId,
+      opts as never,
+    );
+    expect(fullRow.restricted).toBe(false);
+    expect(fullRow.sources.allowedMethodsBy).toEqual([]);
+    await expect(
+      hook({ userId } as never, { path: "/phone/verify", context } as never),
+    ).resolves.toBeUndefined();
+  });
+
+  it("an org that lists only the 8 built-ins excludes a product-declared method (narrowing is judged against the full vocabulary)", async () => {
+    const opts = { policy: { signInMethods: { "/email-otp/verify-email": "email_otp" } } };
+    const t = await makeAuth(opts as never);
     const { cookie, userId } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, cookie);
-    expect((await setPolicy(t, cookie, { orgId, require2fa: true })).status).toBe(200);
+    // The org deliberately writes an allow-list that omits `email_otp` while
+    // keeping every built-in — that must be an exclusion, not a no-op.
+    expect(
+      (await setPolicy(t, cookie, { orgId, allowedMethods: [...ALLOWED_METHOD_VALUES] })).status,
+    ).toBe(200);
 
     const context = await authContext(t);
-    const hook = buildSessionCreateBeforeHook();
+    const eff = await getEffectivePolicy({ context } as never, [orgId], userId, opts as never);
+    expect(eff.sources.allowedMethodsBy).toEqual([orgId]);
+    expect(eff.restricted).toBe(true);
+    expect(eff.allowedMethods).toEqual([...ALLOWED_METHOD_VALUES]);
+
+    const hook = buildSessionCreateBeforeHook(opts as never);
     await expect(
       hook({ userId } as never, { path: "/email-otp/verify-email", context } as never),
+    ).rejects.toMatchObject({
+      body: { code: "METHOD_NOT_ALLOWED", message: expect.stringContaining("email_otp") },
+    });
+    // The built-ins the org kept still work, and a continuation is untouched.
+    await expect(
+      hook({ userId } as never, { path: "/sign-in/email", context } as never),
     ).resolves.toBeUndefined();
+    await expect(
+      hook({ userId } as never, { path: "/two-factor/verify-totp", context } as never),
+    ).resolves.toBeUndefined();
+    // The same org, judged without the product's declaration, never narrowed anything.
+    const builtInsOnly = await getEffectivePolicy({ context } as never, [orgId], userId);
+    expect(builtInsOnly.restricted).toBe(false);
   });
 
   it("policy.signInMethods names the path so an org can allow it explicitly, and the policy endpoint accepts the name", async () => {
