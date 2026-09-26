@@ -58,8 +58,14 @@ interface GeneratedPair {
   cert: string;
 }
 
-/** Mints a fresh RSA-2048 key pair + self-signed X.509 cert (CN=`commonName`), PEM-encoded. */
-async function generateSelfSigned(commonName: string): Promise<GeneratedPair> {
+/**
+ * Mints a fresh RSA-2048 key pair + self-signed X.509 cert (CN=`commonName`),
+ * PEM-encoded. Exported for the cases that must sign with a keypair *nobody
+ * else in the suite holds* (an attacker's own IdP key) — the shared
+ * `IDP_*`/`SP_*` pairs below are known to every fixture and can mask a
+ * trust-root gap when a test happens to pin or embed one of them.
+ */
+export async function generateSelfSigned(commonName: string): Promise<GeneratedPair> {
   const keys = await webcrypto.subtle.generateKey(RSA_ALGORITHM, true, ["sign", "verify"]);
   const cert = await X509CertificateGenerator.createSelfSigned({
     serialNumber: "01",

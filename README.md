@@ -93,7 +93,8 @@ entity id/entry point **and the signing certificates**, which must be pinned in
 `sso.samlCertificateFingerprints` (a SAML provider with no pins is refused — fail closed).
 Stored providers are re-checked at every sign-in. SSO
 sign-ins are bound to the signing provider's verified domain by default
-(`sso.domainBinding`) — that, not the allow-list, is the per-tenant control. See
+(`sso.domainBinding`) — that, not the allow-list, is the per-tenant control; `domainBinding:
+"off"` is only safe with the allow-list (and, for SAML, the pins) configured. See
 [OIDC origins and the issuer allow-list](./docs/sso.md#oidc-provider-origins-trustedorigins-and-the-issuer-allow-list)
 and [domain binding](./docs/sso.md#domain-binding-ssodomainbinding-default-verified-domain).
 

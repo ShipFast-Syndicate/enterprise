@@ -95,7 +95,7 @@ use.
 To restrict which identity providers tenants may register, set
 `sso.allowedIssuers` on `EnterpriseOptions`: an array of exact strings
 and/or `RegExp`s, or a predicate
-`(issuer, { organizationId, endpoints }) => boolean | Promise<boolean>`.
+`(issuer, { organizationId, endpoints, samlCertFingerprints }) => boolean | Promise<boolean>`.
 
 The list binds the **IdP**, not merely the `issuer` string — and what
 "the IdP" is differs by protocol:
@@ -123,11 +123,22 @@ The list binds the **IdP**, not merely the `issuer` string — and what
   (`idpMetadata.entityID`, or the metadata document's `entityID`) to the
   SHA-256 fingerprints of its signing certificates (DER form — what
   `openssl x509 -in idp.pem -noout -fingerprint -sha256` prints; hex,
-  colons optional, case-insensitive). `cert`, `idpMetadata.cert` and each
-  signing `KeyDescriptor` of the metadata document (`use="signing"` or no
-  `use`; an `encryption` descriptor is not a trust root) are all checked,
-  so a certificate cannot be slipped in through a source the check did not
-  read. List every certificate during a rotation.
+  colons optional, case-insensitive). The set that must be pinned is not
+  re-derived by a parser of this layer's own: it is the **union** of (a)
+  the signing certificates samlify itself returns for the configuration —
+  built with the same `IdentityProvider(...)` inputs `@better-auth/sso`
+  uses at the ACS (the metadata document when `idpMetadata.metadata` is
+  set, otherwise `idpMetadata.cert`, falling back to `cert`) and read back
+  with `getX509Certificate("signing")` — and (b) every certificate the
+  configuration carries in a signing position: `cert`, `idpMetadata.cert`
+  and each `KeyDescriptor` of the metadata document with `use="signing"`
+  or no `use`. A `use="encryption"` descriptor is left out only when
+  samlify does not treat it as a signing certificate — samlify reads a
+  document with a single `KeyDescriptor` as one shared certificate for
+  both uses whatever its `use` says, so a lone `encryption` descriptor is
+  pinned like any other. When samlify cannot build the IdP from the
+  configuration, or returns no signing certificate, the provider is refused
+  (fail closed). List every certificate during a rotation.
 
 Forms:
 
@@ -333,7 +344,14 @@ own IdP (the account is linked to the wrong provider), satisfying acme's
 
 `sso.domainBinding: "off"` restores the upstream behaviour — every tenant's
 IdP can sign in and create any e-mail address on the deployment — and logs a
-warning naming the advisory at construction. It is an operator-level switch on
+warning naming the advisory at construction. **`"off"` is only safe when
+`sso.allowedIssuers` is configured and, for SAML,
+`sso.samlCertificateFingerprints` pins the IdP signing certificates**: with
+the binding off, which identity providers exist on the deployment is the
+only thing that limits whose accounts an IdP may sign in, and the
+allow-list with its pins is the only control over that. A second one-time
+warning is logged through the auth logger when the binding is off and
+`allowedIssuers` is not configured. It is an operator-level switch on
 purpose: a per-org allow-list of "external" domains would be controlled by
 the very tenant the binding protects against. Contractors on external mail
 domains (gmail etc.) therefore cannot use a tenant's SSO in 1.1.0; invite

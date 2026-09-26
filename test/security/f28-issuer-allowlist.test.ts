@@ -689,9 +689,16 @@ describe("F-28 — sso.allowedIssuers is the issuer allow-list", () => {
     expect(
       collectSamlTrustRoot({ cert: IDP_CERT, idpMetadata: { entityID: "urn:idp" } }, "https://sp"),
     ).toEqual({ entityIds: ["urn:idp"], certFingerprints: [idpLower] });
+    expect(
+      collectSamlTrustRoot({ cert: bare, idpMetadata: { entityID: "urn:idp" } }, "https://sp"),
+    ).toEqual({ entityIds: ["urn:idp"], certFingerprints: [idpLower] });
+    // No entity id and no metadata document: upstream's `createIdP` throws
+    // for this configuration at the ACS (round 4 derives the trust root
+    // through the same call), so there is no trust root to pin — the
+    // `issuer` still names the pins slot, the fingerprints fail closed.
     expect(collectSamlTrustRoot({ cert: bare }, "https://sp")).toEqual({
-      entityIds: ["https://sp"], // no entity id named → upstream's `issuer` fallback
-      certFingerprints: [idpLower],
+      entityIds: ["https://sp"],
+      certFingerprints: null,
     });
     expect(
       collectSamlTrustRoot(

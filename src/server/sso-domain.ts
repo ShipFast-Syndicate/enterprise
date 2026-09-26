@@ -15,8 +15,13 @@
 //   `issuer`, `oidcConfig` or `samlConfig` is sent). For SAML the trust
 //   root is the signing certificate, not a URL, so under an allow-list
 //   every certificate the configuration carries must also be pinned by
-//   `sso.samlCertificateFingerprints` (`collectSamlTrustRoot`; fail closed),
-//   and a stored row is re-judged at every SSO sign-in
+//   `sso.samlCertificateFingerprints` (`collectSamlTrustRoot`; fail closed).
+//   "Every certificate" is the union of what samlify would verify
+//   signatures against — computed **through samlify** from the very inputs
+//   upstream builds the IdP from at the ACS (`samlifySigningCertificates`),
+//   never re-derived with a parser of our own — and every certificate the
+//   configuration carries in a signing position. A stored row is re-judged
+//   at every SSO sign-in
 //   (`storedProviderAllowed`, called from `./policy/sso-jit.ts` and
 //   `./policy/enforcement.ts`). Upstream never
 //   checked uniqueness at all: any tenant could register a second provider
@@ -44,6 +49,10 @@
 
 import { X509Certificate } from "node:crypto";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
+// The same namespace-vs-default guard `@better-auth/sso` uses: samlify is a
+// CommonJS package, and which shape a bundler hands an ESM importer varies.
+import * as samlifyNamespace from "samlify";
+import samlifyDefault from "samlify";
 import type { GenericEndpointContext } from "better-auth";
 import type { EnterpriseOptions } from "./types";
 import {
@@ -168,16 +177,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * so under an allow-list the certificates are what must be pinned.
  */
 export interface SamlTrustRoot {
-  /** The entity ids the pins are looked up under: `idpMetadata.entityID` and/or the metadata document's `entityID`; the `issuer` when the configuration names neither (upstream's own fallback at the ACS). */
+  /** The entity ids the pins are looked up under: `idpMetadata.entityID` and/or the metadata document's `entityID` (as samlify reads it); the `issuer` when the configuration names neither. */
   entityIds: string[];
   /**
    * Normalised SHA-256 fingerprints (lowercase hex, no colons) of the DER
-   * form of every certificate the configuration carries: `cert`,
-   * `idpMetadata.cert` (string or list) and every `X509Certificate` inside
-   * a `KeyDescriptor` of `idpMetadata.metadata` whose `use` is `signing`
-   * or unset (unset = both uses, per the SAML metadata spec). `null` when
-   * no certificate can be extracted at all, one cannot be parsed, or a
-   * metadata document has no `entityID` — the caller fails closed.
+   * form of every certificate a SAML sign-in through this configuration
+   * could be verified against — the **union** of (a) the signing
+   * certificates samlify derives from it, built the way upstream builds the
+   * IdP at the ACS (`samlifySigningCertificates`), and (b) every
+   * certificate the configuration carries in a signing position: `cert`,
+   * `idpMetadata.cert` (string or list) and each `X509Certificate` inside a
+   * `KeyDescriptor` of `idpMetadata.metadata` whose `use` is `signing` or
+   * unset. A `use="encryption"` descriptor is left out only when samlify
+   * does not return it as a signing certificate. `null` — the caller fails
+   * closed — when samlify cannot build the IdP or yields no signing
+   * certificate, when any certificate cannot be parsed, or when a metadata
+   * document has no `entityID`.
    */
   certFingerprints: string[] | null;
 }
@@ -208,14 +223,139 @@ const SAML_METADATA_KEY_USE = /\suse\s*=\s*(?:"([^"]*)"|'([^']*)')/;
 const SAML_METADATA_X509 =
   /<(?:[\w.-]+:)?X509Certificate\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?X509Certificate\s*>/g;
 
+const samlify =
+  typeof samlifyNamespace.IdentityProvider === "function"
+    ? samlifyNamespace
+    : (samlifyDefault ?? samlifyNamespace);
+
+type SamlifyIdpSettings = Parameters<typeof samlify.IdentityProvider>[0];
+
+/** Upstream's `normalizePem`: every line trimmed, one trailing newline; falsy values pass through. */
+function normalizePem(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  return `${value
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n")
+    .trim()}\n`;
+}
+
+/** Upstream's `resolveSigningCerts`: `idpMetadata.cert` wins over `cert`; a string becomes a one-entry list; `undefined` when neither is set. */
+function resolveSigningCerts(samlConfig: Record<string, unknown>): unknown[] | undefined {
+  const idp = isRecord(samlConfig.idpMetadata) ? samlConfig.idpMetadata : undefined;
+  const cert = idp?.cert ?? samlConfig.cert;
+  if (cert === undefined) return undefined;
+  return Array.isArray(cert) ? cert : [cert];
+}
+
+/**
+ * The signing certificates samlify would verify a SAML assertion against
+ * for `samlConfig` — **computed through samlify itself**, from the same
+ * `IdentityProvider(...)` inputs `@better-auth/sso`'s `createIdP` builds
+ * at the ACS (its branch selection mirrored: the metadata document when
+ * `idpMetadata.metadata` is present, else the manual configuration with
+ * `idpMetadata.cert` taking precedence over `cert`), read back with
+ * `entityMeta.getX509Certificate("signing")`. Returns the certificate
+ * bodies as samlify holds them (bare base64) plus the entity id samlify
+ * reads; `null` when samlify throws, when upstream's own precondition
+ * (`idpMetadata.metadata` or `idpMetadata.entityID`) is missing, or when
+ * samlify yields no signing certificate at all — a configuration whose
+ * trust root cannot be determined is not one an allow-list can vouch for.
+ *
+ * Why through samlify: what samlify treats as "the signing certificate" is
+ * not what a `use` attribute says. A metadata document with a single
+ * `KeyDescriptor` is read as one shared certificate for both uses whatever
+ * its `use` attribute (so a lone `use="encryption"` descriptor *is* the
+ * signing certificate), and with several descriptors the `use` values are
+ * paired with the certificates positionally, skipping descriptors that
+ * carry no `use`. Re-deriving that with a parser of our own is exactly how
+ * a certificate slips in through a source the check did not consider;
+ * the pinned set is therefore whatever samlify returns, unioned with the
+ * literal sources (`collectSamlTrustRoot`).
+ */
+export function samlifySigningCertificates(
+  samlConfig: unknown,
+): { certificates: string[]; entityId: string | null } | null {
+  if (!isRecord(samlConfig)) return null;
+  const idp = isRecord(samlConfig.idpMetadata) ? samlConfig.idpMetadata : undefined;
+  // Upstream `assertSAMLIdentityProviderAuthority`: without one of these
+  // `createIdP` throws at the ACS, so there is no trust root to pin.
+  const hasMetadata = typeof idp?.metadata === "string" && idp.metadata.length > 0;
+  const hasEntityId = typeof idp?.entityID === "string" && idp.entityID.length > 0;
+  if (!hasMetadata && !hasEntityId) return null;
+  let settings: SamlifyIdpSettings;
+  if (hasMetadata) {
+    settings = {
+      metadata: idp.metadata as string,
+      privateKey: normalizePem(idp.privateKey),
+      privateKeyPass: typeof idp.privateKeyPass === "string" ? idp.privateKeyPass : undefined,
+      isAssertionEncrypted:
+        typeof idp.isAssertionEncrypted === "boolean" ? idp.isAssertionEncrypted : undefined,
+      encPrivateKey: normalizePem(idp.encPrivateKey),
+      encPrivateKeyPass:
+        typeof idp.encPrivateKeyPass === "string" ? idp.encPrivateKeyPass : undefined,
+    };
+  } else {
+    const certs = resolveSigningCerts(samlConfig);
+    // Upstream `normalizePemList`: a non-string entry is passed through as
+    // is (samlify then embeds `String(entry)`); it is refused below when it
+    // does not parse as a certificate.
+    const signingCert = certs?.map((entry) => normalizePem(entry) ?? (entry as string));
+    settings = {
+      entityID: idp?.entityID as string,
+      // Verbatim upstream (`||`, not a shape check): a value samlify cannot
+      // read makes it throw here as it would at the ACS — fail closed.
+      singleSignOnService: (idp?.singleSignOnService || [
+        {
+          Binding: "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
+          Location: samlConfig.entryPoint as string,
+        },
+      ]) as SamlifyIdpSettings["singleSignOnService"],
+      singleLogoutService: idp?.singleLogoutService as SamlifyIdpSettings["singleLogoutService"],
+      signingCert,
+      wantAuthnRequestsSigned: samlConfig.authnRequestsSigned === true,
+      isAssertionEncrypted: idp?.isAssertionEncrypted === true,
+      encPrivateKey: normalizePem(idp?.encPrivateKey),
+      encPrivateKeyPass:
+        typeof idp?.encPrivateKeyPass === "string" ? idp.encPrivateKeyPass : undefined,
+    };
+  }
+  try {
+    const meta = samlify.IdentityProvider(settings).entityMeta;
+    const signing: unknown = meta.getX509Certificate("signing");
+    const certificates: string[] = [];
+    const collect = (value: unknown): boolean => {
+      if (typeof value === "string") {
+        if (value.trim().length === 0) return false;
+        certificates.push(value);
+        return true;
+      }
+      if (Array.isArray(value)) return value.every(collect); // nested: one descriptor, several certificates
+      return false;
+    };
+    if (signing === null || signing === undefined || !collect(signing)) return null;
+    if (certificates.length === 0) return null;
+    const entityId: unknown = meta.getEntityID();
+    return {
+      certificates,
+      entityId: typeof entityId === "string" && entityId.length > 0 ? entityId : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * `SamlTrustRoot` of `samlConfig` (see the interface), or `null` when the
  * configuration is not a SAML one (an OIDC provider has no certificate to
- * pin). Every certificate source upstream honours is read — the inline
- * `cert`, `idpMetadata.cert` (which wins over `cert` upstream) and the
- * signing `KeyDescriptor`s of `idpMetadata.metadata` (which samlify reads
- * when the IdP is given as a document) — so a certificate cannot be slipped
- * in through a source the check did not look at.
+ * pin). The fingerprints are the union of what samlify would verify
+ * against (`samlifySigningCertificates`) and every certificate source the
+ * configuration carries in a signing position — the inline `cert`,
+ * `idpMetadata.cert` and the signing/use-less `KeyDescriptor`s of
+ * `idpMetadata.metadata` — so a certificate cannot be slipped in through a
+ * source the check did not look at, in either direction: one samlify
+ * trusts but the literal reading skips, or one the literal reading sees but
+ * samlify would pair differently.
  */
 export function collectSamlTrustRoot(samlConfig: unknown, issuer: string): SamlTrustRoot | null {
   if (!isRecord(samlConfig)) return null;
@@ -244,12 +384,23 @@ export function collectSamlTrustRoot(samlConfig: unknown, issuer: string): SamlT
       else unreadable = true;
       for (const descriptor of idp.metadata.matchAll(SAML_METADATA_KEY_DESCRIPTOR)) {
         const use = SAML_METADATA_KEY_USE.exec(descriptor[1] ?? "");
+        // Literal reading: signing or use-less descriptors. An `encryption`
+        // descriptor is not skipped for good — it joins the set below
+        // whenever samlify returns it as a signing certificate.
         if ((use?.[1] ?? use?.[2])?.trim() === "encryption") continue;
         for (const cert of (descriptor[2] ?? "").matchAll(SAML_METADATA_X509)) {
           addCert(cert[1]);
         }
       }
     }
+  }
+  // (a) — what samlify would actually verify against. Nothing readable
+  // there means no determinable trust root: fail closed.
+  const viaSamlify = samlifySigningCertificates(samlConfig);
+  if (!viaSamlify) unreadable = true;
+  else {
+    materials.push(...viaSamlify.certificates);
+    if (viaSamlify.entityId) entityIds.add(viaSamlify.entityId);
   }
   if (entityIds.size === 0) entityIds.add(issuer);
   const fingerprints = new Set<string>();

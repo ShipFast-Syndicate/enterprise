@@ -68,7 +68,12 @@ export interface EnterpriseOptions {
    * GHSA-8p84-pc7q-69jr describes. It is an operator-level switch on
    * purpose (a per-org allow-list would be controlled by the very tenant
    * the binding protects against); a warning is logged at construction
-   * when it is off.
+   * when it is off. **`"off"` is only safe when `allowedIssuers` is
+   * configured and, for SAML, `samlCertificateFingerprints` pins the IdP
+   * signing certificates** — with the binding off, the allow-list and the
+   * pins are the only control over which identity providers can sign
+   * users in; a second one-time warning is logged through the auth logger
+   * when the binding is off without `allowedIssuers`.
    *
    * `trustVerifiedDomainEmail` (default `true`): a user created through a
    * domain-bound SSO sign-in is stored `emailVerified: true` — the IdP owns
@@ -95,14 +100,19 @@ export interface EnterpriseOptions {
    *   id, under upstream), `entryPoint`, `idpMetadata.entityID`, the
    *   `singleSignOnService`/`singleLogoutService` locations and the
    *   `entityID`/locations inside `idpMetadata.metadata`, **and** every
-   *   certificate the configuration carries — `cert`, `idpMetadata.cert`
-   *   and each signing `KeyDescriptor` of `idpMetadata.metadata` — must be
-   *   pinned in `samlCertificateFingerprints` under the configuration's
-   *   entity id (its `idpMetadata.entityID` / metadata `entityID`; the
-   *   `issuer` when it names neither). **Fail closed**: with an array
-   *   allow-list and no pins for that entity id, or a certificate that is
-   *   not pinned, or no readable certificate at all, the SAML provider is
-   *   refused.
+   *   certificate a sign-in could be verified against must be pinned in
+   *   `samlCertificateFingerprints` under the configuration's entity id
+   *   (its `idpMetadata.entityID` / metadata `entityID`). That set is the
+   *   union of what samlify itself returns as the signing certificates for
+   *   the configuration — built with the inputs upstream uses at the ACS
+   *   — and every certificate carried in a signing position (`cert`,
+   *   `idpMetadata.cert`, each `use="signing"`/use-less `KeyDescriptor`
+   *   of the document); a `use="encryption"` descriptor is left out only
+   *   when samlify does not treat it as a signing certificate. **Fail
+   *   closed**: with an array allow-list and no pins for that entity id,
+   *   a certificate that is not pinned, no readable certificate, or a
+   *   configuration samlify cannot build an IdP from, the SAML provider
+   *   is refused.
    *
    * Predicate form: called once with the issuer and `{ organizationId,
    * endpoints, samlCertFingerprints }` (normalised lowercase hex, empty for

@@ -32,10 +32,29 @@ const METHOD_NAME_RE = /^[a-z_][a-z0-9_]*$/;
 // `betterAuth()` construction — test suites and hot reloads build many
 // instances, and the point is that an operator reads it once.
 let warnedDomainBindingOff = false;
+let warnedDomainBindingOffUnlisted = false;
 
-/** Test-only: forget that the `domainBinding:"off"` warning was already emitted. */
+/** Test-only: forget that the `domainBinding:"off"` warnings were already emitted. */
 export function resetOptionWarningsForTests(): void {
   warnedDomainBindingOff = false;
+  warnedDomainBindingOffUnlisted = false;
+}
+
+/**
+ * The one-time startup warning for `sso.domainBinding: "off"` **without**
+ * `sso.allowedIssuers` — returned once per process (then `null`) so the
+ * caller with a logger at hand (`enterpriseGate`'s `init`, which runs
+ * with the auth context's `logger`) emits it; validation itself has no
+ * logger. With the binding off, the issuer allow-list — and, for SAML, the
+ * certificate pins — is the only control over which identity providers
+ * can sign users in on the deployment, so running without it is worth one
+ * line in the operator's log. No behaviour changes.
+ */
+export function takeDomainBindingOffUnlistedWarning(opts: EnterpriseOptions): string | null {
+  if (opts.sso?.domainBinding !== "off" || opts.sso.allowedIssuers !== undefined) return null;
+  if (warnedDomainBindingOffUnlisted) return null;
+  warnedDomainBindingOffUnlisted = true;
+  return `${PREFIX} "sso.domainBinding" is "off" and "sso.allowedIssuers" is not configured. With the binding off, the issuer allow-list — and, for SAML, "sso.samlCertificateFingerprints" — is the only control over which identity providers can sign users in on this deployment; "off" is only safe with both configured.`;
 }
 
 /**

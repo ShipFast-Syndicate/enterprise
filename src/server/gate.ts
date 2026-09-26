@@ -16,7 +16,7 @@ import { requireFeature } from "./entitlements";
 import { getMemberRoles } from "./policy/store";
 import { withSecretEncryption } from "./secrets";
 import { buildSsoDomainGuardHook } from "./sso-domain";
-import { assertEnterpriseOptions } from "./options";
+import { assertEnterpriseOptions, takeDomainBindingOffUnlistedWarning } from "./options";
 
 export const GATED_PATHS: Record<string, Feature> = {
   "/sso/register": "sso",
@@ -106,6 +106,10 @@ export function enterpriseGate(opts: EnterpriseOptions) {
     // every `@better-auth/sso` read/write of `ssoProvider`. See
     // `./secrets.ts`.
     init(context) {
+      // One line, once per process, through the auth logger: the binding is
+      // off and nothing restricts which IdPs may sign users in (`./options.ts`).
+      const warning = takeDomainBindingOffUnlistedWarning(opts);
+      if (warning) context.logger.warn(warning);
       return { context: { adapter: withSecretEncryption(context.adapter, opts.secretsKey) } };
     },
     hooks: {

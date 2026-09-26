@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeAuth, signUpOwner, createOrg } from "../helpers/auth";
+import { resetOptionWarningsForTests } from "../../src/server/options";
 
 const oidcConfig = {
   clientId: "a",
@@ -10,6 +11,30 @@ const oidcConfig = {
 };
 
 describe("enterpriseGate", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetOptionWarningsForTests();
+  });
+
+  it('warns once per process, through the auth logger, when sso.domainBinding is "off" and sso.allowedIssuers is not configured — and not when the allow-list is set', async () => {
+    // better-auth's default logger prints `warn` lines with `console.warn`.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const unlisted = (calls: unknown[][]) =>
+      calls.filter((call) => String(call[0]).includes('"sso.allowedIssuers" is not configured'));
+
+    await makeAuth({ sso: { domainBinding: "off" } });
+    await makeAuth({ sso: { domainBinding: "off" } });
+    expect(unlisted(warn.mock.calls)).toHaveLength(1);
+    expect(String(unlisted(warn.mock.calls)[0]?.[0])).toContain("samlCertificateFingerprints");
+
+    resetOptionWarningsForTests();
+    warn.mockClear();
+    await makeAuth({ sso: { domainBinding: "off", allowedIssuers: ["https://idp.test"] } });
+    await makeAuth();
+    await makeAuth({ sso: { domainBinding: "verified-domain" } });
+    expect(unlisted(warn.mock.calls)).toHaveLength(0);
+  });
+
   it("POST /sso/register returns 403 without the sso feature", async () => {
     const t = await makeAuth({ resolveEntitlements: async () => [] });
     const { cookie } = await signUpOwner(t);

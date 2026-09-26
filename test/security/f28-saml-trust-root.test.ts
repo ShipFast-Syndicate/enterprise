@@ -25,7 +25,13 @@ import samlify from "samlify";
 import { createOrg, extractCookie, makeAuth, signUpOwner, type TestAuth } from "../helpers/auth";
 import { startOidcIssuer, type OidcIssuer } from "../helpers/oidc-issuer";
 import { TEST_IDP_ENTITY_ID } from "../helpers/saml-idp";
-import { IDP_CERT, IDP_KEY, SP_CERT, SP_KEY } from "../helpers/fixtures/saml-keys";
+import {
+  generateSelfSigned,
+  IDP_CERT,
+  IDP_KEY,
+  SP_CERT,
+  SP_KEY,
+} from "../helpers/fixtures/saml-keys";
 import { registerOidcProvider, verifyProviderDomain } from "../helpers/sso";
 import { driveSsoSignIn, sessionCookieOf, sessionOf, userRowsFor } from "./ghsa-sso-helpers";
 
@@ -113,9 +119,9 @@ async function mintWith(opts: {
 const IDP_KEYS = { signingCert: IDP_CERT, privateKey: IDP_KEY };
 const OWN_KEYS = { signingCert: SP_CERT, privateKey: SP_KEY };
 
-/** An IdP metadata document for `entityID` carrying one `KeyDescriptor` per entry (`use` omitted = both uses, per the spec). */
+/** An IdP metadata document for `entityID` carrying one `KeyDescriptor` per entry (`use` omitted = no attribute — both uses, per the spec). */
 function metadataXml(
-  keys: Array<{ cert: string; use?: "signing" | "encryption" }>,
+  keys: Array<{ cert: string; use?: string }>,
   entityID = TEST_IDP_ENTITY_ID,
 ): string {
   const body = (cert: string) => cert.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
@@ -559,6 +565,157 @@ describe("F-28 (round 3) — sso.allowedIssuers pins the SAML trust root, fail c
       legit.setUser({ sub: "u-1", email: "user@acme.test" });
       const ok = await driveSsoSignIn(t, legit, "acme-oidc");
       expect((await sessionOf(t, sessionCookieOf(ok))).user.email).toBe("user@acme.test");
+    });
+  });
+
+  describe("round 4 — the trust root is what samlify verifies against, derived through samlify", () => {
+    // The round-3 security verifier's bypass: round 3 skipped every
+    // `use="encryption"` KeyDescriptor, but samlify reads a document with a
+    // SINGLE KeyDescriptor as one shared certificate for both uses whatever
+    // its `use` attribute, and upstream's `createIdP` builds the IdP from the
+    // document alone (the inline `cert` is ignored). So an attacker set the
+    // inline `cert` to the operator's public pinned certificate — which is
+    // all round 3 collected — and put their own key in a lone
+    // `use="encryption"` descriptor: register 200, and the ACS verified their
+    // assertions against the smuggled certificate. Never the shared fixtures
+    // here: the attacker's keypair is freshly generated per case.
+    const smuggled = (attackerCert: string, use = "encryption") => ({
+      cert: IDP_CERT, // the operator's public, pinned certificate
+      idpMetadata: { metadata: metadataXml([{ cert: attackerCert, use }]) },
+    });
+
+    it('ATTACK refused at register: a fresh attacker key in a lone use="encryption" KeyDescriptor next to the pinned inline cert is 403 SSO_ISSUER_NOT_ALLOWED, nothing is stored, the ACS mints no session and no user row', async () => {
+      const attacker = await generateSelfSigned("round4-attacker");
+      const t = await makeAuth({ sso: LIST });
+      const o = await owner(t, "owner@evil.test", "evil");
+      for (const [providerId, use] of [
+        ["enc-collapse", "encryption"],
+        ["enc-collapse-caps", "Encryption"],
+      ] as const) {
+        await expectRefused(
+          t,
+          await t.api.post(
+            "/sso/register",
+            samlBody(providerId, o.orgId, smuggled(attacker.cert, use)),
+            {
+              cookie: o.cookie,
+            },
+          ),
+          providerId,
+        );
+        const res = await acs(
+          t,
+          providerId,
+          await mintWith({
+            providerId,
+            email: `mallory@${providerId}.test`,
+            signingCert: attacker.cert,
+            privateKey: attacker.key,
+          }),
+        );
+        expect(extractCookie(res)).not.toContain("session_token");
+        expect(await userRowsFor(t, `mallory@${providerId}.test`)).toBe(0);
+      }
+    });
+
+    it('domainBinding:"off" (the allow-list and the pins are then the only trust control): the same smuggle cannot sign in ceo@acme.test — 403 at register, no session, no user row', async () => {
+      const attacker = await generateSelfSigned("round4-attacker-xtenant");
+      const t = await makeAuth({ sso: { ...LIST, domainBinding: "off" } });
+      await owner(t); // the victim tenant exists
+      const evil = await owner(t, "owner@evil.test", "evil");
+      await expectRefused(
+        t,
+        await t.api.post(
+          "/sso/register",
+          samlBody("enc-xtenant", evil.orgId, smuggled(attacker.cert)),
+          {
+            cookie: evil.cookie,
+          },
+        ),
+        "enc-xtenant",
+      );
+      const res = await acs(
+        t,
+        "enc-xtenant",
+        await mintWith({
+          providerId: "enc-xtenant",
+          email: "ceo@acme.test",
+          signingCert: attacker.cert,
+          privateKey: attacker.key,
+        }),
+      );
+      expect(extractCookie(res)).not.toContain("session_token");
+      expect(await userRowsFor(t, "ceo@acme.test")).toBe(0);
+    });
+
+    it('/sso/update-provider: replacing a pinned provider\'s metadata with a lone use="encryption" document is refused and the row is untouched', async () => {
+      const attacker = await generateSelfSigned("round4-attacker-update");
+      const t = await makeAuth({ sso: LIST });
+      const o = await owner(t);
+      expect(
+        (await t.api.post("/sso/register", samlBody("legit", o.orgId), { cookie: o.cookie }))
+          .status,
+      ).toBe(200);
+      await expectUpdateRefused(
+        await t.api.post(
+          "/sso/update-provider",
+          {
+            providerId: "legit",
+            samlConfig: {
+              idpMetadata: { metadata: metadataXml([{ cert: attacker.cert, use: "encryption" }]) },
+            },
+          },
+          { cookie: o.cookie },
+        ),
+      );
+      const stored = await storedConfig(t, "legit", "samlConfig");
+      expect(stored.cert).toBe(IDP_CERT);
+      expect((stored.idpMetadata as Record<string, unknown>).metadata).toBeUndefined();
+    });
+
+    it('stored row (pre-1.1.0): a row carrying the smuggle is refused at the ACS under domainBinding:"off" — no session for ceo@acme.test, no user row, audited — and the pinned IdP signs in again once the document is gone', async () => {
+      const attacker = await generateSelfSigned("round4-attacker-stored");
+      const t = await makeAuth({ sso: { ...LIST, domainBinding: "off" } });
+      await owner(t);
+      const evil = await owner(t, "owner@evil.test", "evil");
+      expect(
+        (await t.api.post("/sso/register", samlBody("legacy", evil.orgId), { cookie: evil.cookie }))
+          .status,
+      ).toBe(200);
+      await verifyProviderDomain(t, "legacy");
+      // Written by a deployment that ran without the pins: the operator's
+      // public certificate inline, the attacker's key in the document.
+      await plantStoredConfig(t, "legacy", "samlConfig", (config) => {
+        config.idpMetadata = {
+          metadata: metadataXml([{ cert: attacker.cert, use: "encryption" }]),
+        };
+      });
+      const refused = await acs(
+        t,
+        "legacy",
+        await mintWith({
+          providerId: "legacy",
+          email: "ceo@acme.test",
+          signingCert: attacker.cert,
+          privateKey: attacker.key,
+        }),
+      );
+      expect(locationOf(refused)).toContain("error=SSO_ISSUER_NOT_ALLOWED");
+      expect(extractCookie(refused)).not.toContain("session_token");
+      expect(await userRowsFor(t, "ceo@acme.test")).toBe(0);
+      expect(await failedSignIns(t)).toEqual([
+        { orgId: evil.orgId, error: "SSO_ISSUER_NOT_ALLOWED" },
+      ]);
+
+      await plantStoredConfig(t, "legacy", "samlConfig", (config) => {
+        config.idpMetadata = { entityID: TEST_IDP_ENTITY_ID };
+      });
+      const ok = await acs(
+        t,
+        "legacy",
+        await mintWith({ providerId: "legacy", email: "user@legacy.test", ...IDP_KEYS }),
+      );
+      expect((await sessionOf(t, sessionCookieOf(ok))).user.email).toBe("user@legacy.test");
     });
   });
 });
