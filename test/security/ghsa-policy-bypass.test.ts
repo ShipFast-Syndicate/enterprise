@@ -14,7 +14,10 @@ import {
   classifySessionCreate,
   deriveSessionCreateMethod,
 } from "../../src/server/policy/enforcement";
-import { buildScimRequiredUserCreateBeforeHook } from "../../src/server/policy/scim-required";
+import {
+  buildScimRequiredUserCreateBeforeHook,
+  isSsoCallbackPath,
+} from "../../src/server/policy/scim-required";
 import { makeAuth, signUpOwner, createOrg, extractCookie, type TestAuth } from "../helpers/auth";
 import { enrollTotp, insertMemberRow, mintScimToken, setPolicy } from "./helpers";
 
@@ -113,6 +116,61 @@ describe("F-03 — a self-created second org is no escape from the first org's p
     expect((await res.json()).code).toBe("SSO_REQUIRED");
   });
 
+  it("a member of 100+ other orgs is still bound by the restricted org whose member row the scan would have dropped", async () => {
+    // Upstream `findMany` without a `limit` returns at most
+    // `advanced.database.defaultFindManyLimit ?? 100` rows, and the preset
+    // sets no `organizationLimit`: 100 self-created orgs (raw rows here, in
+    // place of 100 `/organization/create` calls) push the restricted org's
+    // `member` row — inserted last, and sorting last by `id` — to #101.
+    const t = await makeAuth();
+    const { cookie: ownerCookie, userId: ownerId } = await signUpOwner(t, "owner@acme.test");
+    const { orgId: restricted } = await createOrg(t, ownerCookie, "acme");
+    await insertVerifiedProvider(t, restricted, "acme.test");
+    const { userId } = await signUpOwner(t, "contractor@gmail.test");
+    for (let i = 0; i < 100; i++) {
+      const n = String(i).padStart(3, "0");
+      await t.client.execute({
+        sql: `INSERT INTO member (id, organizationId, userId, role, createdAt) VALUES (?, ?, ?, ?, ?)`,
+        args: [`m_${n}`, `org_filler_${n}`, userId, "owner", Date.now()],
+      });
+    }
+    await t.client.execute({
+      sql: `INSERT INTO member (id, organizationId, userId, role, createdAt) VALUES (?, ?, ?, ?, ?)`,
+      args: ["zzz_restricted", restricted, userId, "member", Date.now()],
+    });
+    const count = await t.client.execute({
+      sql: `SELECT count(*) AS n FROM member WHERE userId = ?`,
+      args: [userId],
+    });
+    expect(Number(count.rows[0]!.n)).toBe(101);
+
+    expect(
+      (await setPolicy(t, ownerCookie, { orgId: restricted, allowedMethods: ["sso"] })).status,
+    ).toBe(200);
+    const byMethod = await t.api.post("/sign-in/email", {
+      email: "contractor@gmail.test",
+      password: "password1234",
+    });
+    expect(byMethod.status).toBe(403);
+    expect((await byMethod.json()).code).toBe("METHOD_NOT_ALLOWED");
+
+    expect(
+      (
+        await setPolicy(t, ownerCookie, {
+          orgId: restricted,
+          ssoEnforced: true,
+          breakGlassUserId: ownerId,
+        })
+      ).status,
+    ).toBe(200);
+    const bySso = await t.api.post("/sign-in/email", {
+      email: "contractor@gmail.test",
+      password: "password1234",
+    });
+    expect(bySso.status).toBe(403);
+    expect((await bySso.json()).code).toBe("SSO_REQUIRED");
+  });
+
   it("break-glass is per org: the break-glass owner of org A is still bound by org B's allowedMethods", async () => {
     const t = await makeAuth();
     const { cookie, userId: ownerId } = await signUpOwner(t, "owner@acme.test");
@@ -175,6 +233,17 @@ describe("F-04 — every enterprise read path matches provider domains like upst
       await expect(
         hook({ email } as never, { path: "/sso/callback/okta", context } as never),
       ).rejects.toMatchObject({ body: { code: "SCIM_PROVISIONING_REQUIRED" } });
+    }
+    // The shared OIDC callback `@better-auth/sso` registers unconditionally
+    // (no provider segment — the provider rides in the OAuth state) and the
+    // SAML ACS are the same JIT entry point.
+    for (const path of ["/sso/callback", "/sso/saml2/sp/acs/okta", "/sso/callback/:providerId"]) {
+      await expect(
+        hook({ email: "emp@acme.test" } as never, { path, context } as never),
+      ).rejects.toMatchObject({ body: { code: "SCIM_PROVISIONING_REQUIRED" } });
+    }
+    for (const path of ["/sso", "/sso/callbackx", "/callback/google", "/sign-in/sso", undefined]) {
+      expect([path, isSsoCallbackPath(path)]).toEqual([path, false]);
     }
     // A look-alike domain is still not a subdomain.
     await expect(
@@ -348,7 +417,7 @@ describe("gap 3 — no pre-authentication membership oracle", () => {
 });
 
 describe("gap 4 — unknown sign-in methods are not silently exempt", () => {
-  it("classifies sign-up as password, 2FA/e-mail-verification/impersonation as continuations, the rest as unknown", () => {
+  it("classifies sign-up as password, 2FA/impersonation as continuations, the rest as unknown", () => {
     expect(deriveSessionCreateMethod({ path: "/sign-up/email" })).toBe("password");
     expect(deriveSessionCreateMethod({ path: "/passkey/verify-registration" })).toBe("passkey");
     for (const path of [
@@ -357,7 +426,6 @@ describe("gap 4 — unknown sign-in methods are not silently exempt", () => {
       "/two-factor/verify-backup-code",
       "/two-factor/enable",
       "/two-factor/disable",
-      "/verify-email",
       "/change-password",
       "/admin/impersonate-user",
     ]) {
@@ -372,6 +440,32 @@ describe("gap 4 — unknown sign-in methods are not silently exempt", () => {
       path: "/callback/:id",
     });
     expect(classifySessionCreate({})).toEqual({ kind: "unknown", path: null });
+  });
+
+  it("classifies /verify-email as a continuation only for the already-signed-in user, else as magic_link", () => {
+    const signedIn = { context: { session: { user: { id: "u1" } } } };
+    // No current session: the emailed token is the whole credential.
+    expect(classifySessionCreate({ path: "/verify-email" }, undefined, { userId: "u1" })).toEqual({
+      kind: "method",
+      method: "magic_link",
+    });
+    expect(classifySessionCreate({ path: "/verify-email", context: { session: null } })).toEqual({
+      kind: "method",
+      method: "magic_link",
+    });
+    // Same user already signed in: a continuation.
+    expect(
+      classifySessionCreate({ path: "/verify-email", ...signedIn }, undefined, { userId: "u1" }),
+    ).toEqual({ kind: "continuation", path: "/verify-email" });
+    expect(classifySessionCreate({ path: "/verify-email", ...signedIn })).toEqual({
+      kind: "continuation",
+      path: "/verify-email",
+    });
+    // Someone else's session does not vouch for the token holder.
+    expect(
+      classifySessionCreate({ path: "/verify-email", ...signedIn }, undefined, { userId: "u2" }),
+    ).toEqual({ kind: "method", method: "magic_link" });
+    expect(deriveSessionCreateMethod({ path: "/verify-email" })).toBe("magic_link");
   });
 
   it("an unclassified session-creating path is refused for a user under a restricted allowedMethods", async () => {
@@ -441,6 +535,114 @@ describe("gap 4 — unknown sign-in methods are not silently exempt", () => {
     ).rejects.toMatchObject({
       body: { code: "METHOD_NOT_ALLOWED", message: expect.stringContaining("email_otp") },
     });
+  });
+});
+
+describe("gap 4 — /verify-email auto-sign-in is a sign-in, not a continuation", () => {
+  /**
+   * `makeAuth` does not expose betterAuth-level options; the runtime context
+   * (`auth.$context`) holds the `options` object every handler reads, so the
+   * e-mail-verification switch is set there (mutating `auth.options` does
+   * not reach it).
+   */
+  async function withAutoSignIn(t: TestAuth): Promise<{ lastToken: () => string }> {
+    let token = "";
+    const context = (await authContext(t)) as {
+      options: { emailVerification?: Record<string, unknown> };
+    };
+    context.options.emailVerification = {
+      autoSignInAfterVerification: true,
+      sendVerificationEmail: async (data: { token: string }) => {
+        token = data.token;
+      },
+    };
+    return {
+      lastToken: () => {
+        if (!token) throw new Error("no verification e-mail captured");
+        return token;
+      },
+    };
+  }
+
+  async function sessionCount(t: TestAuth): Promise<number> {
+    const r = await t.client.execute(`SELECT count(*) AS n FROM session`);
+    return Number(r.rows[0]!.n);
+  }
+
+  it("a member of an allowedMethods:[sso] org cannot sign in through the verification link", async () => {
+    const t = await makeAuth();
+    const mail = await withAutoSignIn(t);
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    const { userId } = await signUpOwner(t, "contractor@gmail.test");
+    await insertMemberRow(t, orgId, userId, "member");
+    expect((await setPolicy(t, cookie, { orgId, allowedMethods: ["sso"] })).status).toBe(200);
+
+    const pw = await t.api.post("/sign-in/email", {
+      email: "contractor@gmail.test",
+      password: "password1234",
+    });
+    expect(pw.status).toBe(403);
+    expect((await pw.json()).code).toBe("METHOD_NOT_ALLOWED");
+
+    const sent = await t.api.post("/send-verification-email", { email: "contractor@gmail.test" });
+    expect(sent.status).toBe(200);
+    const before = await sessionCount(t);
+
+    const verify = await t.api.get(`/verify-email?token=${encodeURIComponent(mail.lastToken())}`);
+    expect(verify.status).toBe(403);
+    expect((await verify.json()).code).toBe("METHOD_NOT_ALLOWED");
+    expect(verify.headers.getSetCookie()).toEqual([]);
+    expect(await sessionCount(t)).toBe(before);
+    // The address itself is verified — only the sign-in was refused.
+    const user = await t.client.execute({
+      sql: `SELECT emailVerified FROM user WHERE id = ?`,
+      args: [userId],
+    });
+    expect(Number(user.rows[0]!.emailVerified)).toBe(1);
+  });
+
+  it("someone else's signed-in session does not turn the token holder's sign-in into a continuation", async () => {
+    const t = await makeAuth();
+    const mail = await withAutoSignIn(t);
+    const { cookie: ownerCookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, ownerCookie);
+    const { userId } = await signUpOwner(t, "contractor@gmail.test");
+    await insertMemberRow(t, orgId, userId, "member");
+    expect((await setPolicy(t, ownerCookie, { orgId, allowedMethods: ["sso"] })).status).toBe(200);
+    expect(
+      (await t.api.post("/send-verification-email", { email: "contractor@gmail.test" })).status,
+    ).toBe(200);
+    const before = await sessionCount(t);
+
+    const verify = await t.api.get(`/verify-email?token=${encodeURIComponent(mail.lastToken())}`, {
+      cookie: ownerCookie,
+    });
+    expect(verify.status).toBe(403);
+    expect((await verify.json()).code).toBe("METHOD_NOT_ALLOWED");
+    expect(await sessionCount(t)).toBe(before);
+  });
+
+  it("the link still signs in a member whose org allows magic_link", async () => {
+    const t = await makeAuth();
+    const mail = await withAutoSignIn(t);
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    const { userId } = await signUpOwner(t, "contractor@gmail.test");
+    await insertMemberRow(t, orgId, userId, "member");
+    expect(
+      (await setPolicy(t, cookie, { orgId, allowedMethods: ["sso", "magic_link"] })).status,
+    ).toBe(200);
+    expect(
+      (await t.api.post("/send-verification-email", { email: "contractor@gmail.test" })).status,
+    ).toBe(200);
+    const before = await sessionCount(t);
+
+    const verify = await t.api.get(`/verify-email?token=${encodeURIComponent(mail.lastToken())}`);
+    expect(verify.status).toBe(200);
+    expect(await sessionCount(t)).toBe(before + 1);
+    const session = await t.api.get("/get-session", { cookie: extractCookie(verify) });
+    expect(((await session.json()) as { user: { id: string } }).user.id).toBe(userId);
   });
 });
 

@@ -30,7 +30,12 @@
 // `startsWith` so both `/sso/callback/:providerId` (pattern) /
 // `/sso/callback/okta` (concrete) and `/sso/saml2/sp/acs/:providerId` /
 // `/sso/saml2/sp/acs/okta` match regardless of which form this hook actually
-// observes.
+// observes. The *shared* OIDC callback `/sso/callback` (no provider
+// segment) is matched too: `@better-auth/sso` registers it unconditionally
+// and `/sign-in/sso` always stores the provider reference in the OAuth
+// state, so any IdP that redirects there — an attacker-controlled one
+// always will — completes a JIT sign-in through it just like the per-provider
+// route.
 //
 // Wired into `orgPolicy`'s `init()` (`./plugin.ts`) alongside the existing
 // `session.create.before` backstop — both are `databaseHooks` entries this
@@ -44,9 +49,13 @@ import type { GenericEndpointContext } from "better-auth";
 import { APIError } from "better-auth/api";
 import { findOrgsByEmailDomain } from "./home-realm";
 
-function isSsoCallbackPath(path: string | undefined): boolean {
+export function isSsoCallbackPath(path: string | undefined): boolean {
   if (!path) return false;
-  return path.startsWith("/sso/callback/") || path.startsWith("/sso/saml2/sp/acs");
+  return (
+    path === "/sso/callback" ||
+    path.startsWith("/sso/callback/") ||
+    path.startsWith("/sso/saml2/sp/acs")
+  );
 }
 
 /**

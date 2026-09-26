@@ -317,15 +317,62 @@ export async function isOrgOwner(
 }
 
 /**
+ * Upstream caps one `findMany` page at
+ * `advanced.database.defaultFindManyLimit ?? 100` rows — an *implicit* cap
+ * when the call passes no `limit` — so the membership scan pages in that
+ * unit (`offset` stepping), sorted by `id` for a stable walk.
+ */
+const MEMBER_PAGE_SIZE = 100;
+
+/**
+ * Default `max` for `memberOrgIds`. The preset leaves upstream's
+ * `organizationLimit` unset (unlimited self-serve orgs — a product decision,
+ * see `docs/security.md`), so a user's membership count is attacker-chosen;
+ * 5000 is far past any legitimate count and not a number worth reaching.
+ */
+export const MEMBERSHIP_SCAN_MAX = 5000;
+
+/**
  * All `organizationId`s a user belongs to, via a raw `member` scan — used by
  * `./enforcement.ts`'s `resolvePolicyOrgsForUser` to collect every org with
  * a claim on the user, without assuming a particular adapter's
  * `distinct`/`groupBy` support.
+ *
+ * Paginated, and failing **closed** past `max`: an unpaginated `findMany`
+ * silently returned only the first 100 rows, so a member who first joined
+ * (or self-created) 100+ other orgs had their restricted org's `member` row
+ * dropped from the scan and escaped its `ssoEnforced`/`allowedMethods`/
+ * `sessionMaxAgeS` (F-03, second cut). More than `max` memberships is a
+ * 500 `POLICY_MEMBERSHIP_SCAN_OVERFLOW` (and a `logger.error`) rather than a
+ * truncated set that could hide an org with a claim on the user.
  */
-export async function memberOrgIds(ctx: GenericEndpointContext, userId: string): Promise<string[]> {
-  const rows = await ctx.context.adapter.findMany<{ organizationId: string }>({
-    model: "member",
-    where: [{ field: "userId", value: userId }],
-  });
-  return rows.map((r) => r.organizationId);
+export async function memberOrgIds(
+  ctx: GenericEndpointContext,
+  userId: string,
+  options: { max?: number } = {},
+): Promise<string[]> {
+  const max = options.max ?? MEMBERSHIP_SCAN_MAX;
+  const orgIds: string[] = [];
+  let offset = 0;
+  for (;;) {
+    const page = await ctx.context.adapter.findMany<{ organizationId: string }>({
+      model: "member",
+      where: [{ field: "userId", value: userId }],
+      limit: MEMBER_PAGE_SIZE,
+      offset,
+      sortBy: { field: "id", direction: "asc" },
+    });
+    for (const row of page) orgIds.push(row.organizationId);
+    if (orgIds.length > max) {
+      ctx.context.logger.error(
+        `enterprise-policy: user ${userId} holds more than ${max} memberships — refusing the policy resolution rather than truncating it (POLICY_MEMBERSHIP_SCAN_OVERFLOW)`,
+      );
+      throw new APIError("INTERNAL_SERVER_ERROR", {
+        code: "POLICY_MEMBERSHIP_SCAN_OVERFLOW",
+        message: "Too many organization memberships to resolve the sign-in policy safely.",
+      });
+    }
+    if (page.length < MEMBER_PAGE_SIZE) return orgIds;
+    offset += page.length;
+  }
 }

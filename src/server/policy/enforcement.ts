@@ -64,10 +64,10 @@ export type SessionCreateClassification =
   | { kind: "method"; method: string }
   /**
    * A session (re)issued inside a flow the user already authenticated for —
-   * a 2FA challenge answered, e-mail verified, password changed, 2FA
-   * toggled, an admin impersonating. The sign-in method was classified and
-   * enforced when the flow started; the continuation itself is not a
-   * method and is never refused as one.
+   * a 2FA challenge answered, an already-signed-in user's e-mail verified,
+   * password changed, 2FA toggled, an admin impersonating. The sign-in
+   * method was classified and enforced when the flow started; the
+   * continuation itself is not a method and is never refused as one.
    */
   | { kind: "continuation"; path: string }
   /**
@@ -81,7 +81,12 @@ export type SessionCreateClassification =
  * Session-creating paths that are not a sign-in method of their own (see
  * `SessionCreateClassification["kind"] === "continuation"`). Every entry was
  * traced to an `internalAdapter.createSession` call in the pinned
- * better-auth 1.7.5 or one of the preset's plugins.
+ * better-auth 1.7.5 or one of the preset's plugins. The `/two-factor/verify-*`
+ * endpoints run without a session (the challenge cookie stands in for it);
+ * the rest sit behind `sessionMiddleware`.
+ *
+ * `/verify-email` is deliberately **not** here: it is a continuation only
+ * for an already-signed-in user (`isVerifyEmailContinuation`).
  */
 const CONTINUATION_PATHS = new Set<string>([
   "/two-factor/verify-totp",
@@ -89,10 +94,36 @@ const CONTINUATION_PATHS = new Set<string>([
   "/two-factor/verify-backup-code",
   "/two-factor/enable",
   "/two-factor/disable",
-  "/verify-email",
   "/change-password",
   "/admin/impersonate-user",
 ]);
+
+/**
+ * Upstream `/verify-email` is reachable **unauthenticated** — the emailed
+ * token is the whole credential — and mints a brand-new session for a user
+ * with no current one under `emailVerification.autoSignInAfterVerification`
+ * (the deferred sign-in of a `requireEmailVerification` sign-up, whose
+ * `/sign-up/email` created no session for the backstop to classify) and in
+ * the two change-e-mail branches. Treating every `/verify-email` session as
+ * a continuation let a member of an `allowedMethods`-narrowed org sign in
+ * through the verification link (audit gap 4, second cut). Every upstream
+ * branch calls `getSessionFromCtx(ctx)` — which sets `ctx.context.session`
+ * to the result or `null` — before `createSession`, so the field is reliably
+ * populated at the hook call site: the call is a continuation only when the
+ * request already carries a session **for the same user** (upstream still
+ * mints a new session when the current one belongs to someone else).
+ * Otherwise it is a first sign-in whose credential is e-mail possession —
+ * classified as `magic_link`, the closed-set name for exactly that.
+ */
+function isVerifyEmailContinuation(
+  ctx: { context?: { session?: unknown } | null },
+  subject: { userId?: unknown } | undefined,
+): boolean {
+  const current = ctx.context?.session as { user?: { id?: unknown } } | null | undefined;
+  const currentUserId = current?.user?.id;
+  if (typeof currentUserId !== "string") return false;
+  return subject?.userId === undefined || subject.userId === currentUserId;
+}
 
 function classifyFromOptions(path: string, opts: EnterpriseOptions | undefined): string | null {
   const map = opts?.policy?.signInMethods;
@@ -118,10 +149,20 @@ function classifyFromOptions(path: string, opts: EnterpriseOptions | undefined):
  * Order: the product's `policy.signInMethods` first (so a product can
  * re-name or add a path), then the built-in map for the methods this
  * preset's own plugins expose, then continuations, then `unknown`.
+ *
+ * `session` is the row being created (its `userId`), which `/verify-email`
+ * needs to tell a continuation from a first sign-in — see
+ * `isVerifyEmailContinuation`.
  */
 export function classifySessionCreate(
-  ctx: { path?: string; params?: Record<string, string | undefined>; body?: unknown },
+  ctx: {
+    path?: string;
+    params?: Record<string, string | undefined>;
+    body?: unknown;
+    context?: { session?: unknown } | null;
+  },
   opts?: EnterpriseOptions,
+  session?: { userId?: unknown },
 ): SessionCreateClassification {
   const path = ctx.path;
   if (!path) return { kind: "unknown", path: null };
@@ -133,6 +174,11 @@ export function classifySessionCreate(
     return { kind: "method", method: "password" };
   }
   if (path === "/magic-link/verify") return { kind: "method", method: "magic_link" };
+  if (path === "/verify-email") {
+    return isVerifyEmailContinuation(ctx, session)
+      ? { kind: "continuation", path }
+      : { kind: "method", method: "magic_link" };
+  }
   if (path === "/passkey/verify-authentication" || path === "/passkey/verify-registration") {
     return { kind: "method", method: "passkey" };
   }
@@ -161,10 +207,16 @@ export function classifySessionCreate(
  * name. `null` no longer means "never blocked": see the hook below.
  */
 export function deriveSessionCreateMethod(
-  ctx: { path?: string; params?: Record<string, string | undefined>; body?: unknown },
+  ctx: {
+    path?: string;
+    params?: Record<string, string | undefined>;
+    body?: unknown;
+    context?: { session?: unknown } | null;
+  },
   opts?: EnterpriseOptions,
+  session?: { userId?: unknown },
 ): string | null {
-  const classified = classifySessionCreate(ctx, opts);
+  const classified = classifySessionCreate(ctx, opts, session);
   return classified.kind === "method" ? classified.method : null;
 }
 
@@ -328,7 +380,9 @@ function sessionExpiryMs(session: { expiresAt?: unknown }, ctx: GenericEndpointC
  * 2. a named method some org excluded → `METHOD_NOT_ALLOWED`.
  * 3. a path this layer cannot classify, for a user under any restriction →
  *    `METHOD_NOT_ALLOWED` (fail closed; declare it in
- *    `policy.signInMethods`). Continuations are never refused here.
+ *    `policy.signInMethods`). Continuations are never refused here — and a
+ *    `/verify-email` session for a user with no current session is not one
+ *    (`isVerifyEmailContinuation`): it is enforced as `magic_link`.
  * 4. `sessionMaxAgeS` → `expiresAt = min(requested, now + cap)`; never
  *    extends a session past the global lifetime.
  * Break-glass is honoured per org inside `getEffectivePolicy`.
@@ -355,7 +409,7 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
     const isSsoPath = typeof ctx.path === "string" && ctx.path.startsWith("/sso/");
     if (eff.ssoEnforced && !isSsoPath) throw ssoRequiredError();
 
-    const classified = classifySessionCreate(ctx, opts);
+    const classified = classifySessionCreate(ctx, opts, session);
     if (classified.kind === "method" && methodRefusedBy(eff, classified.method)) {
       throw methodNotAllowedError(classified.method);
     }

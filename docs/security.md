@@ -59,7 +59,12 @@ never against one "chosen" org:
   for a user in two or more orgs, so any member could shed their org's `ssoEnforced`/
   `allowedMethods` by creating a second organization (F-03). Self-serve org creation stays on
   (`organization.allowUserToCreateOrganization`, default `true`) precisely because it is no longer
-  an escape hatch.
+  an escape hatch. The `member` scan (`memberOrgIds`, `src/server/policy/store.ts`) is paginated
+  in upstream's 100-row `findMany` unit and fails closed past 5000 memberships
+  (`POLICY_MEMBERSHIP_SCAN_OVERFLOW`, 500): an unpaginated scan silently dropped the 101st row, so
+  a member who first self-created 100 orgs shed the restricted org's claim. The preset leaves
+  upstream's `organization.organizationLimit` unset (unlimited self-serve orgs); that is a product
+  decision each integrator can tighten, not a security control this layer relies on.
 - **Effective policy** (`getEffectivePolicy`, `src/server/policy/store.ts`): `ssoEnforced` is OR
   over the orgs where the user is _not_ that org's break-glass user; `allowedMethods` is the
   intersection over the same orgs; `sessionMaxAgeS` is the minimum over all orgs; `require2fa` is
@@ -77,14 +82,25 @@ never against one "chosen" org:
 - **Classification** (`classifySessionCreate`): the path creating the session maps to a method
   name (`password`, `magic_link`, `passkey`, `sso`, the social provider id) which `allowedMethods`
   binds once some org has narrowed the list; a _continuation_ (`/two-factor/verify-*`,
-  `/two-factor/enable|disable`, `/verify-email`, `/change-password`, `/admin/impersonate-user`)
-  re-issues a session inside a flow whose method was already enforced and is never refused as a
-  method; anything else is **unknown** and is refused (`METHOD_NOT_ALLOWED`) for a user under any
-  restriction (audit gap 4). A product that ships a sign-in plugin this preset does not (e-mail
-  OTP, phone, username, generic OAuth, SIWE, …) declares it in `policy.signInMethods`
-  (`"/sign-in/email-otp": "email_otp"`, or a prefix `"/phone/*": "phone"`); the declared names
-  become valid `allowedMethods` values on `POST /enterprise/policy/set`. An org that never narrowed
-  `allowedMethods` allows every method, declared or not.
+  `/two-factor/enable|disable`, `/change-password`, `/admin/impersonate-user`, and `/verify-email`
+  **only for an already-signed-in user**) re-issues a session inside a flow whose method was already
+  enforced and is never refused as a method; anything else is **unknown** and is refused
+  (`METHOD_NOT_ALLOWED`) for a user under any restriction (audit gap 4). `/verify-email` is
+  reachable unauthenticated — the emailed token is the whole credential — and upstream mints a
+  brand-new session there for a user with no current session when
+  `emailVerification.autoSignInAfterVerification` is set (the deferred sign-in of a
+  `requireEmailVerification` sign-up, which itself creates no session) and in the change-e-mail
+  branches; that session is enforced as `magic_link`, not exempted. A continuation is recognised only
+  when the request already carries a session for the same user. A product that ships a sign-in
+  plugin this preset does not (e-mail OTP, phone, username, generic OAuth, SIWE, …) declares it in
+  `policy.signInMethods` (`"/sign-in/email-otp": "email_otp"`, or a prefix `"/phone/*": "phone"`);
+  the declared names become valid `allowedMethods` values on `POST /enterprise/policy/set`. An org
+  that never narrowed `allowedMethods` allows every method, declared or not.
+  - _Integrator note._ A product that sets `emailVerification.autoSignInAfterVerification` and an
+    org that excludes `magic_link` from `allowedMethods` will see that org's members refused
+    (`METHOD_NOT_ALLOWED`) on the verification link's auto-sign-in; the e-mail is still marked
+    verified and the member signs in afterwards with an allowed method. Add `magic_link` to the
+    org's list to keep the one-click flow.
 - **Session cap.** `sessionMaxAgeS` is applied at creation (`expiresAt = min(requested, now +
 cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now + expiresIn`
   once `session.updateAge` has elapsed, which silently restored the global 7-day lifetime on the
@@ -94,7 +110,9 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   their upstream meaning; the cap is an upper bound on top of them, and the browser cookie's
   `Max-Age` may outlive the row (the server side is authoritative).
 - **SCIM-required JIT** (`src/server/policy/scim-required.ts`) refuses an SSO-callback account
-  creation when _any_ org matched by the e-mail domain has a live SCIM connection; the SSO
+  creation — from the per-provider `/sso/callback/:providerId`, the shared `/sso/callback` that
+  `@better-auth/sso` registers unconditionally, or the SAML ACS — when _any_ org matched by the
+  e-mail domain has a live SCIM connection; the SSO
   test-login finish and `/enterprise/sso/register` use the same domain matcher, and register stores
   the normalised list (trimmed, lower-cased, de-duplicated) or refuses one that could never match
   (`SSO_DOMAIN_INVALID`).
