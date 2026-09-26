@@ -12,6 +12,19 @@ import { orgPolicy } from "./policy/plugin";
 import { enterpriseApi } from "./enterprise-api/plugin";
 import { assertEnterpriseOptions } from "./options";
 
+/**
+ * Plugin id of the API-key lifecycle plugin (use-time user checks and
+ * revocation on ban/removal). The preset reserves its slot — directly after
+ * upstream `api-key`, before `sso` — so the plugin order is fixed once; this
+ * build registers the id with no hooks, and the lifecycle hooks land in the
+ * same slot.
+ */
+export const API_KEY_LIFECYCLE_PLUGIN_ID = "enterprise-api-keys";
+
+function apiKeyLifecycleSlot(): BetterAuthPlugin {
+  return { id: API_KEY_LIFECYCLE_PLUGIN_ID, hooks: { before: [], after: [] } };
+}
+
 export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
   // `secretsKey` is load-bearing as of the pre-publish security pass (C-04):
   // it encrypts `ssoProvider` secret material at rest, so the documented
@@ -23,10 +36,22 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
   assertEnterpriseOptions(opts);
   return [
     admin(),
-    organization({ teams: { enabled: true } }),
+    organization({
+      teams: { enabled: true },
+      // Both set explicitly rather than inherited from upstream defaults —
+      // see `EnterpriseOptions.organization` (`./types.ts`) for why each
+      // default is what it is. `requireEmailVerificationOnInvitation` is
+      // the invitation half of the cross-tenant squat fix: an account
+      // minted for someone else's address must not be able to accept an
+      // invitation meant for that address's real owner.
+      requireEmailVerificationOnInvitation:
+        opts.organization?.requireEmailVerificationOnInvitation ?? true,
+      allowUserToCreateOrganization: opts.organization?.allowUserToCreateOrganization ?? true,
+    }),
     twoFactor(),
     passkey(),
     apiKey(),
+    apiKeyLifecycleSlot(),
     sso({
       domainVerification: { enabled: true },
       organizationProvisioning: { disabled: false, defaultRole: "member" },

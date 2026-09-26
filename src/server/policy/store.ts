@@ -106,6 +106,121 @@ export async function getOrgPolicy(ctx: GenericEndpointContext, orgId: string): 
   return toOrgPolicy(await findPolicyRow(ctx, orgId), orgId);
 }
 
+// --- effective (union-of-orgs) policy ---------------------------------------
+
+/**
+ * The policy that applies to one user across **every** org that has a claim
+ * on them (`resolvePolicyOrgsForUser`, `./enforcement.ts`): the strictest
+ * combination, never a single "chosen" org. Resolving to one org — and to
+ * *no* org when the choice was ambiguous — is what let any member escape
+ * `ssoEnforced`/`allowedMethods` by creating a second organization (F-03).
+ *
+ * Per field:
+ * - `ssoEnforced` — OR over the orgs where the user is **not** that org's
+ *   break-glass user (`sources.ssoEnforcedBy` lists them).
+ * - `allowedMethods` — intersection over the same non-break-glass orgs
+ *   (break-glass is the emergency password login for an SSO-only org, so an
+ *   org's own `allowedMethods` never binds its own break-glass user — the
+ *   same per-org exemption the single-org hook always had). An empty
+ *   intersection locks the user out of every method; that is the two orgs'
+ *   configuration, not a bug here.
+ * - `sessionMaxAgeS` — minimum over **all** orgs (break-glass included; a
+ *   session cap is a compliance control, not a sign-in gate).
+ * - `require2fa` — OR over **all** orgs.
+ * - `restricted` — whether any contributing org narrows sign-in at all
+ *   (`ssoEnforced` or an `allowedMethods` list smaller than the closed set);
+ *   the fail-closed switch for sign-in paths that can't be classified.
+ * - `sources` — which org contributed each constraint, for error messages
+ *   and audit rows.
+ *
+ * `orgIds = []` yields the permissive default (no policy applies), matching
+ * "free agents unchanged".
+ */
+export interface EffectivePolicy {
+  /** The orgs considered, in the order given (de-duplicated). */
+  orgIds: string[];
+  ssoEnforced: boolean;
+  allowedMethods: string[];
+  sessionMaxAgeS: number | null;
+  require2fa: boolean;
+  restricted: boolean;
+  /** `true` when the user is some contributing org's break-glass user. */
+  breakGlass: boolean;
+  sources: {
+    ssoEnforcedBy: string[];
+    allowedMethodsBy: string[];
+    sessionMaxAgeBy: string | null;
+    require2faBy: string[];
+    breakGlassIn: string[];
+  };
+}
+
+export async function getEffectivePolicy(
+  ctx: GenericEndpointContext,
+  orgIds: readonly string[],
+  userId: string | null,
+): Promise<EffectivePolicy> {
+  const ids = [...new Set(orgIds)];
+  const policies = await Promise.all(ids.map((orgId) => getOrgPolicy(ctx, orgId)));
+
+  const sources: EffectivePolicy["sources"] = {
+    ssoEnforcedBy: [],
+    allowedMethodsBy: [],
+    sessionMaxAgeBy: null,
+    require2faBy: [],
+    breakGlassIn: [],
+  };
+  const methodSets: Array<Set<string>> = [];
+  let sessionMaxAgeS: number | null = null;
+  let require2fa = false;
+
+  for (const policy of policies) {
+    const isBreakGlass = !!userId && policy.breakGlassUserId === userId;
+    if (isBreakGlass) sources.breakGlassIn.push(policy.orgId);
+
+    if (!isBreakGlass) {
+      if (policy.ssoEnforced) sources.ssoEnforcedBy.push(policy.orgId);
+      const methods = new Set(policy.allowedMethods);
+      if (!ALLOWED_METHOD_VALUES.every((m) => methods.has(m))) {
+        sources.allowedMethodsBy.push(policy.orgId);
+      }
+      methodSets.push(methods);
+    }
+
+    if (
+      policy.sessionMaxAgeS != null &&
+      (sessionMaxAgeS === null || policy.sessionMaxAgeS < sessionMaxAgeS)
+    ) {
+      sessionMaxAgeS = policy.sessionMaxAgeS;
+      sources.sessionMaxAgeBy = policy.orgId;
+    }
+    if (policy.require2fa) {
+      require2fa = true;
+      sources.require2faBy.push(policy.orgId);
+    }
+  }
+
+  const ssoEnforced = sources.ssoEnforcedBy.length > 0;
+  // Intersection over the non-break-glass orgs, in the first org's order;
+  // no contributing org at all (empty `orgIds`, or break-glass everywhere)
+  // means the permissive default.
+  const first = methodSets[0];
+  const allowedMethods =
+    first === undefined
+      ? [...ALLOWED_METHOD_VALUES]
+      : [...first].filter((m) => methodSets.every((set) => set.has(m)));
+  return {
+    orgIds: ids,
+    ssoEnforced,
+    allowedMethods,
+    sessionMaxAgeS,
+    require2fa,
+    restricted: ssoEnforced || sources.allowedMethodsBy.length > 0,
+    breakGlass: sources.breakGlassIn.length > 0,
+    sources,
+  };
+}
+
 // --- org membership/role helpers -----------------------------------------
 
 export async function getMemberRoles(

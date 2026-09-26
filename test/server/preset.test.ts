@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { enterprisePreset } from "../../src/server/preset";
+import { API_KEY_LIFECYCLE_PLUGIN_ID, enterprisePreset } from "../../src/server/preset";
 import { EXPECTED_TABLES } from "../../src/schema/expected";
 import { makeAuth } from "../helpers/auth";
 
@@ -12,12 +12,14 @@ describe("enterprisePreset", () => {
       resolveEntitlements: async () => new Set(),
     });
 
+    expect(API_KEY_LIFECYCLE_PLUGIN_ID).toBe("enterprise-api-keys");
     expect(plugins.map((p) => p.id)).toEqual([
       "admin",
       "organization",
       "two-factor",
       "passkey",
       "api-key",
+      API_KEY_LIFECYCLE_PLUGIN_ID, // "enterprise-api-keys": directly after upstream api-key, before sso
       "sso",
       "scim",
       "enterprise-gate",

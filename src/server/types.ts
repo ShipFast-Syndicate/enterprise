@@ -36,7 +36,7 @@ export interface EnterpriseOptions {
   /** Independent >=32 character HMAC key for managed SCIM credentials. */
   scimCredentialHashSecret: string;
   /**
-   * Audit log retention and export bounds.
+   * Audit log retention, export bounds and chain keying.
    *
    * `retentionDays` (default 365) drives archival compaction: rows older
    * than the window are replaced by a single signed
@@ -44,8 +44,97 @@ export interface EnterpriseOptions {
    * (C-02). `exportMaxRows` (default 100 000) caps one
    * `/enterprise/audit/export` call — past it the endpoint answers `413`
    * and asks the caller to narrow the range (M-05).
+   *
+   * `chainKey` (opt-in, `>= 32` characters, independent of `secretsKey` and
+   * `scimCredentialHashSecret`) turns the per-org hash chain into an
+   * HMAC-SHA256 chain. Without it the chain only proves internal
+   * consistency: anyone with database write can rewrite an org's whole
+   * chain consistently. With it, a rewrite needs the key. Adoption is
+   * monotonic — once an org's chain has a keyed row, an unkeyed row after
+   * it (or verification without the key) reports the chain as broken, so
+   * treat the key like the other two secrets: set once from a secret store,
+   * never remove it. Keep it out of the database.
    */
-  audit?: { retentionDays?: number; exportMaxRows?: number };
+  audit?: { retentionDays?: number; exportMaxRows?: number; chainKey?: string };
+  /**
+   * SSO trust boundaries.
+   *
+   * `domainBinding` (default `"verified-domain"`): an SSO sign-in — the JIT
+   * user creation *and* every session the provider signs in — is only
+   * honoured when the signing provider is domain-verified for the user's
+   * e-mail domain. `"off"` restores the upstream behaviour in which any
+   * tenant's IdP can sign in (and create) accounts for **any** e-mail
+   * address on the platform — the cross-tenant account-squatting class
+   * GHSA-8p84-pc7q-69jr describes. It is an operator-level switch on
+   * purpose (a per-org allow-list would be controlled by the very tenant
+   * the binding protects against); a warning is logged at construction
+   * when it is off.
+   *
+   * `trustVerifiedDomainEmail` (default `true`): a user created through a
+   * domain-bound SSO sign-in is stored `emailVerified: true` — the IdP owns
+   * that domain and vouched for the address, which is exactly what an
+   * e-mail round-trip would prove. `false` leaves upstream's own claim
+   * handling in charge.
+   *
+   * `allowedIssuers`: an allow-list for the `issuer` an org admin may
+   * register or update a provider to — exact strings, `RegExp`s, or a
+   * predicate receiving the issuer and the target org. Absent = any issuer
+   * (upstream behaviour). `trustedOrigins` is **not** an issuer allow-list;
+   * this is.
+   */
+  sso?: {
+    domainBinding?: "verified-domain" | "off";
+    trustVerifiedDomainEmail?: boolean;
+    allowedIssuers?:
+      | Array<string | RegExp>
+      | ((issuer: string, ctx: { organizationId: string | null }) => boolean | Promise<boolean>);
+  };
+  /**
+   * Forwarded to the upstream `organization()` plugin by the preset.
+   *
+   * `requireEmailVerificationOnInvitation` (default `true` here; upstream
+   * defaults it to `false` for opaque invitation ids): accepting or
+   * rejecting an invitation requires the session's e-mail to be verified,
+   * so an account minted for someone else's address cannot cash in an
+   * invitation meant for the real owner. Opt out only when every sign-up
+   * path in the product verifies e-mail some other way.
+   *
+   * `allowUserToCreateOrganization` (default `true`, the upstream default —
+   * kept deliberately: self-serve org creation is a product feature, and
+   * the policy layer now applies the union of every org's policy, so a
+   * second organization is no longer an escape hatch).
+   */
+  organization?: {
+    requireEmailVerificationOnInvitation?: boolean;
+    allowUserToCreateOrganization?:
+      boolean | ((user: { id: string; email: string }) => boolean | Promise<boolean>);
+  };
+  /**
+   * Sign-in policy classification.
+   *
+   * `signInMethods`: extra endpoint → method-name mappings for sign-in
+   * plugins this preset does not ship (`"/sign-in/email-otp": "email_otp"`,
+   * or a prefix `"/phone/*": "phone"`). A session created from a path the
+   * layer cannot classify is **refused** for a user under a restricted
+   * policy, so a product adding such a plugin declares it here and lists the
+   * method in the org's `allowedMethods`. Method names are `[a-z_][a-z0-9_]*`.
+   *
+   * `twoFactor.satisfiedBy` (default `["sso"]`): sign-in methods that count
+   * as having satisfied `require2fa` on their own (the IdP did MFA).
+   * `twoFactor.enrollmentPaths`: extra request paths an un-enrolled user of
+   * a `require2fa` org may still call (the product's enrolment UI backend).
+   */
+  policy?: {
+    signInMethods?: Record<string, string>;
+    twoFactor?: { satisfiedBy?: string[]; enrollmentPaths?: string[] };
+  };
+  /**
+   * API-key lifetime bounds forwarded to the upstream `apiKey()` plugin:
+   * `defaultExpiresInS` (default 90 days, in **seconds**; `null` = keys
+   * never expire unless the caller asks) and `maxExpiresInDays` (default
+   * 365) — the longest lifetime a caller may request.
+   */
+  apiKeys?: { defaultExpiresInS?: number | null; maxExpiresInDays?: number };
   /**
    * SCIM Groups behavior — the static fallback used when an org's
    * `org_policy.group_role_map` is empty. @default groupRoleMap {}

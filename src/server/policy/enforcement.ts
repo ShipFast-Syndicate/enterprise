@@ -7,10 +7,37 @@
 
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthMiddleware } from "better-auth/api";
-import { findOrgByEmailDomain } from "./home-realm";
+import { findOrgByEmailDomain, findOrgsByEmailDomain } from "./home-realm";
 import { getOrgPolicy, memberOrgIds } from "./store";
 
 // --- policy-org resolution -------------------------------------------------
+
+/**
+ * Every org that has a claim on a user's sign-in policy — the **union** of
+ * the request's active organization, every org the user is a member of, and
+ * every org owning a verified SSO provider for the user's e-mail domain
+ * (`findOrgsByEmailDomain`, upstream-parity matching). De-duplicated, in that
+ * order. Feed the result to `getEffectivePolicy` (`./store.ts`).
+ *
+ * This replaces the single-org, priority-ordered `resolvePolicyOrgForUser`
+ * below, which returned `null` — no policy at all — for a user in two or
+ * more orgs and let any member escape `ssoEnforced`/`allowedMethods` by
+ * creating a second organization (F-03). An empty result still means "no
+ * policy applies" (free agents unchanged); a non-empty one is never
+ * narrowed by ambiguity.
+ */
+export async function resolvePolicyOrgsForUser(
+  ctx: GenericEndpointContext,
+  params: { userId: string | null; email: string; activeOrganizationId?: string | null },
+): Promise<string[]> {
+  const orgIds = new Set<string>();
+  if (params.activeOrganizationId) orgIds.add(params.activeOrganizationId);
+  if (params.userId) {
+    for (const orgId of await memberOrgIds(ctx, params.userId)) orgIds.add(orgId);
+  }
+  for (const match of await findOrgsByEmailDomain(ctx, params.email)) orgIds.add(match.orgId);
+  return [...orgIds];
+}
 
 /**
  * Resolves which org's policy applies to a user, in priority order:

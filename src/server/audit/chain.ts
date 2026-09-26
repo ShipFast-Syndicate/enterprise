@@ -13,6 +13,18 @@
 // `hashRow`/`verifyChain` are `Promise`-returning here even though the task
 // brief's inline sketch omits the `Promise<...>` wrapper.
 //
+// Keyed chains (`audit.chainKey`, opt-in): the unkeyed chain only certifies
+// internal consistency — whoever holds database *write* (the attacker the
+// log is meant to catch) can rewrite an org's whole chain consistently and
+// `verify` says `ok`. With a `chainKey`, every link becomes
+// `"hmac:" + HMAC-SHA256(chainKey, prevHash + "\n" + canonical(row))`, which
+// a DB-write holder without the key cannot recompute. Adoption is
+// **monotonic**: a chain may go from unkeyed rows to keyed rows once (the
+// day the operator sets the key), never back — a bare row *after* a keyed
+// one is reported as a break, since silently accepting it would let that
+// same attacker downgrade the chain to the hash they *can* compute. A keyed
+// row verified without the key is `keyed_row_without_key`, never `ok`.
+//
 // `createdAt` is carried as an epoch-ms `number` throughout this module
 // (never a `Date`): that keeps `canonical`/`hashRow` pure and portable, and
 // pushes the DB-specific `Date <-> number` conversion to the boundary in
@@ -127,11 +139,51 @@ function toHex(buffer: ArrayBuffer): string {
     .join("");
 }
 
-/** sha256 hex of `prevHash + "\n" + canonical(row)`, via Web Crypto. */
-export async function hashRow(prevHash: string, row: AuditRowForHash): Promise<string> {
+/** Prefix that marks a row hash as keyed (`hmac:` + hex HMAC-SHA256) rather than a bare sha256 hex. */
+export const KEYED_HASH_PREFIX = "hmac:";
+
+/** Whether a stored `hash` (or a carried `prevHash`) was produced under a `chainKey`. */
+export function isKeyedHash(hash: string): boolean {
+  return hash.startsWith(KEYED_HASH_PREFIX);
+}
+
+// Imported HMAC keys are cached per key string: `importKey` is not free and
+// a process only ever sees one or two distinct keys (the configured one, and
+// a rotated one during a `--expect-head` verification).
+const hmacKeys = new Map<string, Promise<CryptoKey>>();
+
+function hmacKeyFor(key: string): Promise<CryptoKey> {
+  let imported = hmacKeys.get(key);
+  if (!imported) {
+    imported = crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(key),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    hmacKeys.set(key, imported);
+  }
+  return imported;
+}
+
+/**
+ * The hash of one link: sha256 hex of `prevHash + "\n" + canonical(row)`
+ * when unkeyed; `"hmac:" + HMAC-SHA256(key, same bytes)` hex when a
+ * `key` (`audit.chainKey`) is given. Web Crypto in both cases.
+ */
+export async function hashRow(
+  prevHash: string,
+  row: AuditRowForHash,
+  key?: string,
+): Promise<string> {
   const bytes = new TextEncoder().encode(`${prevHash}\n${canonical(row)}`);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return toHex(digest);
+  if (key === undefined) {
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return toHex(digest);
+  }
+  const signature = await crypto.subtle.sign("HMAC", await hmacKeyFor(key), bytes);
+  return `${KEYED_HASH_PREFIX}${toHex(signature)}`;
 }
 
 /**
@@ -165,12 +217,22 @@ export async function hashRow(prevHash: string, row: AuditRowForHash): Promise<s
  * is an external anchor (I-08's periodic signed, off-box checkpoint), still
  * the post-v0.1 answer.
  */
-export async function verifyChain(
-  rows: AuditRow[],
-): Promise<{ ok: true } | { ok: false; brokenAtSeq: number }> {
-  const result = await verifyChainPage(rows, null);
+export async function verifyChain(rows: AuditRow[], key?: string): Promise<VerifyResult> {
+  const result = await verifyChainPage(rows, null, key);
   return result.ok ? { ok: true } : result;
 }
+
+/**
+ * Why a chain failed to verify beyond "the hash didn't match":
+ * `keyed_row_without_key` — the row at `brokenAtSeq` is keyed and the
+ * verifier was not given the `chainKey`, so it cannot be checked at all
+ * (as opposed to having been checked and found wrong).
+ */
+export type VerifyFailureReason = "keyed_row_without_key";
+
+export type VerifyFailure = { ok: false; brokenAtSeq: number; reason?: VerifyFailureReason };
+export type VerifyResult = { ok: true } | VerifyFailure;
+export type VerifyPageResult = { ok: true; prevHash: string } | VerifyFailure;
 
 /**
  * One page of `verifyChain`, so a caller can walk a long chain in bounded
@@ -185,9 +247,25 @@ export async function verifyChain(
 export async function verifyChainPage(
   rows: AuditRow[],
   prevHashIn: string | null,
-): Promise<{ ok: true; prevHash: string } | { ok: false; brokenAtSeq: number }> {
+  key?: string,
+): Promise<VerifyPageResult> {
   const sorted = [...rows].sort((a, b) => a.seq - b.seq);
   let prevHash = prevHashIn ?? GENESIS;
+
+  // One link, under the monotonic-upgrade rule. The keyed/unkeyed state of
+  // the chain *so far* is exactly whether `prevHash` is keyed (`GENESIS` and
+  // every bare sha256 are not; every HMAC link is) — no extra state has to
+  // survive a page boundary.
+  const checkLink = async (row: AuditRow, prev: string): Promise<VerifyFailure | null> => {
+    const keyedSoFar = isKeyedHash(prev);
+    const rowKeyed = isKeyedHash(row.hash);
+    if (keyedSoFar && !rowKeyed) return { ok: false, brokenAtSeq: row.seq };
+    if (rowKeyed && key === undefined) {
+      return { ok: false, brokenAtSeq: row.seq, reason: "keyed_row_without_key" };
+    }
+    const expected = await hashRow(prev, row, rowKeyed ? key : undefined);
+    return expected === row.hash ? null : { ok: false, brokenAtSeq: row.seq };
+  };
 
   const anchor = prevHashIn === null ? sorted[0] : undefined;
   if (
@@ -200,9 +278,8 @@ export async function verifyChainPage(
     if (typeof lastHash !== "string" || anchor.prevHash !== lastHash) {
       return { ok: false, brokenAtSeq: anchor.seq };
     }
-    if ((await hashRow(anchor.prevHash, anchor)) !== anchor.hash) {
-      return { ok: false, brokenAtSeq: anchor.seq };
-    }
+    const anchorFailure = await checkLink(anchor, anchor.prevHash);
+    if (anchorFailure) return anchorFailure;
     // The anchor is never itself a link in the chain — it is a stand-in for
     // the prefix that is (or is about to be) gone, which is why the rows
     // after it carry the *compacted-away* tail's hash, not the anchor's own.
@@ -226,10 +303,8 @@ export async function verifyChainPage(
     if (row.prevHash !== prevHash) {
       return { ok: false, brokenAtSeq: row.seq };
     }
-    const expected = await hashRow(prevHash, row);
-    if (expected !== row.hash) {
-      return { ok: false, brokenAtSeq: row.seq };
-    }
+    const failure = await checkLink(row, prevHash);
+    if (failure) return failure;
     prevHash = row.hash;
   }
   return { ok: true, prevHash };
@@ -372,7 +447,20 @@ function nextSeqBaseOf(row: {
   return typeof compactedThroughSeq === "number" ? Math.max(row.seq, compactedThroughSeq) : row.seq;
 }
 
-async function insertNextRow(adapter: AuditAdapter, input: AuditInput): Promise<AuditRow> {
+/**
+ * Options shared by the two chain writers. `chainKey` (`audit.chainKey`)
+ * makes every link this call produces an HMAC link — see the header. Callers
+ * that pass nothing get the byte-identical unkeyed behaviour.
+ */
+export interface ChainWriteOptions {
+  chainKey?: string;
+}
+
+async function insertNextRow(
+  adapter: AuditAdapter,
+  input: AuditInput,
+  chainKey: string | undefined,
+): Promise<AuditRow> {
   const last = await adapter.findMany<{
     seq: number;
     hash: string;
@@ -401,7 +489,7 @@ async function insertNextRow(adapter: AuditAdapter, input: AuditInput): Promise<
     metadata: input.metadata ?? {},
     createdAt,
   };
-  const hash = await hashRow(prevHash, rowForHash);
+  const hash = await hashRow(prevHash, rowForHash, chainKey);
 
   const created = await adapter.create<AuditEventDbRow>({
     model: "auditEvent",
@@ -435,14 +523,15 @@ async function insertNextRow(adapter: AuditAdapter, input: AuditInput): Promise<
 export async function writeAudit(
   ctx: { context: Pick<AuthContext, "adapter"> },
   input: AuditInput,
+  options: ChainWriteOptions = {},
 ): Promise<AuditRow> {
   const adapter = ctx.context.adapter as unknown as AuditAdapter;
   return withOrgLock(input.orgId, async () => {
     try {
-      return await insertNextRow(adapter, input);
+      return await insertNextRow(adapter, input, options.chainKey);
     } catch (err) {
       if (!isUniqueViolation(err)) throw err;
-      return await insertNextRow(adapter, input);
+      return await insertNextRow(adapter, input, options.chainKey);
     }
   });
 }
@@ -487,6 +576,7 @@ export async function compactChain(
   ctx: { context: Pick<AuthContext, "adapter"> },
   orgId: string,
   cutoff: Date,
+  options: ChainWriteOptions = {},
 ): Promise<CompactionResult | null> {
   const adapter = ctx.context.adapter as unknown as AuditAdapter;
   return withOrgLock(orgId, async () => {
@@ -549,7 +639,7 @@ export async function compactChain(
     };
 
     // Phase 1 — write the anchor, marked pending.
-    const pendingHash = await hashRow(through.hash, rowForHash);
+    const pendingHash = await hashRow(through.hash, rowForHash, options.chainKey);
     const anchorRow = await adapter.create<AuditEventDbRow>({
       model: "auditEvent",
       data: {
@@ -572,7 +662,7 @@ export async function compactChain(
       where: [{ field: "id", value: anchorRow.id }],
       update: {
         action: RETENTION_COMPACTED_ACTION,
-        hash: await hashRow(through.hash, completed),
+        hash: await hashRow(through.hash, completed, options.chainKey),
       },
     });
 
