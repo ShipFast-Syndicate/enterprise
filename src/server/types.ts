@@ -190,7 +190,10 @@ export interface EnterpriseOptions {
    * `/sign-up/email`), or when it is a continuation of such a flow; every
    * other method — magic link, passkey, a social provider — is refused
    * (`TWO_FACTOR_REQUIRED`) unless named here. Name a method only when it
-   * carries a second factor by itself.
+   * carries a second factor by itself. The method is judged both when the
+   * session is created and, from the value recorded on the session row, on
+   * every later request — so a session that predates the policy (a flip, or a
+   * later membership) is re-judged, not grandfathered.
    * `twoFactor.enrollmentPaths`: extra request paths a signed-in user who
    * still has to enrol may call (the product's enrolment UI backend), on
    * top of `TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS`; everything else answers

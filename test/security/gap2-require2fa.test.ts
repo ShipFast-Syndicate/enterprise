@@ -12,7 +12,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { BetterAuthPlugin } from "better-auth";
 import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import { magicLink } from "better-auth/plugins";
-import { buildSessionCreateBeforeHook } from "../../src/server/policy/enforcement";
+import {
+  buildSessionCreateBeforeHook,
+  SESSION_AUTH_METHOD_FIELD,
+} from "../../src/server/policy/enforcement";
 import type { EnterpriseOptions } from "../../src/server/types";
 import {
   createOrg,
@@ -346,9 +349,21 @@ describe("gap 2 — which sessions stand under require2fa (session-creation hook
           body: { code: "METHOD_NOT_ALLOWED" },
         });
       }
+      // Paths that stand and are classified as a *method*: the session is
+      // allowed AND the method is recorded on it (`enterpriseAuthMethod`), the
+      // durable record the enrolment gate later re-judges from.
+      for (const { path, method } of [
+        { path: "/sign-in/email", method: "password" }, // upstream challenges an enrolled user; the gate confines an un-enrolled one
+        { path: "/sign-up/email", method: "password" },
+      ]) {
+        await expect(
+          hook({ userId } as never, { path, context } as never),
+          `${path} enrolled=${enrolled}`,
+        ).resolves.toMatchObject({ data: { [SESSION_AUTH_METHOD_FIELD]: method } });
+      }
+      // Continuations stand and record no method (the session's factor state
+      // already governs it): the hook returns nothing to change.
       for (const ctx of [
-        { path: "/sign-in/email" }, // upstream challenges an enrolled user; the gate confines an un-enrolled one
-        { path: "/sign-up/email" },
         { path: "/two-factor/verify-totp" },
         { path: "/two-factor/verify-otp" },
         { path: "/two-factor/verify-backup-code" },
@@ -383,7 +398,7 @@ describe("gap 2 — which sessions stand under require2fa (session-creation hook
 
     await expect(
       hook({ userId } as never, { path: "/passkey/verify-authentication", context } as never),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ data: { [SESSION_AUTH_METHOD_FIELD]: "passkey" } });
     await expect(
       hook({ userId } as never, { path: "/magic-link/verify", context } as never),
     ).rejects.toMatchObject({ body: { code: "TWO_FACTOR_REQUIRED" } });

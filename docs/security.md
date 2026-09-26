@@ -134,15 +134,31 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
     it stands for the same reason; a method that carries a second factor by itself (a passkey policy,
     an OTP plugin the product vouches for) is named in `satisfiedBy`.
   - _On every request_ (`buildTwoFactorEnrollmentGate`, a `hooks.before` outside
-    `TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS`): a signed-in user who **holds a password** (upstream's
-    `/two-factor/enable` re-authenticates with it — `findCredentialAccount`, the same read) and has
-    not enrolled is answered `403 TWO_FACTOR_ENROLLMENT_REQUIRED` with the allow-list in the body:
-    `/get-session`, `/sign-out`, `/enterprise/home-realm`, `/two-factor/enable|get-totp-uri|verify-totp|send-otp|verify-otp`,
+    `TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS`): the session is judged the same way the create rule judges
+    a new one, so a policy that came to apply **after** the session was minted (an org flips
+    `require2fa` on, or the user later joins — or is domain-claimed by — an org that already required
+    it) is enforced on the standing session, not only at the next sign-in. A signed-in user who
+    **holds a password** (upstream's `/two-factor/enable` re-authenticates with it —
+    `findCredentialAccount`, the same read) and has not enrolled is confined to the enrolment
+    allow-list (`403 TWO_FACTOR_ENROLLMENT_REQUIRED` with the list in the body): `/get-session`,
+    `/sign-out`, `/enterprise/home-realm`, `/two-factor/enable|get-totp-uri|verify-totp|send-otp|verify-otp`,
     plus the product's `policy.twoFactor.enrollmentPaths`. The first successful
-    `/two-factor/verify-totp` flips `twoFactorEnabled` and lifts the gate. A user with no password
-    (SSO- or magic-link-only) cannot enrol here and is not gated; their second factor is the method
-    that satisfied the policy. The gate reads nothing beyond one indexed `org_policy` probe on a
-    deployment where no org requires a second factor.
+    `/two-factor/verify-totp` flips `twoFactorEnabled` and lifts the gate. A user with **no password**
+    (SSO-, magic-link-, social- or passkey-only) cannot enrol here: their session stands only when the
+    method it was minted with satisfies the policy (`policy.twoFactor.satisfiedBy`); otherwise — a
+    session that predates the requirement, or a session minted before this version recorded a method
+    (see below) — it is refused (`403 TWO_FACTOR_REQUIRED`) and the user signs in again. Impersonating
+    such a user inherits the same standing. The session is resolved through the same path the endpoint
+    will use, so a session carried by `Authorization: Bearer` (upstream's `bearer()` plugin) is judged
+    like a cookie one. The gate reads nothing beyond one indexed `org_policy` probe on a deployment
+    where no org requires a second factor.
+  - _The sign-in method recorded on the session._ The session-creation hook records the classified
+    method on the session row (`enterprise_auth_method`, added by migration `0003_require2fa.sql`;
+    server-written only). It is the durable record the gate and the refresh clamp re-judge from — the
+    one signal on a standing session of how it was authenticated. A session minted before this version
+    records nothing and is treated as satisfying no policy (fail closed): a no-credential holder of
+    such a session is refused until they sign in again. The refresh clamp does not extend a session
+    the gate would refuse, so `/get-session` cannot renew one indefinitely.
   - `/get-session` carries `enterprise: { require2fa, twoFactorEnabled, enrollmentRequired }` for a
     user under such a policy; `enrollmentRequired` is exactly the state the gate refuses on, so a
     product redirects to its enrolment UI on that flag.
@@ -271,8 +287,12 @@ whose `org_policy` row already has `require_2fa = 1` starts enforcing at upgrade
 hold a password and have not enrolled are confined to the enrolment allow-list
 (`TWO_FACTOR_ENROLLMENT_REQUIRED`) and its members who sign in with a magic link, a passkey or a
 social provider are refused (`TWO_FACTOR_REQUIRED`) unless `policy.twoFactor.satisfiedBy` names
-that method. There is no grace period. Check first, and add a redirect-to-enrolment on
-`enterprise.enrollmentRequired` in the product before upgrading:
+that method. There is no grace period. Sessions that existed before the upgrade record no sign-in
+method, so a no-credential holder of one (SSO-, magic-link-, social- or passkey-only) is refused
+until they sign in again — an SSO sign-in then satisfies the policy. Apply the migration
+(`0003_require2fa.sql` adds `enterprise_auth_method` to `session`) as part of the upgrade. Check
+first, and add a redirect-to-enrolment on `enterprise.enrollmentRequired` in the product before
+upgrading:
 
 ```sql
 -- organizations that will start enforcing at upgrade

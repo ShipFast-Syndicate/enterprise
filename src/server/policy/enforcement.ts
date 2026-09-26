@@ -56,6 +56,7 @@ import {
   memberOrgIds,
   twoFactorEnrollmentState,
   type EffectivePolicy,
+  type TwoFactorEnrollmentState,
 } from "./store";
 
 // --- policy-org resolution -------------------------------------------------
@@ -311,6 +312,35 @@ export function twoFactorSatisfiedBy(opts?: EnterpriseOptions): readonly string[
   return opts?.policy?.twoFactor?.satisfiedBy ?? DEFAULT_TWO_FACTOR_SATISFIED_BY;
 }
 
+/**
+ * The field key (a plugin-declared column on the core `session` model — see
+ * `./plugin.ts`'s `schema.session`) that records the classified sign-in
+ * *method* of the session, written by the session-creation backstop below at
+ * the moment the session is minted. It is the only durable record of how a
+ * live session came to exist: `require2fa` was enforced against this method
+ * when the session was created, but a policy can start applying to an already
+ * standing session **after** it was minted — an org flips `require2fa` on, or
+ * the user joins (or is claimed by the verified domain of) an org that
+ * already required it. The create hook never judged such a session, so the
+ * enrolment gate re-judges it on every request from this recorded method,
+ * exactly as the create hook would have (`twoFactorStanding`).
+ *
+ * A session minted before this field existed (a pre-upgrade row) carries
+ * `null` — which no `satisfiedBy` list contains, so it fails closed: an
+ * un-enrolled, no-credential user on such a session is refused and must sign
+ * in again (an SSO user's re-sign-in satisfies `require2fa`; a magic-link one
+ * is refused at creation, which is the point).
+ */
+export const SESSION_AUTH_METHOD_FIELD = "enterpriseAuthMethod";
+
+/** The classified method recorded on a session row, or `null` (continuation, unclassifiable, or a pre-upgrade row). */
+export function readSessionAuthMethod(
+  session: Record<string, unknown> | null | undefined,
+): string | null {
+  const value = session?.[SESSION_AUTH_METHOD_FIELD];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 function twoFactorRequiredError(method: string): APIError {
   return new APIError("FORBIDDEN", {
     code: "TWO_FACTOR_REQUIRED",
@@ -373,6 +403,47 @@ export function twoFactorRefusal(
   if (twoFactorSatisfiedBy(opts).includes(classified.method)) return null;
   if (twoFactorChallengeFollows(ctx)) return null;
   return twoFactorRequiredError(classified.method);
+}
+
+/**
+ * How an **already standing** session fares against a `require2fa` policy —
+ * the continuous counterpart of `twoFactorRefusal` (which judges a session
+ * only at creation). Evaluated on every request by the enrolment gate, and by
+ * the refresh clamp, so a policy that came to apply after the session was
+ * minted (a `require2fa` flip, or a later membership/domain claim) is enforced
+ * on the existing session rather than only on the next sign-in:
+ *
+ * - `"ok"` — the user has enrolled a second factor, or the session's recorded
+ *   sign-in method satisfies the policy (`policy.twoFactor.satisfiedBy`,
+ *   default `sso`). The same two ways a create-time session stands.
+ * - `"enrollment-required"` — the user holds a password account and has not
+ *   enrolled: confined to the enrolment allow-list until they do
+ *   (`TWO_FACTOR_ENROLLMENT_REQUIRED`).
+ * - `"two-factor-required"` — the user cannot enrol here (no password
+ *   account: SSO-, magic-link-, social- or passkey-only) and the session's
+ *   method does not satisfy the policy — including a pre-upgrade session that
+ *   records no method at all. There is no second factor to be had on this
+ *   session; it is refused (`TWO_FACTOR_REQUIRED`) and the user signs in
+ *   again (an SSO sign-in then satisfies the policy; a non-satisfying one is
+ *   refused at creation).
+ *
+ * `satisfiedBy` is checked before the enrol branch so a password holder whose
+ * *session* was minted by a satisfying method (e.g. an SSO sign-in) is not
+ * needlessly pushed into enrolment — the same judgement the create hook made
+ * for that session.
+ */
+export type TwoFactorStanding = "ok" | "enrollment-required" | "two-factor-required";
+
+export function twoFactorStanding(
+  opts: EnterpriseOptions | undefined,
+  sessionRow: Record<string, unknown>,
+  state: TwoFactorEnrollmentState,
+): TwoFactorStanding {
+  if (state.twoFactorEnabled) return "ok";
+  const method = readSessionAuthMethod(sessionRow);
+  if (method !== null && twoFactorSatisfiedBy(opts).includes(method)) return "ok";
+  if (state.canEnroll) return "enrollment-required";
+  return "two-factor-required";
 }
 
 // --- sign-in pre-flight (hooks.before on /magic-link/verify) --------------
@@ -555,6 +626,29 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
     const user = await ctx.context.internalAdapter.findUserById(session.userId);
     if (!user?.email) return;
 
+    // Record the classified sign-in method on the session row (a single
+    // `session` column, `SESSION_AUTH_METHOD_FIELD`) so a policy that starts
+    // applying *after* this session was minted — an org flipping `require2fa`
+    // on, or the user later joining/being domain-claimed by one that already
+    // required it — can be re-judged from the same method the create rule
+    // below judges now, by `twoFactorStanding`. Recorded for every session
+    // (independent of whether any org requires 2FA today), because that flip
+    // is exactly the case where no policy applied at creation. A continuation
+    // or an unclassifiable path records nothing (`null`): the former is a
+    // session for a user whose factor state already stands (`twoFactorEnabled`
+    // covers it), the latter fails closed.
+    const classified = classifySessionCreate(ctx, opts, session);
+    const methodPatch =
+      classified.kind === "method" ? { [SESSION_AUTH_METHOD_FIELD]: classified.method } : null;
+    const withMethod = (extra?: { expiresAt?: Date }) => {
+      const patch = { ...(methodPatch ?? {}), ...(extra ?? {}) };
+      if (Object.keys(patch).length === 0) return undefined;
+      // `expiresAt` on the incoming `session` is typed `unknown`; the merge
+      // keeps it a `Date` at runtime (upstream's `createSession` set it), and
+      // the cast re-asserts that for the hook's stricter return type.
+      return { data: { ...session, ...patch } as typeof session & { expiresAt?: Date } };
+    };
+
     // Rule 0 — the provider is looked up once and reused by rule 1. With the
     // binding and the allow-list both off it is still needed by rule 1 (and
     // only refused as unresolved there, when a decision actually depends on
@@ -588,7 +682,7 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
       email: user.email,
       activeOrganizationId,
     });
-    if (orgIds.length === 0) return;
+    if (orgIds.length === 0) return withMethod();
     const eff = await getEffectivePolicy(ctx, orgIds, session.userId, opts);
 
     if (eff.ssoEnforced) {
@@ -603,7 +697,6 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
       }
     }
 
-    const classified = classifySessionCreate(ctx, opts, session);
     if (classified.kind === "method" && methodRefusedBy(eff, classified.method)) {
       throw methodNotAllowedError(classified.method);
     }
@@ -622,9 +715,9 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
     if (eff.sessionMaxAgeS != null) {
       const cap = Date.now() + eff.sessionMaxAgeS * 1000;
       const expiresAt = new Date(Math.min(sessionExpiryMs(session, ctx), cap));
-      return { data: { ...session, expiresAt } };
+      return withMethod({ expiresAt });
     }
-    return;
+    return withMethod();
   };
 }
 
@@ -660,6 +753,24 @@ export function buildSessionUpdateBeforeHook(opts?: EnterpriseOptions) {
     });
     if (orgIds.length === 0) return;
     const eff = await getEffectivePolicy(ctx, orgIds, current.session.userId, opts);
+
+    // A session the enrolment gate would refuse under `require2fa` must not
+    // have its lifetime extended by `/get-session`'s refresh (which is on the
+    // gate's allow-list, so the gate never runs there). Keep the current
+    // expiry — the session runs down and is not renewed — matching the gate's
+    // refusal on every other path.
+    if (eff.require2fa) {
+      const state = await twoFactorEnrollmentState(ctx, current.session.userId);
+      const standing = twoFactorStanding(opts, current.session, state);
+      if (standing !== "ok") {
+        const currentExpiry = new Date(current.session.expiresAt).getTime();
+        if (Number.isFinite(currentExpiry) && requested.getTime() > currentExpiry) {
+          return { data: { ...data, expiresAt: new Date(currentExpiry) } };
+        }
+        return;
+      }
+    }
+
     if (eff.sessionMaxAgeS == null) return;
 
     const createdAt = new Date(current.session.createdAt).getTime();
@@ -715,23 +826,100 @@ function twoFactorEnrollmentRequiredError(allowed: ReadonlySet<string>): APIErro
 }
 
 /**
+ * A `require2fa`-gated session that cannot present a second factor is refused
+ * outright (rather than confined to enrolment) — a no-credential user whose
+ * session's method does not satisfy the policy. `TWO_FACTOR_REQUIRED`, the
+ * same code the create hook uses.
+ */
+function gateTwoFactorRequiredError(method: string | null): APIError {
+  return twoFactorRequiredError(method ?? "the current session");
+}
+
+/**
+ * The rewritten request headers a mounted header→cookie carrier would produce
+ * for this request, or `null`. The one carrier in scope is upstream's
+ * `bearer()` plugin, which converts an `Authorization: Bearer <token>` into
+ * the session cookie its own `hooks.before` sets — but that rewrite is merged
+ * into the request only *after* the whole before-hook pass, so a sibling
+ * before-hook (this gate) never sees it, whatever the plugin order. The gate
+ * therefore re-runs the mounted `bearer` plugin's own before-hook — the exact
+ * code path the request will take — and reads the cookie it sets, so a
+ * bearer-carried session is judged like a cookie one. A carrier that throws,
+ * or a token it will not accept, yields `null` (no session — fail closed,
+ * left to the endpoint to reject).
+ */
+async function bearerRewrittenHeaders(ctx: GenericEndpointContext): Promise<Headers | null> {
+  const carrier = ctx.request?.headers.get("authorization") ?? ctx.headers?.get("authorization");
+  if (!carrier) return null;
+  const plugin = ctx.context.options?.plugins?.find((p) => p.id === "bearer");
+  const beforeHooks = plugin?.hooks?.before ?? [];
+  for (const hook of beforeHooks) {
+    let matched = false;
+    try {
+      matched = hook.matcher(ctx as never);
+    } catch {
+      matched = false;
+    }
+    if (!matched) continue;
+    let result: unknown;
+    try {
+      result = await hook.handler(ctx as never);
+    } catch {
+      return null;
+    }
+    const direct = (result as { context?: { headers?: unknown } } | null)?.context?.headers;
+    if (direct instanceof Headers) return direct;
+    const wrapped = (result as { response?: { context?: { headers?: unknown } } } | null)?.response
+      ?.context?.headers;
+    if (wrapped instanceof Headers) return wrapped;
+  }
+  return null;
+}
+
+/**
+ * The session this request will resolve to at the endpoint, derived through
+ * the same code path the endpoint's `sessionMiddleware` uses — including the
+ * `bearer()` carrier a plain before-hook read would miss (see
+ * `bearerRewrittenHeaders`). Returns `null` when the request carries no
+ * session by any means the endpoint would accept.
+ */
+async function resolveGateSession(
+  ctx: GenericEndpointContext,
+): Promise<Awaited<ReturnType<typeof getSessionFromCtx>>> {
+  const session = await getSessionFromCtx(ctx);
+  if (session?.user) return session;
+  const rewritten = await bearerRewrittenHeaders(ctx);
+  if (!rewritten) return session;
+  if (!ctx.headers) ctx.headers = new Headers();
+  rewritten.forEach((value, key) => ctx.headers!.set(key, value));
+  ctx.context.session = null; // clear the negative cache so the re-read runs against the rewritten cookie
+  return await getSessionFromCtx(ctx);
+}
+
+/**
  * `hooks.before` on every request outside `twoFactorEnrollmentAllowedPaths`:
- * a signed-in user who holds a password and has not enrolled a second
- * factor, and on whom some org's `require2fa` applies (effective policy —
- * memberships, active org and verified-domain claims alike), is answered
- * `403 TWO_FACTOR_ENROLLMENT_REQUIRED` with the allow-list in the body.
+ * a signed-in user on whom some org's `require2fa` applies (effective policy —
+ * memberships, active org and verified-domain claims alike) is confined unless
+ * their session already stands under the policy (`twoFactorStanding`):
+ *
+ * - a password holder who has not enrolled → `403 TWO_FACTOR_ENROLLMENT_REQUIRED`
+ *   with the allow-list in the body (they can enrol and continue);
+ * - a no-credential user whose session's method does not satisfy the policy
+ *   (a magic-link/social/passkey session that predates the requirement, an
+ *   impersonation of such a user, or any pre-upgrade session) →
+ *   `403 TWO_FACTOR_REQUIRED` (nothing to enrol; sign in again). This is the
+ *   case a create-time-only check missed: the session was minted before the
+ *   policy applied, so the create hook never judged it.
  *
  * Order of the reads, cheapest first, each one ending the hook when it
  * settles the answer: does any org on the deployment require 2FA at all
  * (one indexed read; a deployment without such an org pays nothing else)
- * → is there a session (the same `getSessionFromCtx` upstream's
- * `sessionMiddleware` runs, so the endpoint reuses the result; an
- * anonymous request, a SCIM bearer or an API key — which never reaches a
- * gated path — has none and is left to the endpoint) → is the user
- * enrolled, or unable to enrol (`twoFactorEnrollmentState`) → does
- * `require2fa` actually reach this user. The refusal is audited through
- * `auditRefusal` before it is thrown, the way every `hooks.before` refusal
- * is.
+ * → is there a session (via `resolveGateSession`, the same resolution the
+ * endpoint's `sessionMiddleware` performs, `bearer()` included; an anonymous
+ * request, a SCIM bearer or an API key — which never reaches a gated path —
+ * has none and is left to the endpoint) → does `require2fa` actually reach
+ * this user → its standing. The refusal is audited through `auditRefusal`
+ * before it is thrown, the way every `hooks.before` refusal is.
  */
 export function buildTwoFactorEnrollmentGate(opts?: EnterpriseOptions) {
   const allowed = twoFactorEnrollmentAllowedPaths(opts);
@@ -740,12 +928,12 @@ export function buildTwoFactorEnrollmentGate(opts?: EnterpriseOptions) {
     handler: createAuthMiddleware(async (ctx) => {
       const fullCtx = ctx as unknown as GenericEndpointContext;
       if (!(await anyOrgRequiresTwoFactor(fullCtx))) return;
-      const session = await getSessionFromCtx(fullCtx);
+      const session = await resolveGateSession(fullCtx);
       const userId = session?.user?.id;
       const email = session?.user?.email;
       if (!userId || !email) return;
       const state = await twoFactorEnrollmentState(fullCtx, userId);
-      if (!state.enrollmentPending) return;
+      if (state.twoFactorEnabled) return; // enrolled — nothing to gate, whatever the policy
 
       const orgIds = await resolvePolicyOrgsForUser(fullCtx, {
         userId,
@@ -756,14 +944,25 @@ export function buildTwoFactorEnrollmentGate(opts?: EnterpriseOptions) {
       const eff = await getEffectivePolicy(fullCtx, orgIds, userId, opts);
       if (!eff.require2fa) return;
 
+      const standing = twoFactorStanding(opts, session.session as Record<string, unknown>, state);
+      if (standing === "ok") return;
+
+      const code =
+        standing === "enrollment-required"
+          ? "TWO_FACTOR_ENROLLMENT_REQUIRED"
+          : "TWO_FACTOR_REQUIRED";
       await auditRefusal(fullCtx, {
         path: ctx.path as string,
-        code: "TWO_FACTOR_ENROLLMENT_REQUIRED",
+        code,
         orgIds: eff.sources.require2faBy,
         userId,
         email,
       });
-      throw twoFactorEnrollmentRequiredError(allowed);
+      throw standing === "enrollment-required"
+        ? twoFactorEnrollmentRequiredError(allowed)
+        : gateTwoFactorRequiredError(
+            readSessionAuthMethod(session.session as Record<string, unknown>),
+          );
     }),
   };
 }

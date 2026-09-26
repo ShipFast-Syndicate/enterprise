@@ -1,0 +1,13 @@
+-- Alpha Bros enterprise layer — migration 0003.
+--
+-- Adds the `enterprise_auth_method` column to better-auth's core `session`
+-- table: the classified sign-in method the policy plugin records on every
+-- session it mints, and reads on every request to enforce `require2fa` on a
+-- session a later policy change came to cover (see
+-- `src/server/policy/enforcement.ts`'s `SESSION_AUTH_METHOD_FIELD`). Nullable
+-- — a pre-upgrade session carries no method and is treated as satisfying no
+-- policy (fail closed). `applyMigration` (`src/schema/migrate.ts`) guards this
+-- `ADD COLUMN` with `PRAGMA table_info` and skips it when the `session` table
+-- does not exist yet, so a product whose own better-auth migrations run later
+-- (or which already added the plugin-declared column) is unaffected.
+ALTER TABLE session ADD COLUMN enterprise_auth_method TEXT;

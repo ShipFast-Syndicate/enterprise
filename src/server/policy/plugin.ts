@@ -49,6 +49,7 @@ import {
   buildSignInBeforeHook,
   buildTwoFactorEnrollmentGate,
   resolvePolicyOrgsForUser,
+  SESSION_AUTH_METHOD_FIELD,
 } from "./enforcement";
 import { findOrgByEmailDomain, HOME_REALM_RATE_LIMIT, homeRealmEndpoint } from "./home-realm";
 import { buildScimRequiredUserCreateBeforeHook } from "./scim-required";
@@ -381,6 +382,24 @@ export function orgPolicy(opts: EnterpriseOptions) {
     id: "enterprise-policy",
     options: opts,
     schema: {
+      // A single additive column on the core `session` model, recording the
+      // classified sign-in method of each session (`./enforcement.ts`'s
+      // create hook writes it; the enrolment gate and refresh clamp read it to
+      // re-judge `require2fa` on a session a later policy change came to cover
+      // — see `SESSION_AUTH_METHOD_FIELD`). `input: false`: server-written
+      // only, never accepted from a request body — the same shape upstream's
+      // `organization()` plugin uses for `activeOrganizationId`. The physical
+      // column is added by this package's migration (`sql/0003_require2fa.sql`).
+      session: {
+        fields: {
+          [SESSION_AUTH_METHOD_FIELD]: {
+            type: "string",
+            required: false,
+            input: false,
+            fieldName: "enterprise_auth_method",
+          },
+        },
+      },
       orgPolicy: {
         modelName: "org_policy",
         fields: {

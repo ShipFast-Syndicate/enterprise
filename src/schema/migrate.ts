@@ -119,7 +119,7 @@ async function tableInfo(client: Client, table: string) {
 }
 
 export async function applyMigration(client: Client): Promise<void> {
-  const sql = ["0001_enterprise.sql", "0002_scim_1_7.sql"]
+  const sql = ["0001_enterprise.sql", "0002_scim_1_7.sql", "0003_require2fa.sql"]
     .map((file) => readFileSync(migrationFilePath(file), "utf8"))
     .join("\n");
 

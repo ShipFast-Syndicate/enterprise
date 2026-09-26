@@ -298,15 +298,24 @@ export async function canEnrollTwoFactor(
 
 export interface TwoFactorEnrollmentState {
   twoFactorEnabled: boolean;
-  /** `true` when the user holds a password and is not yet enrolled — the one state a `require2fa` org gates. */
+  /**
+   * `true` when the user holds a password account and could therefore enrol
+   * a second factor through upstream's `/two-factor/enable` — independent of
+   * whether they already have. A user without one (SSO-, magic-link-,
+   * social- or passkey-only) is `false`: they cannot enrol here, and their
+   * standing towards `require2fa` rests on the sign-in method their session
+   * carries, not on enrolment.
+   */
+  canEnroll: boolean;
+  /** `true` when the user holds a password and is not yet enrolled — the one state a `require2fa` org confines to the enrolment allow-list. */
   enrollmentPending: boolean;
 }
 
 /**
  * The user's standing towards a `require2fa` policy, read from the live
  * user row (never from a cached copy): enrolled, or able to enrol and not
- * yet enrolled (`enrollmentPending`), or unable to enrol at all. Shared by
- * the enrolment gate, the `/get-session` annotation and the
+ * yet enrolled (`enrollmentPending`), or unable to enrol at all (`!canEnroll`).
+ * Shared by the enrolment gate, the `/get-session` annotation and the
  * `/enterprise/policy/set` precondition so the three never disagree.
  */
 export async function twoFactorEnrollmentState(
@@ -317,8 +326,9 @@ export async function twoFactorEnrollmentState(
     twoFactorEnabled?: boolean | null;
   } | null;
   const twoFactorEnabled = user?.twoFactorEnabled === true;
-  if (twoFactorEnabled) return { twoFactorEnabled, enrollmentPending: false };
-  return { twoFactorEnabled, enrollmentPending: await canEnrollTwoFactor(ctx, userId) };
+  if (twoFactorEnabled) return { twoFactorEnabled, canEnroll: false, enrollmentPending: false };
+  const canEnroll = await canEnrollTwoFactor(ctx, userId);
+  return { twoFactorEnabled, canEnroll, enrollmentPending: canEnroll };
 }
 
 // --- org membership/role helpers -----------------------------------------
