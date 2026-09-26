@@ -10,9 +10,14 @@
 // defeating upstream's "a non-owner cannot touch an owner" invariant.
 //
 // Fix: revoke is owner-only (`OWNER_ONLY_PATHS` + `authorize(..., true)`),
-// and the identity hook never bans or strips keys from a user who holds an
-// `owner` membership anywhere — SCIM can never *produce* one (M-01), so it is
-// always a deliberate manual grant.
+// and the identity hook never *bans* a user who holds an `owner` membership
+// anywhere — SCIM can never *produce* one (M-01). Their API keys are still
+// revoked (PR-4, gap 1 / PR-1 residual): a key is a live credential of an
+// identity the IdP no longer vouches for, and since self-serve org creation
+// stays on (R13) "owner somewhere" can be an org the user created themselves.
+// An owner who is not banned signs in again and mints a new key, so nothing
+// is irreversible for them; the skipped ban is audited
+// (`scim.user_deactivation_skipped`) — see `test/security/gap1-api-keys.test.ts`.
 
 import { describe, expect, it } from "vitest";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
@@ -109,7 +114,7 @@ describe("F-07 — SCIM decommission is owner-only and never bans an owner", () 
     expect(list.status).toBe(200);
   });
 
-  it("owner revoke: a manually promoted owner is neither banned nor stripped of keys; a plain SCIM member is deprovisioned", async () => {
+  it("owner revoke: a manually promoted owner is not banned (keys revoked, audited); a plain SCIM member is deprovisioned", async () => {
     const t = await makeAuth();
     const { owner, orgId, bearer, xId, yId } = await scimOrgWithPromotedOwner(t);
 
@@ -120,8 +125,27 @@ describe("F-07 — SCIM decommission is owner-only and never bans an owner", () 
 
     const x = await userState(t, xId);
     expect(x.banned).toBe(false);
-    expect(x.apiKeys).toBe(1);
+    // Keys go with the identity the feed retired (PR-4); the owner is not
+    // banned and can mint a new one. Audited into the org's chain.
+    expect(x.apiKeys).toBe(0);
     expect(x.memberships).toEqual([{ orgId, role: "owner" }]);
+    const audit = await t.client.execute({
+      sql: "SELECT action, actor_type, target_id, metadata FROM audit_event WHERE org_id = ? AND action IN ('api_key.revoked', 'scim.user_deactivation_skipped') AND target_id IN (?, ?) ORDER BY seq",
+      args: [orgId, xId, "any"],
+    });
+    const skipped = audit.rows.filter((r) => r.action === "scim.user_deactivation_skipped");
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.actor_type).toBe("scim");
+    expect(JSON.parse(String(skipped[0]!.metadata))).toEqual({ reason: "owner_protected" });
+    const revoked = await t.client.execute({
+      sql: "SELECT metadata FROM audit_event WHERE org_id = ? AND action = 'api_key.revoked'",
+      args: [orgId],
+    });
+    expect(revoked.rows).toHaveLength(1);
+    expect(JSON.parse(String(revoked.rows[0]!.metadata))).toEqual({
+      reason: "scim.deactivate",
+      userId: xId,
+    });
 
     const y = await userState(t, yId);
     expect(y.banned).toBe(true);
@@ -146,7 +170,7 @@ describe("F-07 — SCIM decommission is owner-only and never bans an owner", () 
 
     const x = await userState(t, xId);
     expect(x.banned).toBe(false);
-    expect(x.apiKeys).toBe(1);
+    expect(x.apiKeys).toBe(0); // revoked with the identity (PR-4), not banned
     expect(x.memberships).toEqual([{ orgId, role: "owner" }]);
     // Upstream still revokes the sessions (`deleteUserSessions`) — the owner
     // is logged out, not locked out.

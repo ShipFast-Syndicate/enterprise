@@ -11,19 +11,17 @@ import { auditLog } from "./audit/plugin";
 import { orgPolicy } from "./policy/plugin";
 import { enterpriseApi } from "./enterprise-api/plugin";
 import { assertEnterpriseOptions } from "./options";
+import {
+  API_KEY_HEADERS,
+  API_KEY_LIFECYCLE_PLUGIN_ID,
+  apiKeyLifecycle,
+  enterpriseApiKeyValidator,
+} from "./api-keys";
 
-/**
- * Plugin id of the API-key lifecycle plugin (use-time user checks and
- * revocation on ban/removal). The preset reserves its slot — directly after
- * upstream `api-key`, before `sso` — so the plugin order is fixed once; this
- * build registers the id with no hooks, and the lifecycle hooks land in the
- * same slot.
- */
-export const API_KEY_LIFECYCLE_PLUGIN_ID = "enterprise-api-keys";
+export { API_KEY_LIFECYCLE_PLUGIN_ID };
 
-function apiKeyLifecycleSlot(): BetterAuthPlugin {
-  return { id: API_KEY_LIFECYCLE_PLUGIN_ID, hooks: { before: [], after: [] } };
-}
+/** 90 days, in seconds — the default lifetime of a key created without `expiresIn`. */
+const DEFAULT_API_KEY_EXPIRES_IN_S = 90 * 24 * 3600;
 
 export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
   // `secretsKey` is load-bearing as of the pre-publish security pass (C-04):
@@ -50,8 +48,26 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
     }),
     twoFactor(),
     passkey(),
-    apiKey(),
-    apiKeyLifecycleSlot(),
+    apiKey({
+      // The header list is shared with `assertNotApiKeyRequest` (`./api-keys.ts`).
+      apiKeyHeaders: [...API_KEY_HEADERS],
+      // Every key use is bound to the live user row (banned / removed), on
+      // both upstream paths (`/api-key/verify` and the opt-in mock session).
+      customAPIKeyValidator: enterpriseApiKeyValidator,
+      // Bounded by expiry (gap 1): 90 days unless the product says otherwise,
+      // never longer than `maxExpiresInDays`. `defaultExpiresIn` is in
+      // **seconds** — upstream's `.d.mts` says milliseconds, but `create`
+      // feeds it to `getDate(…, "sec")` (pinned by
+      // `test/security/gap1-api-keys.test.ts`); `maxExpiresIn` is in days.
+      keyExpiration: {
+        defaultExpiresIn:
+          opts.apiKeys?.defaultExpiresInS === undefined
+            ? DEFAULT_API_KEY_EXPIRES_IN_S
+            : opts.apiKeys.defaultExpiresInS,
+        maxExpiresIn: opts.apiKeys?.maxExpiresInDays ?? 365,
+      },
+    }),
+    apiKeyLifecycle(opts),
     sso({
       domainVerification: { enabled: true },
       organizationProvisioning: { disabled: false, defaultRole: "member" },

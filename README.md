@@ -195,10 +195,18 @@ the `/enterprise/*` API directly — no server code needed beyond `enterprisePre
 
 One scope caveat: **API keys are per user, not per organization.** `<ab-api-keys>` drives
 upstream `/api-key/list` and `/api-key/create`, which are scoped to the signed-in user, so an
-org's security screen shows and creates _that user's_ keys wherever they were created — and a
-SCIM deprovision revokes all of that user's keys, not only the ones they used for this org
-(unless the user holds an `owner` membership anywhere: owners are never banned or stripped of
-keys by a SCIM feed). Per-org key scoping remains a follow-up.
+org's security screen shows and creates _that user's_ keys wherever they were created. Keys are
+bound to the user at use time and bounded by expiry (since 1.1.0): every use re-checks the live
+user row (a banned or removed user's key is refused — `USER_BANNED` / `USER_NOT_FOUND`), keys
+expire after 90 days unless the caller picks another lifetime (`apiKeys.defaultExpiresInS`,
+capped by `apiKeys.maxExpiresInDays`, default 365), and every deprovisioning path — a SCIM
+deactivation, `/admin/ban-user`, `/admin/remove-user` — revokes all of that user's keys, not only
+the ones they used for this org, audited as `api_key.revoked` into every org the user belonged
+to. (A user who holds an `owner` membership anywhere is never _banned_ by a SCIM feed, but their
+keys are revoked like everyone else's; they can sign in and mint new ones.) A request carrying an
+API key is refused on `/enterprise/*` and on every credential-minting path (`403
+API_KEY_NOT_ALLOWED_HERE`), including `/api-key/create` — a key never mints another key. Per-org
+key scoping remains a follow-up.
 
 **Import the elements only from a browser-only context.** Lit's browser build references
 `HTMLElement`, which doesn't exist on the server; importing the module in server-rendered code

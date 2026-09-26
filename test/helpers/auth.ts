@@ -183,6 +183,11 @@ export async function makeAuth(
     // caller (better-auth defaults `trustedOrigins` to just the configured
     // `baseURL` when this is omitted).
     trustedOrigins?: string[];
+    // Replaces the preset's upstream `api-key` plugin in place (same slot,
+    // same order) — for `test/security/gap1-api-keys.test.ts`'s opt-in
+    // `enableSessionForAPIKeys` recipe. Appending a second `apiKey()` via
+    // `plugins` would register every `/api-key/*` endpoint twice.
+    apiKeyPlugin?: BetterAuthPlugin;
   } = {},
 ) {
   const entitled = new Set<Feature>([
@@ -193,20 +198,24 @@ export async function makeAuth(
     "api_keys",
     "teams",
   ]);
+  const { apiKeyPlugin, plugins: extraPlugins, trustedOrigins, ...enterpriseOverrides } = overrides;
   const opts: EnterpriseOptions = {
     product: "test",
     secretsKey: "s".repeat(32),
     scimCredentialHashSecret: "catalog-test-key-".repeat(3),
     resolveEntitlements: async () => entitled,
-    ...overrides,
+    ...enterpriseOverrides,
   };
+  const presetPlugins = enterprisePreset(opts).map((plugin) =>
+    apiKeyPlugin && plugin.id === "api-key" ? apiKeyPlugin : plugin,
+  );
   const baseOptions: BetterAuthOptions = {
     secret: "x".repeat(32),
     baseURL: "http://localhost:3000",
     emailAndPassword: { enabled: true },
     rateLimit: TEST_RATE_LIMIT,
-    plugins: [...enterprisePreset(opts), ...(overrides.plugins ?? [])],
-    ...(overrides.trustedOrigins ? { trustedOrigins: overrides.trustedOrigins } : {}),
+    plugins: [...presetPlugins, ...(extraPlugins ?? [])],
+    ...(trustedOrigins ? { trustedOrigins } : {}),
   };
 
   const { drizzleSchema, ddl } = buildDynamicSchema(baseOptions);

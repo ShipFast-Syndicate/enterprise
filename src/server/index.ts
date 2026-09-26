@@ -3,7 +3,18 @@
 export type { Feature, ResolveEntitlements, EnterpriseOptions } from "./types";
 export { FeatureNotEntitledError, requireFeature } from "./entitlements";
 export { enterpriseGate, GATED_PATHS } from "./gate";
-export { enterprisePreset, API_KEY_LIFECYCLE_PLUGIN_ID } from "./preset";
+export { enterprisePreset } from "./preset";
+export {
+  API_KEY_ERROR,
+  API_KEY_HEADERS,
+  API_KEY_LIFECYCLE_PLUGIN_ID,
+  apiKeyLifecycle,
+  assertNotApiKeyRequest,
+  enterpriseApiKeyValidator,
+  revokeUserApiKeys,
+  type ApiKeyRevocationActor,
+  type ApiKeyRevocationContext,
+} from "./api-keys";
 export { auditLog, AUDITED_PATHS } from "./audit/plugin";
 export {
   canonical,

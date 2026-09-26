@@ -134,6 +134,26 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   IdP: on an SSO callback the provider's org must be one of the orgs enforcing SSO on the user
   and, when verified providers claim the e-mail domain at all, one of those. Details and the
   opt-outs in [`sso.md`](./sso.md#domain-binding-ssodomainbinding-default-verified-domain).
+- **API keys** (`src/server/api-keys.ts`). Policy governs _sessions_; an API key never creates
+  one, so `ssoEnforced`, `allowedMethods`, `sessionMaxAgeS` and `require2fa` do not apply to a
+  key. Keys are instead bound to the user at use time and bounded by expiry: the preset's
+  `customAPIKeyValidator` re-reads the user row on every use (`/api-key/verify` and, if a product
+  opts into `enableSessionForAPIKeys`, the `x-api-key` mock session) and refuses a banned user
+  (`USER_BANNED`; an expired temporary ban is not a ban) or a key whose user no longer exists
+  (`USER_NOT_FOUND`); an unknown key stays upstream's `INVALID_API_KEY`. New keys expire after
+  `apiKeys.defaultExpiresInS` (90 days; `null` = never unless the caller asks) and may never be
+  created for longer than `apiKeys.maxExpiresInDays` (365). Every deprovisioning path revokes the
+  user's keys and audits `api_key.revoked` (one row per key) into every organization the user
+  belonged to — captured before the rows go: `/admin/ban-user` and `/admin/remove-user` (actor =
+  the admin, reason `admin.ban` / `admin.remove`) and a SCIM deactivation, IdP delete or
+  connection decommission (actor `scim`, reason `scim.deactivate`; the provisioning organization
+  is handed over by the SCIM projector in-transaction, since its membership row is already gone).
+  Revoking sessions alone (`/admin/revoke-user-sessions`, `/revoke-sessions`) is deliberately not
+  a key revocation: the identity is unchanged. Finally, a request that carries an API key is
+  refused with `403 API_KEY_NOT_ALLOWED_HERE` on `/enterprise/*` and on every gated path
+  (`GATED_PATHS`, including `/api-key/create`) before any session or org resolution — a key can
+  neither mint another key nor reconfigure the organization, whether or not the mock session is
+  on.
 
 ## Upgrading from 1.0.x
 
@@ -174,6 +194,22 @@ FROM ssoProvider WHERE domainVerified = 1 GROUP BY lower(domain) HAVING orgs > 1
 -- pending invitations whose invitee exists but is unverified (cannot accept until verified)
 SELECT i.email FROM invitation i JOIN user u ON lower(u.email) = lower(i.email)
 WHERE i.status = 'pending' AND u.emailVerified = 0;
+```
+
+API keys minted before 1.1.0 keep the lifetime they were created with (none, unless the caller
+chose one) — the new default applies to new keys only. A key whose user is banned or gone is
+refused at use from the first request after the upgrade, but its row is still stored until the
+user is deprovisioned again through one of the audited paths; to find and clear them, and to
+review perpetual keys:
+
+```sql
+-- keys of banned users (refused at use as USER_BANNED) and orphan keys (USER_NOT_FOUND)
+SELECT k.id, k.referenceId, k.name, k.expiresAt FROM apikey k
+LEFT JOIN user u ON u.id = k.referenceId
+WHERE u.id IS NULL OR (u.banned = 1 AND (u.banExpires IS NULL OR u.banExpires > strftime('%s','now') * 1000));
+-- keys that never expire
+SELECT k.id, k.referenceId, k.name, u.email FROM apikey k JOIN user u ON u.id = k.referenceId
+WHERE k.expiresAt IS NULL;
 ```
 
 ## Audit chain limits
