@@ -20,12 +20,28 @@
 // - `sessionMaxAgeS` — the same create hook (cap at creation) plus
 //   `buildSessionUpdateBeforeHook` (`databaseHooks.session.update.before`),
 //   which clamps the refresh `/get-session` writes back (F-05).
+// - SSO domain binding (F-01, `./sso-jit.ts`) — the create hook again, for
+//   every session an SSO callback mints: the signing provider must be
+//   domain-verified for the user's e-mail domain, *before* any policy logic
+//   and independent of it (a legacy `account` row linked to a foreign IdP
+//   stays in the database but can no longer sign in — R4 of the fix plan).
+//   `ssoEnforced` is then satisfied only by the enforcing org's **own**
+//   IdP (R3), never by another tenant flipping their own org to enforce.
 
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { auditRefusal } from "../audit/refusal";
 import type { EnterpriseOptions } from "../types";
 import { findOrgsByEmailDomain } from "./home-realm";
+import { isSsoCallbackPath } from "./scim-required";
+import {
+  domainBindingEnabled,
+  providerAuthorizesEmail,
+  resolveSsoCallbackProvider,
+  ssoDomainNotAllowedError,
+  ssoProviderUnresolvedError,
+  type SsoCallbackProvider,
+} from "./sso-jit";
 import { getEffectivePolicy, memberOrgIds, type EffectivePolicy } from "./store";
 
 // --- policy-org resolution -------------------------------------------------
@@ -48,13 +64,29 @@ export async function resolvePolicyOrgsForUser(
   ctx: GenericEndpointContext,
   params: { userId: string | null; email: string; activeOrganizationId?: string | null },
 ): Promise<string[]> {
+  return (await resolvePolicyClaims(ctx, params)).orgIds;
+}
+
+/**
+ * `resolvePolicyOrgsForUser` plus the *identity* orgs on their own — the
+ * orgs owning a verified provider for the user's e-mail domain — which the
+ * `ssoEnforced` rule needs separately (R3): one domain scan serves both.
+ */
+async function resolvePolicyClaims(
+  ctx: GenericEndpointContext,
+  params: { userId: string | null; email: string; activeOrganizationId?: string | null },
+): Promise<{ orgIds: string[]; identityOrgIds: string[] }> {
   const orgIds = new Set<string>();
   if (params.activeOrganizationId) orgIds.add(params.activeOrganizationId);
   if (params.userId) {
     for (const orgId of await memberOrgIds(ctx, params.userId)) orgIds.add(orgId);
   }
-  for (const match of await findOrgsByEmailDomain(ctx, params.email)) orgIds.add(match.orgId);
-  return [...orgIds];
+  const identityOrgIds = new Set<string>();
+  for (const match of await findOrgsByEmailDomain(ctx, params.email)) {
+    orgIds.add(match.orgId);
+    identityOrgIds.add(match.orgId);
+  }
+  return { orgIds: [...orgIds], identityOrgIds: [...identityOrgIds] };
 }
 
 // --- sign-in method classification ---------------------------------------
@@ -225,7 +257,7 @@ export function deriveSessionCreateMethod(
 function ssoRequiredError(): APIError {
   return new APIError("FORBIDDEN", {
     code: "SSO_REQUIRED",
-    message: "Your organization requires SSO",
+    message: "Your organization requires SSO through its own identity provider",
   });
 }
 
@@ -383,9 +415,23 @@ function sessionExpiryMs(session: { expiresAt?: unknown }, ctx: GenericEndpointC
  * (see that file's header comment for why — `BetterAuthPlugin` has no
  * top-level `databaseHooks` field).
  *
- * Rules, in order, against the **effective** policy of every org with a
- * claim on the user (`resolvePolicyOrgsForUser` + `getEffectivePolicy`):
- * 1. `ssoEnforced` and this is not an SSO callback → `SSO_REQUIRED`.
+ * Rules, in order:
+ * 0. **SSO domain binding** (F-01, before any policy and independent of it,
+ *    unless `sso.domainBinding: "off"`): on an SSO callback the signing
+ *    provider is resolved once (`resolveSsoCallbackProvider`, fail-closed
+ *    `SSO_PROVIDER_UNRESOLVED`) and must be domain-verified for the user's
+ *    e-mail domain → otherwise `SSO_DOMAIN_NOT_ALLOWED`. This is what makes
+ *    a legacy squat — an `account` row already linked to a foreign tenant's
+ *    IdP — inert: the row stays, the session is never minted.
+ * Then, against the **effective** policy of every org with a claim on the
+ * user (`resolvePolicyOrgsForUser` + `getEffectivePolicy`):
+ * 1. `ssoEnforced` and this is not an SSO callback → `SSO_REQUIRED`. On an
+ *    SSO callback the provider's org must be one of the orgs enforcing SSO
+ *    on this user **and**, when the e-mail domain is claimed by verified
+ *    providers at all, one of the orgs claiming it (R3) — so a tenant who
+ *    flips *their own* org to `ssoEnforced` cannot satisfy another org's
+ *    rule for a user they linked to their IdP. Otherwise `SSO_REQUIRED`
+ *    ("through its own identity provider").
  * 2. a named method some org excluded → `METHOD_NOT_ALLOWED` (`methodRefusedBy`;
  *    narrowing is judged against the full method vocabulary, `opts` threaded
  *    into `getEffectivePolicy`).
@@ -407,9 +453,27 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
     const user = await ctx.context.internalAdapter.findUserById(session.userId);
     if (!user?.email) return;
 
+    // Rule 0 — the provider is looked up once and reused by rule 1. With the
+    // binding off it is still needed by rule 1 (and only refused as
+    // unresolved there, when a decision actually depends on it).
+    const ssoCallback = isSsoCallbackPath(ctx.path);
+    let provider: SsoCallbackProvider | null = null;
+    if (ssoCallback) {
+      provider = await resolveSsoCallbackProvider(ctx);
+      if (domainBindingEnabled(opts)) {
+        if (!provider) {
+          ctx.context.logger.error(
+            `enterprise-policy: refusing an SSO session from ${JSON.stringify(ctx.path)} — the signing provider could not be resolved (SSO_PROVIDER_UNRESOLVED)`,
+          );
+          throw ssoProviderUnresolvedError();
+        }
+        if (!providerAuthorizesEmail(provider, user.email)) throw ssoDomainNotAllowedError();
+      }
+    }
+
     const activeOrganizationId =
       typeof session.activeOrganizationId === "string" ? session.activeOrganizationId : null;
-    const orgIds = await resolvePolicyOrgsForUser(ctx, {
+    const { orgIds, identityOrgIds } = await resolvePolicyClaims(ctx, {
       userId: session.userId,
       email: user.email,
       activeOrganizationId,
@@ -417,8 +481,17 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
     if (orgIds.length === 0) return;
     const eff = await getEffectivePolicy(ctx, orgIds, session.userId, opts);
 
-    const isSsoPath = typeof ctx.path === "string" && ctx.path.startsWith("/sso/");
-    if (eff.ssoEnforced && !isSsoPath) throw ssoRequiredError();
+    if (eff.ssoEnforced) {
+      if (!ssoCallback) throw ssoRequiredError();
+      if (!provider) throw ssoProviderUnresolvedError();
+      const providerOrgId = provider.organizationId;
+      if (!providerOrgId || !eff.sources.ssoEnforcedBy.includes(providerOrgId)) {
+        throw ssoRequiredError();
+      }
+      if (identityOrgIds.length > 0 && !identityOrgIds.includes(providerOrgId)) {
+        throw ssoRequiredError();
+      }
+    }
 
     const classified = classifySessionCreate(ctx, opts, session);
     if (classified.kind === "method" && methodRefusedBy(eff, classified.method)) {

@@ -17,6 +17,9 @@
 // SCIM deactivation runs in the native identity transaction (../scim.ts).
 // - `./home-realm.ts` — `findOrgByEmailDomain` and the public
 //   `/enterprise/home-realm` endpoint.
+// - `./sso-jit.ts` — the SSO domain binding (`databaseHooks.user.create.
+//   before`, composed with `./scim-required.ts`'s guard below) and the
+//   provider resolution `./enforcement.ts`'s session backstop shares.
 //
 // `require2fa` (the `hooks.after` on `/get-session`) lives here rather than
 // in `./enforcement.ts`: it only ever decorates a response, never blocks a
@@ -45,6 +48,7 @@ import {
 } from "./enforcement";
 import { findOrgByEmailDomain, HOME_REALM_RATE_LIMIT, homeRealmEndpoint } from "./home-realm";
 import { buildScimRequiredUserCreateBeforeHook } from "./scim-required";
+import { buildDomainBindingUserCreateBeforeHook, composeUserCreateBeforeHooks } from "./sso-jit";
 import {
   allowedMethodValues,
   findPolicyRow,
@@ -379,11 +383,17 @@ export function orgPolicy(opts: EnterpriseOptions) {
                 before: buildSessionUpdateBeforeHook(opts),
               },
             },
-            // Task 8, controller ruling (e): "SSO only for SCIM-active
-            // users" — see `./scim-required.ts`'s header comment.
+            // One `user.create.before` slot, two guards, in this order:
+            // the SSO domain binding (F-01, `./sso-jit.ts` — the signing
+            // provider must be verified for the new user's e-mail domain,
+            // and the row is stored `emailVerified: true`), then Task 8's
+            // "SSO only for SCIM-active users" (`./scim-required.ts`).
             user: {
               create: {
-                before: buildScimRequiredUserCreateBeforeHook(),
+                before: composeUserCreateBeforeHooks(
+                  buildDomainBindingUserCreateBeforeHook(opts),
+                  buildScimRequiredUserCreateBeforeHook(),
+                ),
               },
             },
           },

@@ -81,22 +81,19 @@ describe("JIT + pending invitation keeps the invited role", () => {
     // The preset sets `requireEmailVerificationOnInvitation` (`src/server/
     // preset.ts`): an invitation is only claimable by a session whose e-mail
     // is verified, so an account minted for someone else's address cannot
-    // cash in an invitation meant for the address's real owner. Upstream JIT
-    // sign-up stores the user unverified (no `trustEmailVerified` on the
-    // `sso()` call), so this JIT user is refused first; the address is then
-    // verified the way a product's verification step would, and the
-    // invited role is claimed.
-    const refused = await t.api.post(
-      "/organization/accept-invitation",
-      { invitationId: invitation.id },
-      { cookie: sessionCookie },
-    );
-    expect(refused.status).toBe(403);
-    expect(JSON.stringify(await refused.json())).toContain("EMAIL_VERIFICATION_REQUIRED");
-    await t.client.execute({
-      sql: `UPDATE "user" SET emailVerified = 1 WHERE id = ?`,
-      args: [session.user.id],
-    });
+    // cash in an invitation meant for the address's real owner (the
+    // unverified case is asserted in `test/security/
+    // f01-invitation-verified-email.test.ts`). This JIT user *is* verified:
+    // the signing provider is domain-verified for `acme.test`, so the domain
+    // binding (`src/server/policy/sso-jit.ts`) stored the row
+    // `emailVerified: true` — the IdP vouched for the address — and the
+    // invited role is claimable straight away.
+    const verified = (await (
+      await t.api.get("/get-session", { cookie: sessionCookie })
+    ).json()) as {
+      user: { emailVerified: boolean };
+    };
+    expect(verified.user.emailVerified).toBe(true);
 
     const acceptRes = await t.api.post(
       "/organization/accept-invitation",

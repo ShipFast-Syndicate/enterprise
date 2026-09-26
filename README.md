@@ -84,8 +84,12 @@ export const auth = betterAuth({
 ```
 
 For OIDC, configure the provider's exact origin through Better Auth's
-`trustedOrigins` option or `BETTER_AUTH_TRUSTED_ORIGINS` before using the portal.
-See [OIDC origin configuration](./docs/sso.md#trust-the-oidc-provider-origin).
+`trustedOrigins` option or `BETTER_AUTH_TRUSTED_ORIGINS` before using the portal —
+that is Better Auth's SSRF boundary for discovery/endpoint origins, **not** an issuer
+allow-list. To restrict which IdPs tenants may register, set `sso.allowedIssuers`. SSO
+sign-ins are bound to the signing provider's verified domain by default
+(`sso.domainBinding`). See [OIDC origins and the issuer allow-list](./docs/sso.md#oidc-provider-origins-trustedorigins-and-the-issuer-allow-list)
+and [domain binding](./docs/sso.md#domain-binding-ssodomainbinding-default-verified-domain).
 
 `samlSpKeys` is **not** in that list. It is typed on `EnterpriseOptions` and reserved, but
 `enterprisePreset` cannot consume it: `@better-auth/sso@1.7.5`'s `sso()` has no plugin-level slot

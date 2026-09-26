@@ -97,6 +97,21 @@ describe("enterpriseGate", () => {
     expect(seenOrgIds.at(-1)).toBe(orgId1);
   });
 
+  it("/sso/register returns 400 ORG_REQUIRED without body.organizationId even when the session has an active org (gap 5)", async () => {
+    const t = await makeAuth({ resolveEntitlements: async () => ["sso"] });
+    const { cookie } = await signUpOwner(t);
+    await createOrg(t, cookie); // becomes the session's active org — the fallback chain must not use it here
+
+    const res = await t.api.post(
+      "/sso/register",
+      { providerId: "p", issuer: "https://idp.test", domain: "acme.test", oidcConfig },
+      { cookie },
+    );
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("ORG_REQUIRED");
+  });
+
   it("returns 400 ORG_REQUIRED when no org can be resolved", async () => {
     const t = await makeAuth({ resolveEntitlements: async () => ["teams"] });
     const { cookie } = await signUpOwner(t);

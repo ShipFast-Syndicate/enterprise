@@ -15,6 +15,7 @@ import type { EnterpriseOptions, Feature } from "./types";
 import { requireFeature } from "./entitlements";
 import { getMemberRoles } from "./policy/store";
 import { withSecretEncryption } from "./secrets";
+import { buildSsoDomainGuardHook } from "./sso-domain";
 import { assertEnterpriseOptions } from "./options";
 
 export const GATED_PATHS: Record<string, Feature> = {
@@ -64,6 +65,19 @@ const OWNER_ONLY_PATHS = new Set([
   "/enterprise/scim/tokens/create",
   "/enterprise/scim/tokens/rotate",
 ]);
+
+// Paths whose org must come from the request **body**, never from the
+// session's active organization (audit gap 5). Upstream `/sso/register`
+// runs its owner/admin check only when `body.organizationId` is present;
+// without it, any signed-in user — a plain member, with the org's `sso`
+// entitlement resolved from their *active* org by the fallback chain below —
+// registered a "personal" (`organizationId: null`, `userId`-bound) provider
+// claiming any domain. Such a row can never be domain-verified through this
+// gate (`PROVIDER_DOMAIN_PATHS` answers `NOT_ORG_MEMBER` for it), but it
+// still poisoned upstream's e-mail `/sign-in/sso` lookup (F-30) and was
+// invisible to every org-scoped read. `400 ORG_REQUIRED` before the
+// fallback chain closes it.
+export const BODY_ORG_REQUIRED_PATHS = new Set(["/sso/register"]);
 
 // No explicit `: BetterAuthPlugin` return-type annotation (client task-9 fix
 // round 1, applied here too for consistency — see `./enterprise-api/
@@ -118,6 +132,15 @@ export function enterpriseGate(opts: EnterpriseOptions) {
 
             const body = ctx.body as
               { organizationId?: string; orgId?: string; providerId?: string } | undefined;
+            if (
+              BODY_ORG_REQUIRED_PATHS.has(ctx.path) &&
+              !(typeof body?.organizationId === "string" && body.organizationId)
+            ) {
+              throw new APIError("BAD_REQUEST", {
+                code: "ORG_REQUIRED",
+                message: "organizationId is required.",
+              });
+            }
             // GET endpoints (e.g. `/enterprise/audit/list|export`, Task 4)
             // carry the org id in the query string, not the body.
             const query = ctx.query as { orgId?: string } | undefined;
@@ -181,6 +204,11 @@ export function enterpriseGate(opts: EnterpriseOptions) {
             await requireFeature(ctx as unknown as GenericEndpointContext, orgId, feature);
           }),
         },
+        // SSO domain ownership/uniqueness, issuer allow-list and the e-mail
+        // sign-in pin (F-30, F-28 — `./sso-domain.ts`). Runs *after* the
+        // entitlement gate above: a caller who is not an entitled member of
+        // the org named in the body never reaches the domain scan.
+        buildSsoDomainGuardHook(opts),
       ],
     },
   } satisfies BetterAuthPlugin;

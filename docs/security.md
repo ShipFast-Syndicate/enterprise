@@ -124,6 +124,55 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   test-login finish and `/enterprise/sso/register` use the same domain matcher, and register stores
   the normalised list (trimmed, lower-cased, de-duplicated) or refuses one that could never match
   (`SSO_DOMAIN_INVALID`).
+- **SSO domain binding** (`src/server/policy/sso-jit.ts`, F-01): before any policy logic, a
+  session minted by an SSO callback — and a user row created by one — requires the signing
+  provider to be domain-verified for the user's e-mail domain (`SSO_DOMAIN_NOT_ALLOWED`;
+  `SSO_PROVIDER_UNRESOLVED` when the provider cannot be named from the route or the
+  server-trusted OAuth state). `ssoEnforced` is then satisfied only by the enforcing org's own
+  IdP: on an SSO callback the provider's org must be one of the orgs enforcing SSO on the user
+  and, when verified providers claim the e-mail domain at all, one of those. Details and the
+  opt-outs in [`sso.md`](./sso.md#domain-binding-ssodomainbinding-default-verified-domain).
+
+## Upgrading from 1.0.x
+
+1.0.x let any tenant's domain-verified IdP create and sign in accounts for **any** e-mail
+address on the deployment (GHSA-8p84-pc7q-69jr). 1.1.0 binds every SSO sign-in to the signing
+provider's verified domain, so an account a foreign IdP squatted before the upgrade can no
+longer sign in through it — but the rows are still there, and the legitimate user is still
+locked out of their own IdP until they are removed (upstream refuses to link a second provider
+to an unverified account). Run this on each database before or right after upgrading:
+
+```sql
+-- account rows linked to an SSO provider that is not verified for the user's e-mail domain
+SELECT a.id AS account_id, a.providerId, u.id AS user_id, u.email, p.domain, p.organizationId
+FROM account a
+JOIN user u ON u.id = a.userId
+JOIN ssoProvider p ON p.providerId = a.providerId
+WHERE p.domainVerified = 0
+   OR NOT (
+     ',' || lower(replace(p.domain, ' ', '')) || ',' LIKE '%,' || lower(substr(u.email, instr(u.email, '@') + 1)) || ',%'
+     OR lower(substr(u.email, instr(u.email, '@') + 1)) LIKE '%.' || lower(replace(p.domain, ' ', ''))
+   );
+```
+
+(The `LIKE` covers exact and single-entry subdomain matches; review comma-list providers by
+hand.) For every row: delete the foreign `account` row, revoke the user's sessions
+(`DELETE FROM session WHERE userId = ?`), and check `member` rows the squat's auto-join created
+in the attacker's org. If the squatted address belongs to a real person, the account is theirs
+once the foreign link is gone — the next sign-in through their own IdP links it.
+
+Other pre-upgrade checks for this release:
+
+```sql
+-- providers without an organization (impossible to create in 1.1.0; skipped by every org read)
+SELECT providerId, domain, domainVerified FROM ssoProvider WHERE organizationId IS NULL;
+-- two organizations holding verified rows for one domain (e-mail sign-in is not pinned for them)
+SELECT lower(domain) AS domain, count(DISTINCT organizationId) AS orgs
+FROM ssoProvider WHERE domainVerified = 1 GROUP BY lower(domain) HAVING orgs > 1;
+-- pending invitations whose invitee exists but is unverified (cannot accept until verified)
+SELECT i.email FROM invitation i JOIN user u ON lower(u.email) = lower(i.email)
+WHERE i.status = 'pending' AND u.emailVerified = 0;
+```
 
 ## Audit chain limits
 

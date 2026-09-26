@@ -64,7 +64,7 @@ message) are shown **only** in the `test-login` step, per the design's error
 handling rule — every other step renders through the same generic error UI
 every other portal component uses.
 
-## Trust the OIDC provider origin
+## OIDC provider origins (`trustedOrigins`) and the issuer allow-list
 
 Better Auth 1.7 validates the discovery URL and the endpoint origins advertised
 by its discovery document against the application's trusted origins. Before
@@ -80,11 +80,70 @@ Include any additional origins used by the provider's discovery endpoints,
 and deploy the configuration to the environment where registration will run.
 The application's own origin remains trusted automatically.
 
-Entering an issuer in the portal does not grant it server-side trust. An
-`Untrusted OIDC discovery URL` response means the operator must review and
-configure that origin. Keep the allowlist narrow: these are Better Auth trust
-settings, and explicitly trusting private-network IdPs also changes their SSRF
-validation boundary. Do not use a wildcard to make arbitrary issuers pass.
+**`trustedOrigins` is not an issuer allow-list.** It is Better Auth's SSRF
+boundary for the discovery and token/JWKS endpoints a provider points at (an
+`Untrusted OIDC discovery URL` response means an operator must review and
+configure that origin), and it doubles as Better Auth's redirect/callback
+allow-list. The `issuer` an org admin enters is stored as entered, and a
+provider whose endpoints already sit on a trusted origin (or that skips
+discovery with explicit endpoints) registers whatever its issuer string says.
+Keep the list narrow — explicitly trusting private-network IdPs also changes
+their SSRF validation boundary, and every origin on it is also a permitted
+redirect target — but do not rely on it to restrict _which_ IdPs tenants may
+use.
+
+To restrict issuers, set `sso.allowedIssuers` on `EnterpriseOptions`: an
+array of exact strings and/or `RegExp`s, or a predicate
+`(issuer, { organizationId }) => boolean | Promise<boolean>`. It is checked
+on `/sso/register` and on `/sso/update-provider` when the issuer is sent;
+a refusal is `403 SSO_ISSUER_NOT_ALLOWED` and nothing is stored. Absent, any
+issuer is accepted (upstream behaviour).
+
+```ts
+enterprisePreset({
+  // ...
+  sso: {
+    allowedIssuers: [
+      /^https:\/\/[a-z0-9-]+\.okta\.com$/,
+      "https://login.microsoftonline.com/common/v2.0",
+    ],
+  },
+});
+```
+
+## Domain ownership and uniqueness
+
+A provider's `domain` is a comma-separated list of hostnames, matched
+case-insensitively and including subdomains — `acme.test` covers
+`eu.acme.test` mail. Both halves of the system (upstream's own matching and
+this layer's home-realm, policy resolution and JIT guards) apply exactly
+these rules (`src/server/policy/domains.ts`), and `/sso/register` and
+`/sso/update-provider` now store the **normalised** list (trimmed,
+lower-cased, de-duplicated, trailing dot dropped), refusing one that could
+never match (`400 SSO_DOMAIN_INVALID` — a URL, a path, whitespace inside an
+entry).
+
+**One organization per verified domain.** `/sso/register`,
+`/sso/update-provider` (when the domain changes) and `/sso/verify-domain`
+answer `409 SSO_DOMAIN_TAKEN` when the domain list overlaps — equal, or a
+subdomain in either direction — a domain **another** organization has
+already verified. An org may register several providers for its own domains.
+The check is at verification time too, so a provider registered _before_
+another org verified the same domain cannot be verified afterwards. Upstream
+never checked this: any tenant could register a second, unverified provider
+for a domain some other org had verified, and because upstream's e-mail
+`/sign-in/sso` resolves the provider with an exact `findOne({ domain })`
+over unverified rows too, the squat row won that lookup and broke the
+legitimate org's e-mail sign-in ("domain has not been verified").
+
+**E-mail sign-in is pinned.** `POST /sign-in/sso { email }` (or `{ domain }`)
+without a `providerId` is pinned by this layer to the verified provider that
+`findOrgsByEmailDomain` ranks first — most specific matched domain, then
+`providerId` — but only when every provider at that specificity belongs to
+one organization. If two orgs hold verified rows for the same domain (legacy
+data written before this rule), the request is left to upstream's own lookup
+and the ambiguity is logged at `warn`; de-duplicate such rows before
+upgrading (query in [`security.md`](./security.md#upgrading-from-10x)).
 
 ## DNS record
 
@@ -148,6 +207,65 @@ verified domain, the user is created and auto-joins that domain's
 organization with the default role `member` in one step. A pending
 invitation takes precedence over domain-based auto-join (upstream's own
 behaviour, unchanged).
+
+### Domain binding (`sso.domainBinding`, default `"verified-domain"`)
+
+An SSO sign-in is honoured only when the signing provider is domain-verified
+**for the user's e-mail domain** — applied at JIT user creation _and_ at
+every session an SSO callback mints (`src/server/policy/sso-jit.ts`,
+`src/server/policy/enforcement.ts`). Upstream `@better-auth/sso` does not
+bind the create branch: a tenant's verified IdP could assert `ceo@acme.test`
+and mint that account on the deployment — locking the real user out of their
+own IdP (the account is linked to the wrong provider), satisfying acme's
+`ssoEnforced`, and accepting acme's invitations. The fix:
+
+- **`SSO_DOMAIN_NOT_ALLOWED`** (the callback redirects with
+  `error=SSO_DOMAIN_NOT_ALLOWED`): the provider is not verified for that
+  e-mail domain. No user row is written (the callback's transaction rolls
+  back) and no session is minted. This applies to _existing_ users too — an
+  `account` row that a foreign IdP linked before the upgrade stays in the
+  database but can no longer sign in; see the detection SQL in
+  [`security.md`](./security.md#upgrading-from-10x).
+- **`SSO_PROVIDER_UNRESOLVED`**: the signing provider could not be named —
+  neither the route's `providerId` nor the server-trusted OAuth state
+  (the shared `/sso/callback`) identifies one, or they disagree. Fail-closed
+  canary; it should never fire on the routes this preset registers.
+- **`emailVerified: true`** on a domain-bound JIT user: the IdP owns that
+  domain and vouched for the address, which is exactly what an e-mail
+  round-trip would prove. `sso.trustVerifiedDomainEmail: false` leaves
+  upstream's own claim handling in charge (the binding still applies).
+- **`ssoEnforced`** is satisfied only by the enforcing org's **own** IdP
+  (`SSO_REQUIRED`, "through its own identity provider"): another tenant
+  flipping their org to `ssoEnforced` does not satisfy yours for a user they
+  linked to their IdP.
+
+`sso.domainBinding: "off"` restores the upstream behaviour — every tenant's
+IdP can sign in and create any e-mail address on the deployment — and logs a
+warning naming the advisory at construction. It is an operator-level switch on
+purpose: a per-org allow-list of "external" domains would be controlled by
+the very tenant the binding protects against. Contractors on external mail
+domains (gmail etc.) therefore cannot use a tenant's SSO in 1.1.0; invite
+them and let them sign in with another allowed method.
+
+### Providers belong to organizations
+
+`/sso/register` requires `organizationId` in the body (`400 ORG_REQUIRED`
+from the gate, before any fallback to the session's active organization).
+Upstream ran its owner/admin check only when the field was present, so any
+signed-in user could create a "personal" (`organizationId: null`) provider
+claiming any domain. Such rows cannot be domain-verified through this layer,
+are skipped by every org-scoped read, and are refused by the test-login
+finish.
+
+### Invitations require a verified e-mail
+
+The preset sets `organization({ requireEmailVerificationOnInvitation: true })`:
+accepting or rejecting an invitation requires the session's e-mail to be
+verified (`403 EMAIL_VERIFICATION_REQUIRED_BEFORE_ACCEPTING_OR_REJECTING_INVITATION`,
+upstream's code). A domain-bound SSO user is verified and claims the invited
+role at once; a password sign-up without a verification e-mail is not. Opt
+out with `organization.requireEmailVerificationOnInvitation: false` only when
+every sign-up path in the product verifies e-mail some other way.
 
 ## Home-realm discovery (email-first login)
 
