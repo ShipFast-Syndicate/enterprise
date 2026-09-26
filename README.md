@@ -196,7 +196,10 @@ postdate the requirement, an un-enrolled password holder's key yields no session
 upgrading needs only the data-only migration `0003`. A product whose package tables came from its
 own migration (every fleet product) emits just that one with
 `ab-enterprise migrate --out <folder> --from 0003` — never the full emit, which would re-run `0001`
-and `0002` after its own; a folder this command wrote before gets it with a plain `migrate --out`.
+and `0002` after its own. Any 1.0.x install runs `--from 0003` too, even a folder whose `0001` this
+command wrote: 1.0.0 applied `0002` outside it ([`docs/migration-1-7.md`](./docs/migration-1-7.md)
+step 4). Only a folder from 0.1.x that never applied `0002` runs `--from 0002`; a plain run on a
+folder holding this command's `0001` without its `0002` stops and asks which.
 Details in
 [`docs/security.md`](./docs/security.md#policy-resolution-and-enforcement-points).
 
@@ -358,11 +361,19 @@ deploy step or locally, not from an edge/Workers runtime:
 # them one at a time; it is an ordinary SQL comment everywhere else.
 ab-enterprise migrate --out ./drizzle/migrations
 
-# A product whose package tables came from its OWN migration (e.g. a hand-written
-# NNNN_enterprise_pilot.sql) takes only the migrations it lacks — for 1.1.0,
-# the data-only 0003. A plain run refuses a folder holding an *enterprise*.sql
-# file this command did not write, rather than re-emit 0001/0002 next to it.
+# Upgrading from 1.0.x: always --from 0003 (the data-only 0003 is all 1.1.0
+# adds), whatever wrote the folder's 0001 — a product's OWN migration (e.g. a
+# hand-written NNNN_enterprise_pilot.sql) or this command — because 1.0.0
+# applied 0002 outside the folder (docs/migration-1-7.md step 4).
 ab-enterprise migrate --out ./drizzle/migrations --from 0003
+
+# Upgrading from 0.1.x, where 0002 was never applied: 0002 and 0003.
+ab-enterprise migrate --out ./drizzle/migrations --from 0002
+
+# A plain run (no --from) is for a new install, or a folder whose 0002 this
+# command wrote. It refuses, writing nothing, a folder holding an
+# *enterprise*.sql file this command did not write, or this command's 0001
+# without its 0002 — the folder alone cannot show what that one applied.
 
 # No journal in the target folder? The command says so, and the supported
 # application paths are `applyMigration()` from `@alphabros/enterprise/schema`

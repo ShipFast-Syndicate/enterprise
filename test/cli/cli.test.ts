@@ -5,6 +5,7 @@
 // end to end, not just the TS source.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   cpSync,
   existsSync,
@@ -22,6 +23,7 @@ import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { migrate } from "drizzle-orm/libsql/migrator";
 import { applyMigration } from "../../src/schema";
+import { migrationFilePath, splitStatements } from "../../src/schema/migrate";
 import { baseAuthOptions as baseOptions, runMigrations } from "../helpers/auth";
 import { hashRow, type AuditRowForHash } from "../../src/server/audit/chain";
 
@@ -178,18 +180,35 @@ describe("ab-enterprise CLI (built binary)", () => {
     expect(readdirSync(outDir)).toHaveLength(3);
 
     // A folder an earlier release wrote 0001 into (its only file, with the
-    // content every release wrote for it — 0001 is unchanged since 0.1.0)
-    // gets the rest after it, numbered on from what is there.
+    // content every release wrote for it — 0001 is unchanged since 0.1.0).
+    // Releases up to 1.0.x wrote 0001 only and had 0002 applied outside the
+    // folder (docs/migration-1-7.md step 4), so the folder cannot show
+    // whether 0002 ran: a plain run is refused, writes nothing, and names
+    // both answers (PR-5 round 5).
     const upgradeDir = join(workDir, "migrations-upgrade");
     mkdirSync(upgradeDir, { recursive: true });
     const earlier = readFileSync(join(outDir, "0000_enterprise.sql"), "utf8");
     writeFileSync(join(upgradeDir, "0004_enterprise.sql"), earlier);
-    expect(runCli(["migrate", "--out", upgradeDir]).status).toBe(0);
+    const plain = runCli(["migrate", "--out", upgradeDir]);
+    expect(plain.status).toBe(1);
+    expect(plain.stderr).toMatch(
+      /0004_enterprise\.sql, this command's emission of package migration 0001, but no emission of 0002/,
+    );
+    expect(plain.stderr).toMatch(/Upgrading from 1\.0\.x: run again with --from 0003/);
+    expect(plain.stderr).toMatch(
+      /Upgrading from 0\.1\.x, where 0002 was never applied: run again with --from 0002/,
+    );
+    expect(readdirSync(upgradeDir)).toEqual(["0004_enterprise.sql"]);
+    // Told which, it gets the rest after it, numbered on from what is there.
+    expect(runCli(["migrate", "--out", upgradeDir, "--from", "0002"]).status).toBe(0);
     expect(readdirSync(upgradeDir).sort()).toEqual([
       "0004_enterprise.sql",
       "0005_enterprise_0002_scim_1_7.sql",
       "0006_enterprise_0003_require2fa.sql",
     ]);
+    // Once 0002's emission is there, a plain run has nothing left to ask.
+    expect(runCli(["migrate", "--out", upgradeDir]).status).toBe(0);
+    expect(readdirSync(upgradeDir)).toHaveLength(3);
 
     // Recognised only on proof: a file under the emitted name whose content
     // is not the package's is refused, and nothing is written.
@@ -460,6 +479,155 @@ describe("ab-enterprise CLI (built binary)", () => {
       expect(runCli(["migrate", "--out", dir]).status).toBe(0);
       const whens = journalOf(dir).entries.map((e) => e.when);
       expect(whens).toEqual([ahead, ahead + 1, ahead + 2, ahead + 3]);
+    });
+  });
+  // PR-5 round 5 — a folder a 1.0.x install left behind. Every release up to
+  // 1.0.x (0.1.0 … 1.0.1) wrote 0001 only, as `NNNN_enterprise.sql`, and the
+  // 1.0.0 upgrade guide (docs/migration-1-7.md step 4) had 0002 applied
+  // outside this command: through `applyMigration()` or a product migration
+  // of its own name. So such a folder holds a proven 0001 and no emission of
+  // 0002, while its database already has 0002's `org_policy.id` column. A
+  // plain run on 3627619 wrote 0002 and 0003 there and the product's migrator
+  // stopped on `duplicate column name: id`.
+  //
+  // The fixture's `0001_enterprise.sql` and its journal entry are the exact
+  // output of the v1.0.1 CLI (`git archive v1.0.1`, `src/cli/index.ts`
+  // bundled with esbuild as tsup does, `migrate --out` into a folder holding
+  // `0000_base.sql`); `0002_scim_1_7.sql` is the product migration step 4
+  // allows (package 0002 with drizzle breakpoints, e.g. nomi's own).
+  describe("migrate from a 1.0.x install (the v1.0.1 CLI's exact 0001 output)", () => {
+    const fixture = join(repoRoot, "test", "cli", "fixtures", "v1-0-1-drizzle");
+
+    function journalOf(dir: string) {
+      return JSON.parse(readFileSync(join(dir, "meta", "_journal.json"), "utf8")) as {
+        entries: Array<{ idx: number; tag: string; when: number; breakpoints: boolean }>;
+      };
+    }
+
+    function withoutProductScimMigration(dir: string) {
+      rmSync(join(dir, "0002_scim_1_7.sql"));
+      const journal = journalOf(dir);
+      journal.entries = journal.entries.filter((entry) => entry.tag !== "0002_scim_1_7");
+      writeFileSync(join(dir, "meta", "_journal.json"), `${JSON.stringify(journal, null, 2)}\n`);
+    }
+
+    /**
+     * `product-migration`: 0002 reached the database through the product's own
+     * `0002_scim_1_7.sql`. `applyMigration`: the folder holds 0001 only and
+     * 0002 was run the way 1.0.x's `applyMigration()` ran it. `0.1.x`: the
+     * folder holds 0001 only and 0002 never ran.
+     */
+    async function installedDatabase(
+      name: string,
+      via: "product-migration" | "applyMigration" | "0.1.x",
+    ) {
+      const dir = join(workDir, name);
+      cpSync(fixture, dir, { recursive: true });
+      if (via !== "product-migration") withoutProductScimMigration(dir);
+      const client = createClient({ url: `file:${join(workDir, `${name}.db`)}` });
+      await migrate(drizzle(client), { migrationsFolder: dir });
+      if (via === "applyMigration") {
+        const scim = readFileSync(migrationFilePath("0002_scim_1_7.sql"), "utf8");
+        for (const statement of splitStatements(scim)) await client.execute(statement);
+      }
+      await client.execute({
+        sql: `INSERT INTO org_policy (org_id, require_2fa, updated_at) VALUES ('org_strict', 1, ?), ('org_open', 0, ?)`,
+        args: [1_700_000_000_000, 1_700_000_000_000],
+      });
+      return { dir, client };
+    }
+
+    async function appliedCount(client: ReturnType<typeof createClient>) {
+      const rows = await client.execute(`SELECT count(*) AS n FROM __drizzle_migrations`);
+      return Number(rows.rows[0]!.n);
+    }
+
+    async function policyRow(client: ReturnType<typeof createClient>, orgId: string) {
+      const rows = await client.execute({
+        sql: `SELECT * FROM org_policy WHERE org_id = ?`,
+        args: [orgId],
+      });
+      return rows.rows[0]!;
+    }
+
+    it("the fixture's 0001 is the v1.0.1 CLI's output, byte for byte, and this release's own", () => {
+      const pinned = readFileSync(join(fixture, "0001_enterprise.sql"));
+      expect(createHash("sha1").update(pinned).digest("hex")).toBe(
+        "ef570b7dde0189ebbe48739bf3ed6987febaa6f0",
+      );
+      const emptyDir = join(workDir, "v1-0-1-compare");
+      expect(runCli(["migrate", "--out", emptyDir]).status).toBe(0);
+      expect(readFileSync(join(emptyDir, "0000_enterprise.sql"))).toEqual(pinned);
+    });
+
+    it.each(["product-migration", "applyMigration"] as const)(
+      "0002 applied via %s: a plain run is refused and writes nothing; --from 0003 writes one file the real drizzle libsql migrator applies cleanly",
+      async (via) => {
+        const { dir, client } = await installedDatabase(`v1-0-1-${via}`, via);
+        const applied = await appliedCount(client);
+        const before = readdirSync(dir).sort();
+        const journalBefore = readFileSync(join(dir, "meta", "_journal.json"), "utf8");
+
+        const plain = runCli(["migrate", "--out", dir]);
+        expect(plain.status).toBe(1);
+        expect(plain.stderr).toMatch(
+          /0001_enterprise\.sql, this command's emission of package migration 0001, but no emission of 0002/,
+        );
+        expect(plain.stderr).toMatch(/--from 0003/);
+        expect(plain.stderr).toMatch(/--from 0002/);
+        expect(readdirSync(dir).sort()).toEqual(before);
+        expect(readFileSync(join(dir, "meta", "_journal.json"), "utf8")).toBe(journalBefore);
+
+        const run = runCli(["migrate", "--out", dir, "--from", "0003"]);
+        expect(run.status, run.stderr).toBe(0);
+        const added = readdirSync(dir).filter((entry) => !before.includes(entry));
+        const tag = `${String(before.length - 1).padStart(4, "0")}_enterprise_0003_require2fa`;
+        expect(added).toEqual([`${tag}.sql`]);
+        expect(journalOf(dir).entries.at(-1)).toMatchObject({ tag, breakpoints: true });
+
+        const upgradeStartedMs = Date.now();
+        await migrate(drizzle(client), { migrationsFolder: dir });
+        expect(await appliedCount(client)).toBe(applied + 1);
+        const idColumns = await client.execute(`PRAGMA table_info(org_policy)`);
+        expect(idColumns.rows.filter((row) => String(row.name) === "id")).toHaveLength(1);
+        const strict = await policyRow(client, "org_strict");
+        expect(Number(strict.updated_at)).toBeGreaterThanOrEqual(upgradeStartedMs);
+        expect(Number(strict.updated_at)).toBeLessThan(upgradeStartedMs + 60_000);
+        expect(Number((await policyRow(client, "org_open")).updated_at)).toBe(1_700_000_000_000);
+
+        // A redeploy: nothing written, nothing applied.
+        expect(runCli(["migrate", "--out", dir, "--from", "0003"]).status).toBe(0);
+        expect(readdirSync(dir).filter((entry) => !before.includes(entry))).toEqual(added);
+        await migrate(drizzle(client), { migrationsFolder: dir });
+        expect(await appliedCount(client)).toBe(applied + 1);
+        client.close();
+      },
+    );
+
+    it("from 0.1.x, where 0002 never ran: --from 0002 writes 0002 and 0003 and the real drizzle libsql migrator applies both", async () => {
+      const { dir, client } = await installedDatabase("v0-1-x", "0.1.x");
+      const applied = await appliedCount(client);
+      const before = readdirSync(dir);
+
+      expect(runCli(["migrate", "--out", dir]).status).toBe(1);
+      expect(readdirSync(dir)).toEqual(before);
+
+      const run = runCli(["migrate", "--out", dir, "--from", "0002"]);
+      expect(run.status, run.stderr).toBe(0);
+      expect(
+        readdirSync(dir)
+          .filter((entry) => !before.includes(entry))
+          .sort(),
+      ).toEqual(["0002_enterprise_0002_scim_1_7.sql", "0003_enterprise_0003_require2fa.sql"]);
+      await migrate(drizzle(client), { migrationsFolder: dir });
+      expect(await appliedCount(client)).toBe(applied + 2);
+      expect((await policyRow(client, "org_open")).id).toBe("org_open");
+
+      // With 0002's emission in the folder, a plain run has nothing to ask.
+      const again = runCli(["migrate", "--out", dir]);
+      expect(again.status).toBe(0);
+      expect(again.stdout).toMatch(/already holds every migration — nothing written/);
+      client.close();
     });
   });
 });

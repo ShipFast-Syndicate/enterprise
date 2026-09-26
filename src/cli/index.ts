@@ -17,7 +17,10 @@
 //                                        as next-numbered NNNN_enterprise*.sql
 //                                        files, and register each in
 //                                        meta/_journal.json if the folder has
-//                                        one
+//                                        one; a folder an earlier release
+//                                        wrote (0001 only) needs --from 0003
+//                                        (from 1.0.x) or --from 0002 (from
+//                                        0.1.x without 0002 applied)
 //   ab-enterprise verify [--url] [--token]
 //                                        check a live database against
 //                                        EXPECTED_TABLES, one line per
@@ -328,6 +331,14 @@ function unprovenEnterpriseFiles(outDir: string): string[] {
  * cannot prove, and emitting every migration next to that file would fail
  * the product's migrator on the first `ALTER TABLE` it re-runs. A file under
  * the emitted name but with other content is refused whatever `--from` says.
+ *
+ * Without `--from`, a folder holding a proven emission of `0001` but none of
+ * `0002` is refused too (exit 1, nothing written). Releases up to 1.0.x
+ * wrote `0001` only, and the 1.0.0 upgrade guide (`docs/migration-1-7.md`
+ * step 4) had `0002` applied outside this folder — through `applyMigration()`
+ * or a product migration of its own name — so the folder cannot show whether
+ * `0002`'s `ALTER TABLE org_policy ADD COLUMN id` already ran. From 1.0.x it
+ * did: `--from 0003`. From 0.1.x, where it never ran: `--from 0002`.
  */
 function cmdMigrate(argv: string[]): number {
   const { values } = parseArgs({
@@ -367,6 +378,15 @@ function cmdMigrate(argv: string[]): number {
     if (unproven.length > 0) {
       console.error(
         `ab-enterprise migrate: ${outDir} holds ${unproven.join(", ")}, which this command did not write — it cannot tell which package migrations that applied. Nothing written. If it created the package tables (a product's own enterprise migration), run again with --from <the first package migration it lacks>, e.g. --from ${numbers[numbers.length - 1]}.`,
+      );
+      return 1;
+    }
+
+    const first = emissionState(outDir, MIGRATION_FILES[0]);
+    const second = emissionState(outDir, MIGRATION_FILES[1]);
+    if (first.kind === "present" && second.kind === "absent") {
+      console.error(
+        `ab-enterprise migrate: ${outDir} holds ${first.entry}, this command's emission of package migration 0001, but no emission of 0002 — releases up to 1.0.x wrote 0001 only, and the 1.0.0 upgrade guide applied 0002 through applyMigration() or a product migration, so this folder cannot show whether it ran. Nothing written. Upgrading from 1.0.x: run again with --from 0003. Upgrading from 0.1.x, where 0002 was never applied: run again with --from 0002.`,
       );
       return 1;
     }

@@ -18,10 +18,11 @@
 -- later than it. Only rows with `require_2fa = 1` are touched (production had
 -- none on 2026-09-26, where this is a no-op).
 --
--- Run it once, as part of the upgrade: through `ab-enterprise migrate --out`
--- (a drizzle journal applies it exactly once; a product whose package tables
--- came from its own migration adds `--from 0003`, so this is the only file
--- written) or `applyMigration()`. Running
+-- Run it once, as part of the upgrade: through
+-- `ab-enterprise migrate --out <folder> --from 0003` from any 1.0.x install,
+-- whatever wrote its 0001 (1.0.0 applied 0002 outside the folder, so this is
+-- the only file written, and a drizzle journal applies it exactly once), or
+-- `applyMigration()`. Running
 -- it again later is safe but not free — it moves the onset again, so members
 -- of requiring orgs who hold no password and are not enrolled sign in once
 -- more.

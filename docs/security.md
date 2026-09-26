@@ -359,15 +359,25 @@ own migrator:
   remove every emitted file other than `NNNN_enterprise_0003_require2fa.sql` **and** its
   `meta/_journal.json` entry — deleting the file alone makes the migrator fail on the missing
   file.
-- **A product that took the package tables from this command** (its folder holds the
-  `NNNN_enterprise.sql` an earlier release wrote) runs `ab-enterprise migrate --out <folder>`,
-  which writes `0002` and `0003` after it.
+- **Any other 1.0.x install runs `--from 0003` too, whatever wrote its `0001`** — including a
+  folder that holds the `NNNN_enterprise.sql` an earlier release of this command wrote. Every
+  release up to 1.0.x wrote `0001` only, and the 1.0.0 upgrade
+  ([`docs/migration-1-7.md`](./migration-1-7.md) step 4) applied `0002` through
+  `applyMigration()` or a product migration of its own, so the database already has `0002`'s
+  `org_policy.id` column; emitting `0002` again stops the migrator on
+  `duplicate column name: id`. Only a folder coming straight from **0.1.x**, which never applied
+  `0002`, takes both: `ab-enterprise migrate --out <folder> --from 0002`. A plain run on a folder
+  holding this command's `0001` but no `0002` of its own cannot tell the two apart, so it stops
+  with exit 1, writes nothing and names both `--from 0003` (from 1.0.x) and `--from 0002` (from
+  0.1.x).
 
 The command recognises nothing it cannot prove: a file counts as an earlier emission only when it
 carries the name this command gives that migration **and** the package file's own content
 (breakpoint markers aside — every release wrote exactly that). Without `--from`, a folder holding
 any other `*enterprise*.sql` file is refused with exit 1 and nothing written, naming the file and
-`--from`; a file under an emitted name with other content is refused whatever `--from` says.
+`--from`, and so is a folder holding this command's `0001` without its `0002` (above); a file
+under an emitted name with other content is refused whatever `--from` says. A plain run is for an
+empty folder (a new install) or one whose `0002` this command wrote.
 Journal entries it adds start after the newest `when` already in the journal, so the migrator never
 skips them. `applyMigration()` runs every file on each call, and a second run of `0003` signs those
 members out once more. Where no org has `require_2fa = 1` (production on 2026-09-26), `0003`
