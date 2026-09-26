@@ -77,24 +77,55 @@ export interface EnterpriseOptions {
    * handling in charge.
    *
    * `allowedIssuers`: an allow-list for the identity providers an org admin
-   * may register or update a provider to. It is applied to the `issuer`
-   * string **and** to every IdP-defining value of the configuration — OIDC
-   * `discoveryEndpoint`/`authorizationEndpoint`/`tokenEndpoint`/
-   * `jwksEndpoint`/`userInfoEndpoint`, SAML `entryPoint`,
-   * `idpMetadata.entityID`, the `singleSignOnService`/`singleLogoutService`
-   * locations and the `entityID`/locations inside `idpMetadata.metadata` —
-   * because upstream fetches an OIDC provider's signing keys from the
-   * tenant-supplied `jwksEndpoint` and checks a SAML assertion against the
-   * tenant-supplied certificate, so the issuer string alone binds nothing.
-   * Array form: the issuer must match an entry (exact string or `RegExp`),
-   * and each endpoint must be the issuer, sit on the issuer's origin, or
-   * match an entry itself or by origin — an IdP that serves endpoints from
-   * several origins needs those origins listed. Predicate form: called once
-   * with the issuer and `{ organizationId, endpoints }` and decides alone.
-   * Checked on `/sso/register`, and on `/sso/update-provider` whenever
-   * `issuer`, `oidcConfig` or `samlConfig` is sent (against the merged
-   * result). Absent = anything (upstream behaviour). `trustedOrigins` is
-   * **not** an issuer allow-list; this is.
+   * may register or update a provider to — and that a stored provider must
+   * still pass at every SSO sign-in. What it binds differs by protocol,
+   * because the `issuer` string alone binds nothing:
+   *
+   * - **OIDC** — upstream fetches the signing keys from the tenant-supplied
+   *   `jwksEndpoint`, so the list is applied to the `issuer` **and** to
+   *   `discoveryEndpoint`/`authorizationEndpoint`/`tokenEndpoint`/
+   *   `jwksEndpoint`/`userInfoEndpoint`. Array form: the issuer must match
+   *   an entry (exact string or `RegExp`), and each endpoint must be the
+   *   issuer, sit on the issuer's origin, or match an entry itself or by
+   *   origin — an IdP that serves endpoints from several origins needs
+   *   those origins listed.
+   * - **SAML** — the trust root is the signing certificate, not a URL: a
+   *   tenant may claim an allowed `entityID`/`entryPoint` while supplying
+   *   a keypair of their own. The list is applied to the `issuer` (the SP
+   *   id, under upstream), `entryPoint`, `idpMetadata.entityID`, the
+   *   `singleSignOnService`/`singleLogoutService` locations and the
+   *   `entityID`/locations inside `idpMetadata.metadata`, **and** every
+   *   certificate the configuration carries — `cert`, `idpMetadata.cert`
+   *   and each signing `KeyDescriptor` of `idpMetadata.metadata` — must be
+   *   pinned in `samlCertificateFingerprints` under the configuration's
+   *   entity id (its `idpMetadata.entityID` / metadata `entityID`; the
+   *   `issuer` when it names neither). **Fail closed**: with an array
+   *   allow-list and no pins for that entity id, or a certificate that is
+   *   not pinned, or no readable certificate at all, the SAML provider is
+   *   refused.
+   *
+   * Predicate form: called once with the issuer and `{ organizationId,
+   * endpoints, samlCertFingerprints }` (normalised lowercase hex, empty for
+   * OIDC) and decides alone; unreadable endpoints or certificates are
+   * refused before it is consulted. Checked on `/sso/register`, on
+   * `/sso/update-provider` whenever `issuer`, `oidcConfig` or `samlConfig`
+   * is sent (against the merged result), and on every SSO sign-in against
+   * the stored row (SAML ACS and OIDC callback — an operator tightening the
+   * list or the pins also refuses rows registered before). Refusal is `403
+   * SSO_ISSUER_NOT_ALLOWED`; at sign-in no session is minted and the
+   * failure is audited like every other SSO refusal. Absent = anything
+   * (upstream behaviour). `trustedOrigins` is **not** an issuer allow-list;
+   * this is. It restricts *which IdPs* exist on the deployment — the
+   * per-tenant control over *whose accounts* an IdP may sign in remains
+   * `domainBinding`.
+   *
+   * `samlCertificateFingerprints`: the pins the array form of
+   * `allowedIssuers` requires for SAML — a map from the IdP's entity id to
+   * the SHA-256 fingerprints of the DER form of its signing certificates
+   * (`openssl x509 -in idp.pem -noout -fingerprint -sha256`; hex, colons
+   * optional, case-insensitive; list every certificate during a rotation).
+   * Ignored without `allowedIssuers`, and by the predicate form (which
+   * receives the fingerprints instead).
    */
   sso?: {
     domainBinding?: "verified-domain" | "off";
@@ -103,8 +134,13 @@ export interface EnterpriseOptions {
       | Array<string | RegExp>
       | ((
           issuer: string,
-          ctx: { organizationId: string | null; endpoints: string[] },
+          ctx: {
+            organizationId: string | null;
+            endpoints: string[];
+            samlCertFingerprints: string[];
+          },
         ) => boolean | Promise<boolean>);
+    samlCertificateFingerprints?: Record<string, string[]>;
   };
   /**
    * Forwarded to the upstream `organization()` plugin by the preset.

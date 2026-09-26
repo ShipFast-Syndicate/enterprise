@@ -18,11 +18,17 @@
 // whose id_tokens *claim* the allowed `iss` (`issClaim`) — live without a
 // list (the control that proves the attack is real), refused with one.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { collectIdpEndpoints, issuerAllowed } from "../../src/server/sso-domain";
+import { X509Certificate } from "node:crypto";
+import {
+  collectIdpEndpoints,
+  collectSamlTrustRoot,
+  issuerAllowed,
+  normalizeFingerprint,
+} from "../../src/server/sso-domain";
 import { createOrg, extractCookie, makeAuth, signUpOwner, type TestAuth } from "../helpers/auth";
 import { startOidcIssuer, type OidcIssuer } from "../helpers/oidc-issuer";
 import { mintSamlResponse, TEST_IDP_ENTITY_ID } from "../helpers/saml-idp";
-import { IDP_CERT } from "../helpers/fixtures/saml-keys";
+import { IDP_CERT, SP_CERT } from "../helpers/fixtures/saml-keys";
 import { verifyProviderDomain } from "../helpers/sso";
 import { driveSsoSignIn, sessionOf } from "./ghsa-sso-helpers";
 
@@ -170,6 +176,7 @@ describe("F-28 — sso.allowedIssuers is the issuer allow-list", () => {
     expect(allowedIssuers).toHaveBeenLastCalledWith(mine, {
       organizationId: o.orgId,
       endpoints: [`${mine}/authorize`, `${mine}/token`, `${mine}/jwks`],
+      samlCertFingerprints: [], // OIDC: nothing to pin
     });
     await expectRefused(
       t,
@@ -442,7 +449,16 @@ describe("F-28 — sso.allowedIssuers is the issuer allow-list", () => {
     });
 
     it("C3 SAML: issuer/entityID string allowed, a tenant-supplied cert and an entryPoint (or entityID) on a rogue origin → 403; the allowed IdP's own entryPoint registers and signs in", async () => {
-      const t = await makeAuth({ sso: { allowedIssuers: [TEST_IDP_ENTITY_ID] } });
+      // Round 3: a SAML provider under an array allow-list also needs its
+      // signing certificate pinned (`test/security/f28-saml-trust-root.test.ts`).
+      const t = await makeAuth({
+        sso: {
+          allowedIssuers: [TEST_IDP_ENTITY_ID],
+          samlCertificateFingerprints: {
+            [TEST_IDP_ENTITY_ID]: [new X509Certificate(IDP_CERT).fingerprint256],
+          },
+        },
+      });
       const o = await owner(t, "owner@evil.test", "evil");
       const base = "http://localhost:3000/api/auth";
       const saml = (providerId: string, overrides: Record<string, unknown>) => ({
@@ -640,8 +656,189 @@ describe("F-28 — sso.allowedIssuers is the issuer allow-list", () => {
         },
       }) as never;
     expect(await issuerAllowed(predicate(true), "https://x", ctx(["https://y"], "o"))).toBe(true);
-    expect(seen).toEqual([["https://x", { organizationId: "o", endpoints: ["https://y"] }]]);
+    expect(seen).toEqual([
+      ["https://x", { organizationId: "o", endpoints: ["https://y"], samlCertFingerprints: [] }],
+    ]);
     expect(await issuerAllowed(predicate("yes"), "https://x", ctx([], "o"))).toBe(false);
     expect(await issuerAllowed(predicate(true), "https://x", ctx(null, "o"))).toBe(false);
+  });
+
+  it("normalizeFingerprint / collectSamlTrustRoot: every certificate source upstream honours, every spelling, fail closed on anything unreadable", () => {
+    const idp = new X509Certificate(IDP_CERT).fingerprint256; // AB:CD:…
+    const idpLower = idp.replace(/:/g, "").toLowerCase();
+    const spLower = new X509Certificate(SP_CERT).fingerprint256.replace(/:/g, "").toLowerCase();
+    expect(normalizeFingerprint(idp)).toBe(idpLower);
+    expect(normalizeFingerprint(idpLower.toUpperCase())).toBe(idpLower);
+    expect(normalizeFingerprint(" ab:cd ")).toBeNull();
+    expect(normalizeFingerprint("z".repeat(64))).toBeNull();
+    expect(normalizeFingerprint(idpLower.slice(0, 40))).toBeNull(); // SHA-1 length
+
+    // Not SAML → no trust root to pin.
+    expect(collectSamlTrustRoot(undefined, "https://x")).toBeNull();
+    expect(collectSamlTrustRoot("junk", "https://x")).toBeNull();
+
+    const bare = IDP_CERT.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+    const x509 = (cert: string, use?: string) =>
+      `<md:KeyDescriptor${use ? ` use='${use}'` : ""}><ds:KeyInfo><ds:X509Data><ds:X509Certificate>${cert
+        .replace(/-----[^-]+-----/g, "")
+        .replace(/\s+/g, "")}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor>`;
+    const doc = (entityId: string, keys: string) =>
+      `<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="${entityId}"><md:IDPSSODescriptor>${keys}</md:IDPSSODescriptor></md:EntityDescriptor>`;
+
+    // inline `cert` (PEM or the bare base64 upstream accepts), a rotation list, `idpMetadata.cert` — de-duplicated
+    expect(
+      collectSamlTrustRoot({ cert: IDP_CERT, idpMetadata: { entityID: "urn:idp" } }, "https://sp"),
+    ).toEqual({ entityIds: ["urn:idp"], certFingerprints: [idpLower] });
+    expect(collectSamlTrustRoot({ cert: bare }, "https://sp")).toEqual({
+      entityIds: ["https://sp"], // no entity id named → upstream's `issuer` fallback
+      certFingerprints: [idpLower],
+    });
+    expect(
+      collectSamlTrustRoot(
+        { cert: [IDP_CERT, SP_CERT], idpMetadata: { entityID: "urn:idp", cert: IDP_CERT } },
+        "https://sp",
+      ),
+    ).toEqual({ entityIds: ["urn:idp"], certFingerprints: [idpLower, spLower] });
+    // metadata document: signing / no-`use` KeyDescriptors count, `encryption` does not; its entityID joins the inline one
+    expect(
+      collectSamlTrustRoot(
+        {
+          idpMetadata: {
+            entityID: "urn:idp",
+            metadata: doc(
+              "https://meta.test/idp",
+              x509(IDP_CERT, "signing") + x509(SP_CERT) + x509(SP_CERT, "encryption"),
+            ),
+          },
+        },
+        "https://sp",
+      ),
+    ).toEqual({
+      entityIds: ["urn:idp", "https://meta.test/idp"],
+      certFingerprints: [idpLower, spLower],
+    });
+    expect(
+      collectSamlTrustRoot(
+        {
+          idpMetadata: {
+            metadata: doc("urn:m", x509(IDP_CERT, "signing") + x509(SP_CERT, "encryption")),
+          },
+        },
+        "https://sp",
+      ),
+    ).toEqual({ entityIds: ["urn:m"], certFingerprints: [idpLower] });
+    // fail closed: no certificate anywhere, an unparsable one, a non-string, a document without an entityID
+    expect(collectSamlTrustRoot({ idpMetadata: { entityID: "urn:idp" } }, "https://sp")).toEqual({
+      entityIds: ["urn:idp"],
+      certFingerprints: null,
+    });
+    expect(
+      collectSamlTrustRoot({ cert: "not a certificate", idpMetadata: { entityID: "urn:idp" } }, "x")
+        ?.certFingerprints,
+    ).toBeNull();
+    expect(
+      collectSamlTrustRoot({ cert: [IDP_CERT, 42], idpMetadata: { entityID: "urn:idp" } }, "x")
+        ?.certFingerprints,
+    ).toBeNull();
+    expect(
+      collectSamlTrustRoot(
+        {
+          idpMetadata: {
+            metadata: `<md:EntityDescriptor>${x509(IDP_CERT, "signing")}</md:EntityDescriptor>`,
+          },
+        },
+        "x",
+      )?.certFingerprints,
+    ).toBeNull();
+    expect(
+      collectSamlTrustRoot({ idpMetadata: { metadata: doc("urn:m", "") } }, "x")?.certFingerprints,
+    ).toBeNull();
+  });
+
+  it("issuerAllowed: SAML pins, unit-level — every entity id needs pins, every certificate must be pinned, unreadable trust roots fail before any predicate", async () => {
+    const idp = new X509Certificate(IDP_CERT).fingerprint256;
+    const idpLower = idp.replace(/:/g, "").toLowerCase();
+    const spLower = new X509Certificate(SP_CERT).fingerprint256.replace(/:/g, "").toLowerCase();
+    const opts = (samlCertificateFingerprints?: Record<string, string[]>) =>
+      ({ sso: { allowedIssuers: ["urn:idp", "urn:other"], samlCertificateFingerprints } }) as never;
+    const saml = (entityIds: string[], certFingerprints: string[] | null) => ({
+      organizationId: null,
+      endpoints: [],
+      saml: { entityIds, certFingerprints },
+    });
+
+    expect(
+      await issuerAllowed(opts({ "urn:idp": [idp] }), "urn:idp", saml(["urn:idp"], [idpLower])),
+    ).toBe(true);
+    expect(
+      await issuerAllowed(
+        opts({ "urn:idp": [idpLower.toUpperCase()] }),
+        "urn:idp",
+        saml(["urn:idp"], [idpLower]),
+      ),
+    ).toBe(true);
+    // rotation: both listed; one missing → refused
+    expect(
+      await issuerAllowed(
+        opts({ "urn:idp": [idp, spLower] }),
+        "urn:idp",
+        saml(["urn:idp"], [idpLower, spLower]),
+      ),
+    ).toBe(true);
+    expect(
+      await issuerAllowed(
+        opts({ "urn:idp": [idp] }),
+        "urn:idp",
+        saml(["urn:idp"], [idpLower, spLower]),
+      ),
+    ).toBe(false);
+    // no pins at all / none for this entity id / one of two entity ids unpinned / an empty pin list
+    expect(await issuerAllowed(opts(), "urn:idp", saml(["urn:idp"], [idpLower]))).toBe(false);
+    expect(
+      await issuerAllowed(opts({ "urn:other": [idp] }), "urn:idp", saml(["urn:idp"], [idpLower])),
+    ).toBe(false);
+    expect(
+      await issuerAllowed(
+        opts({ "urn:idp": [idp] }),
+        "urn:idp",
+        saml(["urn:idp", "urn:other"], [idpLower]),
+      ),
+    ).toBe(false);
+    expect(
+      await issuerAllowed(opts({ "urn:idp": [] }), "urn:idp", saml(["urn:idp"], [idpLower])),
+    ).toBe(false);
+    // prototype members are not pins
+    expect(
+      await issuerAllowed(opts({ "urn:idp": [idp] }), "urn:idp", saml(["constructor"], [idpLower])),
+    ).toBe(false);
+    // unreadable trust root fails every form, before a predicate is consulted
+    expect(
+      await issuerAllowed(opts({ "urn:idp": [idp] }), "urn:idp", saml(["urn:idp"], null)),
+    ).toBe(false);
+    const predicate = vi.fn(async () => true);
+    expect(
+      await issuerAllowed(
+        { sso: { allowedIssuers: predicate } } as never,
+        "urn:idp",
+        saml(["urn:idp"], null),
+      ),
+    ).toBe(false);
+    expect(predicate).not.toHaveBeenCalled();
+    expect(
+      await issuerAllowed(
+        { sso: { allowedIssuers: predicate } } as never,
+        "urn:idp",
+        saml(["urn:idp"], [spLower]),
+      ),
+    ).toBe(true);
+    expect(predicate).toHaveBeenLastCalledWith("urn:idp", {
+      organizationId: null,
+      endpoints: [],
+      samlCertFingerprints: [spLower],
+    });
+    // OIDC (no trust root) under pins-less options: unchanged
+    expect(
+      await issuerAllowed(opts(), "urn:idp", { organizationId: null, endpoints: ["urn:idp"] }),
+    ).toBe(true);
   });
 });

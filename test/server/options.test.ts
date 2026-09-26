@@ -109,6 +109,39 @@ describe("assertEnterpriseOptions — sso", () => {
       assertEnterpriseOptions(loose({ sso: { allowedIssuers: "https://idp.test" } })),
     ).toThrow(/allowedIssuers/);
   });
+
+  it("validates samlCertificateFingerprints as entityID → non-empty SHA-256 fingerprints (colons optional, case-insensitive)", () => {
+    const sha256 = "ab".repeat(32);
+    expect(() =>
+      assertEnterpriseOptions(
+        opts({
+          sso: {
+            samlCertificateFingerprints: {
+              "https://idp.test/idp": [sha256, sha256.toUpperCase().match(/../g)!.join(":")],
+            },
+          },
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertEnterpriseOptions(loose({ sso: { samlCertificateFingerprints: [sha256] } })),
+    ).toThrow(/samlCertificateFingerprints/);
+    expect(() =>
+      assertEnterpriseOptions(loose({ sso: { samlCertificateFingerprints: { "urn:idp": [] } } })),
+    ).toThrow(/samlCertificateFingerprints\["urn:idp"\]/);
+    expect(() =>
+      assertEnterpriseOptions(
+        loose({ sso: { samlCertificateFingerprints: { "urn:idp": sha256 } } }),
+      ),
+    ).toThrow(/samlCertificateFingerprints/);
+    for (const bad of ["ab".repeat(20), "zz".repeat(32), 42]) {
+      expect(() =>
+        assertEnterpriseOptions(
+          loose({ sso: { samlCertificateFingerprints: { "urn:idp": [bad] } } }),
+        ),
+      ).toThrow(/64 hex characters/);
+    }
+  });
 });
 
 describe("assertEnterpriseOptions — organization", () => {

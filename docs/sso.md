@@ -97,38 +97,78 @@ To restrict which identity providers tenants may register, set
 and/or `RegExp`s, or a predicate
 `(issuer, { organizationId, endpoints }) => boolean | Promise<boolean>`.
 
-The list binds the **IdP**, not merely the `issuer` string. Upstream
-verifies an OIDC id_token's `iss` against the stored issuer but fetches the
-signing keys from the tenant-supplied `jwksEndpoint`, and checks a SAML
-assertion against the tenant-supplied certificate and `entryPoint` — so a
-tenant allowed to write `issuer: "https://idp.allowed.example"` could point
-every endpoint (`skipDiscovery`) or the SAML cert at an IdP of their own and
-sign in through it under the "allowed" string. The allow-list is therefore
-applied to the issuer **and** to every IdP-defining value of the
-configuration: OIDC `discoveryEndpoint`, `authorizationEndpoint`,
-`tokenEndpoint`, `jwksEndpoint`, `userInfoEndpoint`; SAML `entryPoint`,
-`idpMetadata.entityID`, the `singleSignOnService`/`singleLogoutService`
-locations and the `entityID`/service locations inside an
-`idpMetadata.metadata` document.
+The list binds the **IdP**, not merely the `issuer` string — and what
+"the IdP" is differs by protocol:
+
+- **OIDC.** Upstream verifies an id_token's `iss` against the stored issuer
+  but fetches the signing keys from the tenant-supplied `jwksEndpoint`, so
+  a tenant allowed to write `issuer: "https://idp.allowed.example"` could
+  point every endpoint (`skipDiscovery`) at an IdP of their own and sign in
+  through it under the "allowed" string. The list is applied to the issuer
+  **and** to `discoveryEndpoint`, `authorizationEndpoint`, `tokenEndpoint`,
+  `jwksEndpoint` and `userInfoEndpoint`. The endpoints _are_ the trust
+  root: whoever serves the JWKS signs the tokens.
+- **SAML.** The trust root is the **signing certificate**, not a URL. An
+  assertion is verified against the certificate the tenant supplied —
+  inline (`cert`, `idpMetadata.cert`) or embedded in an
+  `idpMetadata.metadata` document — so a tenant can claim an allowed
+  `entityID` and `entryPoint` word for word while supplying a keypair of
+  their own, and the URL strings alone would let that through. The list is
+  applied to the issuer (which upstream treats as the _service provider's_
+  id), `entryPoint`, `idpMetadata.entityID`, the
+  `singleSignOnService`/`singleLogoutService` locations and the
+  `entityID`/locations inside a metadata document, **and every
+  certificate the configuration carries must be pinned**:
+  `sso.samlCertificateFingerprints` maps the IdP's entity id
+  (`idpMetadata.entityID`, or the metadata document's `entityID`) to the
+  SHA-256 fingerprints of its signing certificates (DER form — what
+  `openssl x509 -in idp.pem -noout -fingerprint -sha256` prints; hex,
+  colons optional, case-insensitive). `cert`, `idpMetadata.cert` and each
+  signing `KeyDescriptor` of the metadata document (`use="signing"` or no
+  `use`; an `encryption` descriptor is not a trust root) are all checked,
+  so a certificate cannot be slipped in through a source the check did not
+  read. List every certificate during a rotation.
+
+Forms:
 
 - **Array form.** The issuer must match an entry (exact string, or a
   `RegExp` test). Each endpoint must then be the issuer itself, sit on the
   issuer's origin, or match an entry — by its full value or by its origin.
   An IdP that serves endpoints from several origins needs those origins
   listed (Google, for instance, issues from `https://accounts.google.com`
-  but exchanges tokens at `https://oauth2.googleapis.com`). For SAML,
-  upstream treats `issuer` as the _service provider's_ id; list the IdP's
-  `entityID` and entry-point origin.
+  but exchanges tokens at `https://oauth2.googleapis.com`). For SAML, list
+  the IdP's `entityID` and entry-point origin, **and pin its certificates
+  — fail closed**: with an array allow-list, a SAML provider whose entity
+  id has no pins (including the case where `samlCertificateFingerprints`
+  is not set at all), one of whose certificates is not pinned, or from
+  which no certificate can be read, is refused. The pins are ignored
+  without an allow-list.
 - **Predicate form.** Called once with the issuer and
-  `{ organizationId, endpoints }` and decides alone; a throw or a
-  non-`true` verdict refuses.
+  `{ organizationId, endpoints, samlCertFingerprints }` (the fingerprints
+  normalised to lowercase hex, empty for OIDC) and decides alone; a throw
+  or a non-`true` verdict refuses. Unreadable endpoints or certificates
+  are refused before the predicate is consulted.
 
-It is checked on `/sso/register`, and on `/sso/update-provider` whenever
+It is checked on `/sso/register`; on `/sso/update-provider` whenever
 `issuer`, `oidcConfig` or `samlConfig` is sent — against the provider as it
 would be stored after the update, so an endpoint swap with the issuer
-untouched, or an issuer change over endpoints the list no longer covers, is
-refused. A refusal is `403 SSO_ISSUER_NOT_ALLOWED` and nothing is stored.
-Absent, anything is accepted (upstream behaviour).
+untouched, an issuer change over endpoints the list no longer covers, or a
+SAML certificate swap (`cert`, `idpMetadata.cert`, or a replaced metadata
+document) is refused; **and at every SSO sign-in against the stored row**
+(the SAML ACS and the OIDC callback, before any user row or session is
+written), so an operator who configures or tightens the list or the pins
+after providers were registered also refuses the rows written before. A
+refusal at write time is `403 SSO_ISSUER_NOT_ALLOWED` and nothing is stored;
+at sign-in no session is minted, the callback redirects with
+`error=SSO_ISSUER_NOT_ALLOWED`, and the attempt is audited as
+`auth.sso_sign_in_failed` like every other SSO refusal (the refused row's
+`providerId` is logged at warn so it can be fixed or removed). Absent,
+anything is accepted (upstream behaviour).
+
+The allow-list restricts _which identity providers_ may exist on the
+deployment. It is not a per-tenant control over _whose accounts_ an IdP may
+sign in — that remains [domain binding](#domain-binding-ssodomainbinding-default-verified-domain),
+which is on by default and independent of the list.
 
 ```ts
 enterprisePreset({
@@ -143,7 +183,19 @@ enterprisePreset({
       "https://oauth2.googleapis.com",
       "https://www.googleapis.com",
       "https://openidconnect.googleapis.com",
+      // A SAML IdP: its entityID (upstream's `issuer` is the SP id — list
+      // that too if it differs) …
+      "https://idp.acme.example/saml",
     ],
+    // … and the SHA-256 fingerprints of its signing certificates, keyed by
+    // that entityID. Without this entry every SAML provider claiming it is
+    // refused (fail closed).
+    samlCertificateFingerprints: {
+      "https://idp.acme.example/saml": [
+        "3A:1F:…:9C", // openssl x509 -in idp.pem -noout -fingerprint -sha256
+        "b0c4…e2", // the next certificate during a rotation
+      ],
+    },
   },
 });
 ```

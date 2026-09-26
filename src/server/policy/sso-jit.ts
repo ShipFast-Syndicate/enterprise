@@ -27,22 +27,59 @@
 // through `parseState`) on the shared `/sso/callback` — and **fails closed**
 // (`SSO_PROVIDER_UNRESOLVED`) when neither names one or they disagree.
 //
-// Leaf module: imports `./domains` (leaf), `./scim-required` (leaf) and
-// `better-auth/api` only, so `./enforcement.ts` and `./plugin.ts` can both
-// import it without a cycle.
+// Both hooks also re-judge the resolved provider row against
+// `sso.allowedIssuers` (`assertStoredProviderAllowed` → `../sso-domain.ts`'s
+// `storedProviderAllowed`): the allow-list is enforced when a provider is
+// written, and again at every sign-in, so a row registered before the
+// operator configured (or tightened) the list — or the SAML certificate
+// pins — is refused too, `SSO_ISSUER_NOT_ALLOWED`, never a session.
+//
+// Imports `./domains` (leaf), `./scim-required` (leaf), `../sso-domain`
+// (which imports only `./domains`, `./store` and `better-auth/api`) and
+// `better-auth/api`, so `./enforcement.ts` and `./plugin.ts` can both import
+// it without a cycle.
 
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, getOAuthState } from "better-auth/api";
 import type { EnterpriseOptions } from "../types";
+import { issuerNotAllowedError, storedProviderAllowed } from "../sso-domain";
 import { domainMatches, emailDomain } from "./domains";
 import { isSsoCallbackPath } from "./scim-required";
 
-/** The `ssoProvider` columns the binding needs. */
+/** The `ssoProvider` columns the binding and the allow-list re-check need. */
 export interface SsoCallbackProvider {
   providerId: string;
   organizationId: string | null;
   domain: string;
   domainVerified: boolean;
+  issuer: string;
+  /** JSON as upstream stores it (a string), or `null`. */
+  oidcConfig?: unknown;
+  samlConfig?: unknown;
+}
+
+/** Whether the allow-list re-check at sign-in time has anything to do. */
+export function issuerAllowListEnabled(opts: EnterpriseOptions | undefined): boolean {
+  return opts?.sso?.allowedIssuers !== undefined;
+}
+
+/**
+ * Refuses the sign-in (`SSO_ISSUER_NOT_ALLOWED`, logged at warn so an
+ * operator sees which stored row their allow-list now excludes) unless the
+ * resolved provider row still passes `sso.allowedIssuers`. No-op without a
+ * list.
+ */
+export async function assertStoredProviderAllowed(
+  ctx: GenericEndpointContext,
+  opts: EnterpriseOptions | undefined,
+  provider: SsoCallbackProvider,
+): Promise<void> {
+  if (!issuerAllowListEnabled(opts)) return;
+  if (await storedProviderAllowed(opts, provider)) return;
+  ctx.context.logger.warn(
+    `enterprise-policy: refusing an SSO sign-in through provider ${JSON.stringify(provider.providerId)} — its stored issuer, endpoints or SAML signing certificate no longer pass sso.allowedIssuers / sso.samlCertificateFingerprints (SSO_ISSUER_NOT_ALLOWED)`,
+  );
+  throw issuerNotAllowedError(provider.issuer);
 }
 
 /** `@better-auth/sso`'s own key for the provider reference it stores in the OAuth state (`SSO_PROVIDER_STATE_KEY`; not exported upstream). */
@@ -159,20 +196,24 @@ type UserCreateBeforeHook = (
 
 /**
  * `databaseHooks.user.create.before` — refuses a user row being created from
- * an SSO callback unless the signing provider is domain-verified for the new
- * user's e-mail domain (`SSO_DOMAIN_NOT_ALLOWED`), or the provider cannot be
- * named at all (`SSO_PROVIDER_UNRESOLVED`). On success the user is stored
- * `emailVerified: true` (the IdP owns that domain and vouched for the
- * address — exactly what an e-mail round-trip would prove) unless
- * `sso.trustVerifiedDomainEmail` is `false`. Never touches a row created from
- * any other path (password sign-up, magic link, social, SCIM, …).
+ * an SSO callback unless the signing provider still passes the issuer
+ * allow-list (`SSO_ISSUER_NOT_ALLOWED`, when one is configured) and is
+ * domain-verified for the new user's e-mail domain
+ * (`SSO_DOMAIN_NOT_ALLOWED`, unless `sso.domainBinding: "off"`), or the
+ * provider cannot be named at all (`SSO_PROVIDER_UNRESOLVED`). On success
+ * the user is stored `emailVerified: true` (the IdP owns that domain and
+ * vouched for the address — exactly what an e-mail round-trip would prove)
+ * unless `sso.trustVerifiedDomainEmail` is `false`. Never touches a row
+ * created from any other path (password sign-up, magic link, social, SCIM,
+ * …), and does nothing when both the binding and the allow-list are off.
  */
 export function buildDomainBindingUserCreateBeforeHook(
   opts?: EnterpriseOptions,
 ): UserCreateBeforeHook {
   return async (user, ctx) => {
     if (!ctx) return;
-    if (!domainBindingEnabled(opts)) return;
+    const bindingOn = domainBindingEnabled(opts);
+    if (!bindingOn && !issuerAllowListEnabled(opts)) return;
     if (!isSsoCallbackPath(ctx.path)) return;
 
     const provider = await resolveSsoCallbackProvider(ctx);
@@ -182,6 +223,8 @@ export function buildDomainBindingUserCreateBeforeHook(
       );
       throw ssoProviderUnresolvedError();
     }
+    await assertStoredProviderAllowed(ctx, opts, provider);
+    if (!bindingOn) return;
     const email = typeof user.email === "string" ? user.email : null;
     if (!providerAuthorizesEmail(provider, email)) throw ssoDomainNotAllowedError();
 

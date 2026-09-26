@@ -87,10 +87,14 @@ For OIDC, configure the provider's exact origin through Better Auth's
 `trustedOrigins` option or `BETTER_AUTH_TRUSTED_ORIGINS` before using the portal —
 that is Better Auth's SSRF boundary for discovery/endpoint origins, **not** an issuer
 allow-list. To restrict which IdPs tenants may register, set `sso.allowedIssuers` — it is
-applied to the `issuer` **and** to every endpoint/entity id the provider configuration points
-at, since upstream trusts the tenant-supplied JWKS/cert. SSO
+applied to the `issuer` **and** to the trust root the configuration actually points at: for
+OIDC every endpoint (upstream fetches the keys from the tenant-supplied JWKS), for SAML the
+entity id/entry point **and the signing certificates**, which must be pinned in
+`sso.samlCertificateFingerprints` (a SAML provider with no pins is refused — fail closed).
+Stored providers are re-checked at every sign-in. SSO
 sign-ins are bound to the signing provider's verified domain by default
-(`sso.domainBinding`). See [OIDC origins and the issuer allow-list](./docs/sso.md#oidc-provider-origins-trustedorigins-and-the-issuer-allow-list)
+(`sso.domainBinding`) — that, not the allow-list, is the per-tenant control. See
+[OIDC origins and the issuer allow-list](./docs/sso.md#oidc-provider-origins-trustedorigins-and-the-issuer-allow-list)
 and [domain binding](./docs/sso.md#domain-binding-ssodomainbinding-default-verified-domain).
 
 `samlSpKeys` is **not** in that list. It is typed on `EnterpriseOptions` and reserved, but

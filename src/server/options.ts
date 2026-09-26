@@ -10,6 +10,7 @@
 
 import type { EnterpriseOptions } from "./types";
 import { assertSecretsKey } from "./secrets";
+import { normalizeFingerprint } from "./sso-domain";
 
 const PREFIX = "@alphabros/enterprise:";
 
@@ -131,6 +132,26 @@ export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
       !allowedIssuers.every((entry) => typeof entry === "string" || entry instanceof RegExp)
     ) {
       fail(`"sso.allowedIssuers" must be an array of strings/RegExps or a predicate function.`);
+    }
+  }
+
+  const pins = opts.sso?.samlCertificateFingerprints;
+  if (pins !== undefined) {
+    if (typeof pins !== "object" || pins === null || Array.isArray(pins)) {
+      fail(
+        `"sso.samlCertificateFingerprints" must map a SAML IdP entity id to its SHA-256 certificate fingerprints.`,
+      );
+    }
+    for (const [entityId, list] of Object.entries(pins)) {
+      if (
+        !Array.isArray(list) ||
+        list.length === 0 ||
+        !list.every((entry) => typeof entry === "string" && normalizeFingerprint(entry) !== null)
+      ) {
+        fail(
+          `"sso.samlCertificateFingerprints[${JSON.stringify(entityId)}]" must be a non-empty array of SHA-256 certificate fingerprints (64 hex characters, colons optional).`,
+        );
+      }
     }
   }
 

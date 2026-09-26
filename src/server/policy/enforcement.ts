@@ -35,7 +35,9 @@ import type { EnterpriseOptions } from "../types";
 import { findOrgsByEmailDomain } from "./home-realm";
 import { isSsoCallbackPath } from "./scim-required";
 import {
+  assertStoredProviderAllowed,
   domainBindingEnabled,
+  issuerAllowListEnabled,
   providerAuthorizesEmail,
   resolveSsoCallbackProvider,
   ssoDomainNotAllowedError,
@@ -416,13 +418,16 @@ function sessionExpiryMs(session: { expiresAt?: unknown }, ctx: GenericEndpointC
  * top-level `databaseHooks` field).
  *
  * Rules, in order:
- * 0. **SSO domain binding** (F-01, before any policy and independent of it,
- *    unless `sso.domainBinding: "off"`): on an SSO callback the signing
- *    provider is resolved once (`resolveSsoCallbackProvider`, fail-closed
- *    `SSO_PROVIDER_UNRESOLVED`) and must be domain-verified for the user's
- *    e-mail domain → otherwise `SSO_DOMAIN_NOT_ALLOWED`. This is what makes
- *    a legacy squat — an `account` row already linked to a foreign tenant's
- *    IdP — inert: the row stays, the session is never minted.
+ * 0. **SSO provider trust** (before any policy and independent of it): on
+ *    an SSO callback the signing provider is resolved once
+ *    (`resolveSsoCallbackProvider`, fail-closed `SSO_PROVIDER_UNRESOLVED`);
+ *    with `sso.allowedIssuers` configured its stored row must still pass
+ *    the allow-list — issuer, endpoints and, for SAML, the pinned signing
+ *    certificates (F-28, `SSO_ISSUER_NOT_ALLOWED`); and, unless
+ *    `sso.domainBinding: "off"`, it must be domain-verified for the user's
+ *    e-mail domain (F-01) → otherwise `SSO_DOMAIN_NOT_ALLOWED`. This is what
+ *    makes a legacy squat — an `account` row already linked to a foreign
+ *    tenant's IdP — inert: the row stays, the session is never minted.
  * Then, against the **effective** policy of every org with a claim on the
  * user (`resolvePolicyOrgsForUser` + `getEffectivePolicy`):
  * 1. `ssoEnforced` and this is not an SSO callback → `SSO_REQUIRED`. On an
@@ -454,20 +459,28 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
     if (!user?.email) return;
 
     // Rule 0 — the provider is looked up once and reused by rule 1. With the
-    // binding off it is still needed by rule 1 (and only refused as
-    // unresolved there, when a decision actually depends on it).
+    // binding and the allow-list both off it is still needed by rule 1 (and
+    // only refused as unresolved there, when a decision actually depends on
+    // it). With an allow-list configured the stored row is re-judged first
+    // (`assertStoredProviderAllowed`, `SSO_ISSUER_NOT_ALLOWED`): a provider
+    // the operator no longer trusts is refused before its domain claim is
+    // even considered.
     const ssoCallback = isSsoCallbackPath(ctx.path);
     let provider: SsoCallbackProvider | null = null;
     if (ssoCallback) {
       provider = await resolveSsoCallbackProvider(ctx);
-      if (domainBindingEnabled(opts)) {
+      const bindingOn = domainBindingEnabled(opts);
+      if (bindingOn || issuerAllowListEnabled(opts)) {
         if (!provider) {
           ctx.context.logger.error(
             `enterprise-policy: refusing an SSO session from ${JSON.stringify(ctx.path)} — the signing provider could not be resolved (SSO_PROVIDER_UNRESOLVED)`,
           );
           throw ssoProviderUnresolvedError();
         }
-        if (!providerAuthorizesEmail(provider, user.email)) throw ssoDomainNotAllowedError();
+        await assertStoredProviderAllowed(ctx, opts, provider);
+        if (bindingOn && !providerAuthorizesEmail(provider, user.email)) {
+          throw ssoDomainNotAllowedError();
+        }
       }
     }
 

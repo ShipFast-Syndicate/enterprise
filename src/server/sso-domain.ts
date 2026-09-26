@@ -12,7 +12,13 @@
 //   entries, never the other org's list), and the issuer **and the IdP
 //   endpoints the configuration points at** must pass `sso.allowedIssuers`
 //   when the operator set one (`SSO_ISSUER_NOT_ALLOWED`; on update whenever
-//   `issuer`, `oidcConfig` or `samlConfig` is sent). Upstream never
+//   `issuer`, `oidcConfig` or `samlConfig` is sent). For SAML the trust
+//   root is the signing certificate, not a URL, so under an allow-list
+//   every certificate the configuration carries must also be pinned by
+//   `sso.samlCertificateFingerprints` (`collectSamlTrustRoot`; fail closed),
+//   and a stored row is re-judged at every SSO sign-in
+//   (`storedProviderAllowed`, called from `./policy/sso-jit.ts` and
+//   `./policy/enforcement.ts`). Upstream never
 //   checked uniqueness at all: any tenant could register a second provider
 //   for a domain some other org had verified, and — because upstream's
 //   e-mail `/sign-in/sso` resolves the provider with an exact `findOne({
@@ -36,6 +42,7 @@
 // allow-list), and an org admin's `issuer` is stored whatever it is.
 // `sso.allowedIssuers` is the allow-list (F-28).
 
+import { X509Certificate } from "node:crypto";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import type { GenericEndpointContext } from "better-auth";
 import type { EnterpriseOptions } from "./types";
@@ -154,6 +161,138 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * The SAML trust root of a provider configuration. A SAML sign-in trusts
+ * whoever holds the key behind the configured signing certificate — the
+ * `entityID`/`entryPoint` strings only *name* an IdP, they do not bind it —
+ * so under an allow-list the certificates are what must be pinned.
+ */
+export interface SamlTrustRoot {
+  /** The entity ids the pins are looked up under: `idpMetadata.entityID` and/or the metadata document's `entityID`; the `issuer` when the configuration names neither (upstream's own fallback at the ACS). */
+  entityIds: string[];
+  /**
+   * Normalised SHA-256 fingerprints (lowercase hex, no colons) of the DER
+   * form of every certificate the configuration carries: `cert`,
+   * `idpMetadata.cert` (string or list) and every `X509Certificate` inside
+   * a `KeyDescriptor` of `idpMetadata.metadata` whose `use` is `signing`
+   * or unset (unset = both uses, per the SAML metadata spec). `null` when
+   * no certificate can be extracted at all, one cannot be parsed, or a
+   * metadata document has no `entityID` — the caller fails closed.
+   */
+  certFingerprints: string[] | null;
+}
+
+/** `AB:cd:…` / `abcd…` → `abcd…` (64 lowercase hex characters); `null` for anything that is not a SHA-256 fingerprint. */
+export function normalizeFingerprint(value: string): string | null {
+  const hex = value.replace(/[:\s]/g, "").toLowerCase();
+  return /^[0-9a-f]{64}$/.test(hex) ? hex : null;
+}
+
+/** SHA-256 fingerprint of a PEM certificate, or — as upstream accepts — a bare base64 body; `null` when it does not parse. */
+function certificateFingerprint(material: string): string | null {
+  const pem = material.includes("-----BEGIN")
+    ? material
+    : `-----BEGIN CERTIFICATE-----\n${material.replace(/\s+/g, "")}\n-----END CERTIFICATE-----`;
+  try {
+    return normalizeFingerprint(new X509Certificate(pem).fingerprint256);
+  } catch {
+    return null;
+  }
+}
+
+// `<md:KeyDescriptor use="signing"> … </md:KeyDescriptor>` (any/no prefix;
+// `use` optional) and the `<ds:X509Certificate>` bodies inside one.
+const SAML_METADATA_KEY_DESCRIPTOR =
+  /<(?:[\w.-]+:)?KeyDescriptor\b([^>]*)>([\s\S]*?)<\/(?:[\w.-]+:)?KeyDescriptor\s*>/g;
+const SAML_METADATA_KEY_USE = /\suse\s*=\s*(?:"([^"]*)"|'([^']*)')/;
+const SAML_METADATA_X509 =
+  /<(?:[\w.-]+:)?X509Certificate\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?X509Certificate\s*>/g;
+
+/**
+ * `SamlTrustRoot` of `samlConfig` (see the interface), or `null` when the
+ * configuration is not a SAML one (an OIDC provider has no certificate to
+ * pin). Every certificate source upstream honours is read — the inline
+ * `cert`, `idpMetadata.cert` (which wins over `cert` upstream) and the
+ * signing `KeyDescriptor`s of `idpMetadata.metadata` (which samlify reads
+ * when the IdP is given as a document) — so a certificate cannot be slipped
+ * in through a source the check did not look at.
+ */
+export function collectSamlTrustRoot(samlConfig: unknown, issuer: string): SamlTrustRoot | null {
+  if (!isRecord(samlConfig)) return null;
+  const entityIds = new Set<string>();
+  const materials: string[] = [];
+  let unreadable = false;
+  const addCert = (value: unknown): void => {
+    if (typeof value === "string") {
+      if (value.trim().length > 0) materials.push(value);
+      else unreadable = true;
+    } else if (Array.isArray(value)) {
+      for (const entry of value) addCert(entry);
+    } else if (value !== undefined && value !== null) {
+      unreadable = true;
+    }
+  };
+  addCert(samlConfig.cert);
+  const idp = samlConfig.idpMetadata;
+  if (isRecord(idp)) {
+    if (typeof idp.entityID === "string" && idp.entityID.length > 0) entityIds.add(idp.entityID);
+    addCert(idp.cert);
+    if (typeof idp.metadata === "string" && idp.metadata.length > 0) {
+      const entity = SAML_METADATA_ENTITY_ID.exec(idp.metadata);
+      const entityId = (entity?.[1] ?? entity?.[2])?.trim();
+      if (entityId) entityIds.add(entityId);
+      else unreadable = true;
+      for (const descriptor of idp.metadata.matchAll(SAML_METADATA_KEY_DESCRIPTOR)) {
+        const use = SAML_METADATA_KEY_USE.exec(descriptor[1] ?? "");
+        if ((use?.[1] ?? use?.[2])?.trim() === "encryption") continue;
+        for (const cert of (descriptor[2] ?? "").matchAll(SAML_METADATA_X509)) {
+          addCert(cert[1]);
+        }
+      }
+    }
+  }
+  if (entityIds.size === 0) entityIds.add(issuer);
+  const fingerprints = new Set<string>();
+  for (const material of materials) {
+    const fingerprint = certificateFingerprint(material);
+    if (!fingerprint) {
+      unreadable = true;
+      break;
+    }
+    fingerprints.add(fingerprint);
+  }
+  return {
+    entityIds: [...entityIds],
+    certFingerprints: unreadable || fingerprints.size === 0 ? null : [...fingerprints],
+  };
+}
+
+/**
+ * Array-form verdict on a SAML trust root: every entity id the
+ * configuration names must have pins under `sso.samlCertificateFingerprints`
+ * and every certificate it carries must be one of them. No pins at all, an
+ * entity id without pins, or an unreadable trust root → `false`.
+ */
+function samlTrustRootPinned(
+  pins: Record<string, string[]> | undefined,
+  saml: SamlTrustRoot,
+): boolean {
+  if (!pins || saml.certFingerprints === null || saml.certFingerprints.length === 0) return false;
+  const pinned = new Set<string>();
+  for (const entityId of saml.entityIds) {
+    // Own properties only — `constructor`/`__proto__` as an entity id must
+    // not resolve to `Object.prototype` members.
+    if (!Object.hasOwn(pins, entityId)) return false;
+    const entries = pins[entityId];
+    if (!Array.isArray(entries) || entries.length === 0) return false;
+    for (const entry of entries) {
+      const fingerprint = typeof entry === "string" ? normalizeFingerprint(entry) : null;
+      if (fingerprint) pinned.add(fingerprint);
+    }
+  }
+  return saml.certFingerprints.every((fingerprint) => pinned.has(fingerprint));
+}
+
 /** `https://idp.example/path` → `https://idp.example`; `null` for a value with no origin (a URN, a bare name). */
 function originOf(value: string): string | null {
   try {
@@ -194,16 +333,21 @@ export interface IssuerCheckContext {
   organizationId: string | null;
   /** The IdP-defining values of the configuration being stored (`collectIdpEndpoints`); `null` when they could not be read (a metadata document without an `entityID`). */
   endpoints: string[] | null;
+  /** The SAML trust root (`collectSamlTrustRoot`) — absent or `null` for an OIDC configuration. */
+  saml?: SamlTrustRoot | null;
 }
 
 /**
  * Whether `issuer` **and the IdP it actually points at** pass
  * `sso.allowedIssuers` for a provider bound to `ctx.organizationId`: no
  * allow-list → anything (upstream behaviour); an array → the issuer must
- * match an entry (exact string or `RegExp`) and every one of
- * `ctx.endpoints` must pass `endpointAllowed`; a predicate → its verdict on
- * `(issuer, { organizationId, endpoints })` (`false` on a throw — fail
- * closed). Unreadable endpoints (`null`) fail every configured list.
+ * match an entry (exact string or `RegExp`), every one of `ctx.endpoints`
+ * must pass `endpointAllowed` and, for a SAML configuration, its trust root
+ * must be pinned (`samlTrustRootPinned` — no pins means no SAML provider,
+ * fail closed); a predicate → its verdict on `(issuer, { organizationId,
+ * endpoints, samlCertFingerprints })` (`false` on a throw — fail closed).
+ * Unreadable endpoints or an unreadable SAML trust root (`null`) fail every
+ * configured list before any predicate is consulted.
  */
 export async function issuerAllowed(
   opts: EnterpriseOptions | undefined,
@@ -214,15 +358,25 @@ export async function issuerAllowed(
   if (allowed === undefined) return true;
   const endpoints = ctx.endpoints;
   if (endpoints === null) return false;
+  const saml = ctx.saml ?? null;
+  if (saml && saml.certFingerprints === null) return false;
+  const samlCertFingerprints = saml?.certFingerprints ?? [];
   if (typeof allowed === "function") {
     try {
-      return (await allowed(issuer, { organizationId: ctx.organizationId, endpoints })) === true;
+      const verdict = await allowed(issuer, {
+        organizationId: ctx.organizationId,
+        endpoints,
+        samlCertFingerprints,
+      });
+      return verdict === true;
     } catch {
       return false;
     }
   }
   if (!allowed.some((entry) => entryMatches(entry, issuer))) return false;
-  return endpoints.every((endpoint) => endpointAllowed(allowed, issuer, endpoint));
+  if (!endpoints.every((endpoint) => endpointAllowed(allowed, issuer, endpoint))) return false;
+  if (!saml) return true;
+  return samlTrustRootPinned(opts?.sso?.samlCertificateFingerprints, saml);
 }
 
 function domainInvalidError(): APIError {
@@ -248,10 +402,10 @@ function domainTakenError(mine: readonly string[], taken: VerifiedProviderRow[])
   });
 }
 
-function issuerNotAllowedError(issuer: string): APIError {
+export function issuerNotAllowedError(issuer: string): APIError {
   return new APIError("FORBIDDEN", {
     code: "SSO_ISSUER_NOT_ALLOWED",
-    message: `The issuer ${JSON.stringify(issuer)}, or an identity-provider endpoint the configuration points at, is not on this deployment's SSO issuer allow-list.`,
+    message: `The issuer ${JSON.stringify(issuer)}, an identity-provider endpoint the configuration points at, or a SAML signing certificate it carries, is not on this deployment's SSO issuer allow-list.`,
   });
 }
 
@@ -272,6 +426,7 @@ interface GuardedProviderRow extends VerifiedProviderRow {
 }
 
 function parseStoredConfig(raw: unknown): Record<string, unknown> | null {
+  if (isRecord(raw)) return raw; // an adapter that already decoded the JSON column
   if (typeof raw !== "string" || raw.length === 0) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -279,6 +434,38 @@ function parseStoredConfig(raw: unknown): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/** The `ssoProvider` columns a stored row is re-judged on. */
+export interface StoredProviderTrust {
+  issuer: string;
+  organizationId: string | null;
+  oidcConfig?: unknown;
+  samlConfig?: unknown;
+}
+
+/**
+ * Whether an **already-stored** provider still passes `sso.allowedIssuers`
+ * (issuer, endpoints and — for SAML — the certificate pins), judged on the
+ * row exactly as `/sso/register`/`/sso/update-provider` would judge the same
+ * configuration. Called at every SSO sign-in (`./policy/sso-jit.ts` before
+ * a JIT user row is written, `./policy/enforcement.ts` before any session
+ * is minted) so an operator who configures or tightens the allow-list after
+ * a row was registered also refuses that row, instead of only rows written
+ * afterwards. `true` when no allow-list is configured.
+ */
+export async function storedProviderAllowed(
+  opts: EnterpriseOptions | undefined,
+  provider: StoredProviderTrust,
+): Promise<boolean> {
+  if (opts?.sso?.allowedIssuers === undefined) return true;
+  const oidcConfig = parseStoredConfig(provider.oidcConfig);
+  const samlConfig = parseStoredConfig(provider.samlConfig);
+  return issuerAllowed(opts, provider.issuer, {
+    organizationId: provider.organizationId,
+    endpoints: collectIdpEndpoints(oidcConfig, samlConfig),
+    saml: collectSamlTrustRoot(samlConfig, provider.issuer),
+  });
 }
 
 /** The configuration `/sso/update-provider` will store: upstream merges the body over the stored config (one level; `idpMetadata` one level deeper), so the allow-list judges the merged result. */
@@ -339,7 +526,8 @@ async function guardRegister(
   const issuer = stringField(body, "issuer");
   if (issuer) {
     const endpoints = collectIdpEndpoints(body.oidcConfig, body.samlConfig);
-    if (!(await issuerAllowed(opts, issuer, { organizationId, endpoints }))) {
+    const saml = collectSamlTrustRoot(body.samlConfig, issuer);
+    if (!(await issuerAllowed(opts, issuer, { organizationId, endpoints, saml }))) {
       throw issuerNotAllowedError(issuer);
     }
   }
@@ -370,6 +558,9 @@ async function guardUpdate(
   // new issuer against the (stored or replaced) endpoints, and replaced
   // endpoints against the (stored or new) issuer — `oidcConfig`/`samlConfig`
   // alone, with the issuer untouched, is the endpoint-swap this exists for.
+  // For SAML the merged configuration's certificates (a `cert`-only swap, an
+  // `idpMetadata.cert` that would win over a pinned `cert`, a replaced
+  // metadata document) are re-pinned the same way.
   const issuer = stringField(body, "issuer");
   const configSent = isRecord(body.oidcConfig) || isRecord(body.samlConfig);
   if ((issuer || configSent) && opts?.sso?.allowedIssuers !== undefined) {
@@ -379,6 +570,7 @@ async function guardUpdate(
     const allowed = await issuerAllowed(opts, effectiveIssuer, {
       organizationId: provider.organizationId,
       endpoints,
+      saml: collectSamlTrustRoot(merged.samlConfig, effectiveIssuer),
     });
     if (!allowed) throw issuerNotAllowedError(effectiveIssuer);
   }
