@@ -109,6 +109,23 @@ async function projectMembership(
   }
 }
 
+/** Whether the user holds an `owner` role in any organization (multi-role values are comma-joined). */
+async function holdsOwnerMembership(
+  database: SCIMTransactionContext["database"],
+  userId: string,
+): Promise<boolean> {
+  const rows = await database.findMany<{ role: string }>({
+    model: "member",
+    where: [{ field: "userId", value: userId }],
+  });
+  return rows.some((row) =>
+    String(row.role)
+      .split(",")
+      .map((r) => r.trim())
+      .includes("owner"),
+  );
+}
+
 export function enterpriseScim(opts: EnterpriseOptions): SCIMPlugin {
   const plugin = scim({
     connections: [],
@@ -119,6 +136,17 @@ export function enterpriseScim(opts: EnterpriseOptions): SCIMPlugin {
           model: "user",
           where: [{ field: "id", value: state.userId }],
         });
+        // F-07: SCIM can never *produce* an owner (M-01), so an `owner`
+        // membership anywhere is always a deliberate grant by another owner.
+        // Neither an IdP deactivation nor a connection decommission (which
+        // replays every provisioned user as inactive) may turn that into a
+        // platform-wide ban and an irreversible API-key wipe. Upstream still
+        // revokes the sessions; the SCIM-owned memberships are still removed
+        // by `projectMembership`; the owner membership itself was already
+        // relinquished by the projector the moment it was granted manually.
+        // PR-6: audit skipped ban (`scim.user_deactivation_skipped`,
+        // reason `owner_protected`) once `writeAudit` takes `chainKey`.
+        if (!state.active && (await holdsOwnerMembership(database, state.userId))) return;
         if (!state.active) {
           await database.deleteMany({
             model: "apikey",

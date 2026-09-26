@@ -196,8 +196,9 @@ the `/enterprise/*` API directly — no server code needed beyond `enterprisePre
 One scope caveat: **API keys are per user, not per organization.** `<ab-api-keys>` drives
 upstream `/api-key/list` and `/api-key/create`, which are scoped to the signed-in user, so an
 org's security screen shows and creates _that user's_ keys wherever they were created — and a
-SCIM deprovision revokes all of that user's keys, not only the ones they used for this org.
-Per-org key scoping remains a follow-up.
+SCIM deprovision revokes all of that user's keys, not only the ones they used for this org
+(unless the user holds an `owner` membership anywhere: owners are never banned or stripped of
+keys by a SCIM feed). Per-org key scoping remains a follow-up.
 
 **Import the elements only from a browser-only context.** Lit's browser build references
 `HTMLElement`, which doesn't exist on the server; importing the module in server-rendered code
