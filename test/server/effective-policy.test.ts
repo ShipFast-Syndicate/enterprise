@@ -8,7 +8,7 @@ import type { GenericEndpointContext } from "better-auth";
 import { ALLOWED_METHOD_VALUES, getEffectivePolicy } from "../../src/server/policy/store";
 import { resolvePolicyOrgsForUser } from "../../src/server/policy/enforcement";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
-import { insertMemberRow, setPolicy } from "../security/helpers";
+import { enrollTotp, insertMemberRow, setPolicy } from "../security/helpers";
 
 async function ctxOf(t: TestAuth): Promise<GenericEndpointContext> {
   return { context: await t.auth.$context } as unknown as GenericEndpointContext;
@@ -178,10 +178,13 @@ describe("getEffectivePolicy", () => {
 
   it("sessionMaxAgeS is the minimum over all orgs and require2fa ORs over all orgs", async () => {
     const t = await makeAuth();
-    const { cookie } = await signUpOwner(t, "owner@acme.test");
-    const { orgId: orgA } = await createOrg(t, cookie, "acme-a");
-    const { orgId: orgB } = await createOrg(t, cookie, "acme-b");
-    const { orgId: orgC } = await createOrg(t, cookie, "acme-c");
+    const { cookie: signUpCookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId: orgA } = await createOrg(t, signUpCookie, "acme-a");
+    const { orgId: orgB } = await createOrg(t, signUpCookie, "acme-b");
+    const { orgId: orgC } = await createOrg(t, signUpCookie, "acme-c");
+    // `require2fa: true` is accepted only from an enrolled caller
+    // (`REQUIRE_2FA_PRECONDITION`), so the owner enrols before writing it.
+    const { cookie } = await enrollTotp(t, signUpCookie);
     await ok(await setPolicy(t, cookie, { orgId: orgA, sessionMaxAgeS: 3600 }));
     await ok(await setPolicy(t, cookie, { orgId: orgB, sessionMaxAgeS: 900, require2fa: true }));
 

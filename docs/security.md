@@ -120,6 +120,36 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   ends that session at its next refresh. `session.disableSessionRefresh` and `updateAge` keep
   their upstream meaning; the cap is an upper bound on top of them, and the browser cookie's
   `Max-Age` may outlive the row (the server side is authoritative).
+- **Two-factor requirement.** `require2fa` (OR over every org with a claim on the user; break-glass
+  does not exempt from it) is enforced in two places (`src/server/policy/enforcement.ts`):
+  - _At session creation_ (`twoFactorRefusal`): a session stands only when its sign-in method is in
+    `policy.twoFactor.satisfiedBy` (default `["sso"]` — the IdP did the second factor), when
+    upstream's `twoFactor()` challenge follows the path (`/sign-in/email` and the other paths that
+    plugin's own after-hook names — read from the mounted plugin, so without it no path is treated as
+    challenged), when the path is `/sign-up/email` (a brand-new user, confined to enrolment below), or
+    when it is a continuation. Everything else — magic link, passkey, a social provider, an
+    unclassified path — carries no second factor and gets none: `403 TWO_FACTOR_REQUIRED`
+    (`METHOD_NOT_ALLOWED` for the unclassified path), enrolled or not. A product that ships a
+    challenged sign-in plugin (`username`, `phone-number`) declares it in `policy.signInMethods` and
+    it stands for the same reason; a method that carries a second factor by itself (a passkey policy,
+    an OTP plugin the product vouches for) is named in `satisfiedBy`.
+  - _On every request_ (`buildTwoFactorEnrollmentGate`, a `hooks.before` outside
+    `TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS`): a signed-in user who **holds a password** (upstream's
+    `/two-factor/enable` re-authenticates with it — `findCredentialAccount`, the same read) and has
+    not enrolled is answered `403 TWO_FACTOR_ENROLLMENT_REQUIRED` with the allow-list in the body:
+    `/get-session`, `/sign-out`, `/enterprise/home-realm`, `/two-factor/enable|get-totp-uri|verify-totp|send-otp|verify-otp`,
+    plus the product's `policy.twoFactor.enrollmentPaths`. The first successful
+    `/two-factor/verify-totp` flips `twoFactorEnabled` and lifts the gate. A user with no password
+    (SSO- or magic-link-only) cannot enrol here and is not gated; their second factor is the method
+    that satisfied the policy. The gate reads nothing beyond one indexed `org_policy` probe on a
+    deployment where no org requires a second factor.
+  - `/get-session` carries `enterprise: { require2fa, twoFactorEnabled, enrollmentRequired }` for a
+    user under such a policy; `enrollmentRequired` is exactly the state the gate refuses on, so a
+    product redirects to its enrolment UI on that flag.
+  - Switching `require2fa` on (`POST /enterprise/policy/set`, the `false → true` transition) needs a
+    caller who is enrolled or cannot enrol (`400 REQUIRE_2FA_PRECONDITION` otherwise): an un-enrolled
+    admin would lock themselves out of this very endpoint on the next request.
+  - API keys are unaffected (a key never creates a session and reaches `/get-session` only).
 - **SCIM-required JIT** (`src/server/policy/scim-required.ts`) refuses an SSO-callback account
   creation — from the per-provider `/sso/callback/:providerId`, the shared `/sso/callback` that
   `@better-auth/sso` registers unconditionally, or the SAML ACS — when _any_ org matched by the
@@ -234,6 +264,25 @@ FROM ssoProvider WHERE domainVerified = 1 GROUP BY lower(domain) HAVING orgs > 1
 -- pending invitations whose invitee exists but is unverified (cannot accept until verified)
 SELECT i.email FROM invitation i JOIN user u ON lower(u.email) = lower(i.email)
 WHERE i.status = 'pending' AND u.emailVerified = 0;
+```
+
+`require2fa` is enforced from 1.1.0 on (it was surfaced on `/get-session` only before). Every org
+whose `org_policy` row already has `require_2fa = 1` starts enforcing at upgrade: its members who
+hold a password and have not enrolled are confined to the enrolment allow-list
+(`TWO_FACTOR_ENROLLMENT_REQUIRED`) and its members who sign in with a magic link, a passkey or a
+social provider are refused (`TWO_FACTOR_REQUIRED`) unless `policy.twoFactor.satisfiedBy` names
+that method. There is no grace period. Check first, and add a redirect-to-enrolment on
+`enterprise.enrollmentRequired` in the product before upgrading:
+
+```sql
+-- organizations that will start enforcing at upgrade
+SELECT org_id FROM org_policy WHERE require_2fa = 1;
+-- their members who hold a password and have not enrolled (confined to enrolment)
+SELECT DISTINCT u.id, u.email FROM org_policy p
+JOIN member m ON m.organizationId = p.org_id
+JOIN user u ON u.id = m.userId
+JOIN account a ON a.userId = u.id AND a.providerId = 'credential'
+WHERE p.require_2fa = 1 AND (u.twoFactorEnabled IS NULL OR u.twoFactorEnabled = 0);
 ```
 
 API keys minted before 1.1.0 keep the lifetime they were created with (none, unless the caller

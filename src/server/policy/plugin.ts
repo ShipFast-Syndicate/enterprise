@@ -21,10 +21,12 @@
 //   before`, composed with `./scim-required.ts`'s guard below) and the
 //   provider resolution `./enforcement.ts`'s session backstop shares.
 //
-// `require2fa` (the `hooks.after` on `/get-session`) lives here rather than
-// in `./enforcement.ts`: it only ever decorates a response, never blocks a
-// request, so it doesn't fit "enforcement" and is closely tied to this
-// file's other endpoint-shaped concerns.
+// `require2fa` is enforced in `./enforcement.ts` (the session-creation rule
+// and the enrolment gate, both wired below); what lives here is the
+// `/get-session` annotation (`enterprise.{require2fa, twoFactorEnabled,
+// enrollmentRequired}`, a decoration that never blocks) and the
+// `/enterprise/policy/set` precondition that the admin enabling it is
+// enrolled themselves.
 //
 // `org_policy`'s primary key is `org_id`, not `id` — see `./store.ts`'s
 // header comment for the full explanation (why the `schema` below omits an
@@ -45,18 +47,23 @@ import {
   buildSessionCreateBeforeHook,
   buildSessionUpdateBeforeHook,
   buildSignInBeforeHook,
+  buildTwoFactorEnrollmentGate,
+  resolvePolicyOrgsForUser,
 } from "./enforcement";
 import { findOrgByEmailDomain, HOME_REALM_RATE_LIMIT, homeRealmEndpoint } from "./home-realm";
 import { buildScimRequiredUserCreateBeforeHook } from "./scim-required";
 import { buildDomainBindingUserCreateBeforeHook, composeUserCreateBeforeHooks } from "./sso-jit";
 import {
   allowedMethodValues,
+  anyOrgRequiresTwoFactor,
   findPolicyRow,
+  getEffectivePolicy,
   getOrgPolicy,
   isOrgOwner,
   requireOwner,
   requireOwnerOrAdmin,
   toOrgPolicy,
+  twoFactorEnrollmentState,
   type OrgPolicy,
 } from "./store";
 
@@ -208,6 +215,25 @@ function buildPolicyEndpoints(opts: EnterpriseOptions) {
         groupRoleMap: patch.groupRoleMap ?? current.groupRoleMap,
       };
 
+      // Turning `require2fa` on is done by someone it will apply to: an
+      // admin who holds a password and has not enrolled would lock
+      // themselves — and every un-enrolled admin — out of this very
+      // endpoint on the next request (`buildTwoFactorEnrollmentGate`). The
+      // caller must therefore be enrolled, or unable to enrol at all (an
+      // SSO-only account, whose second factor is the IdP's). Judged from the
+      // live user row through the same predicate the gate applies.
+      if (next.require2fa && !current.require2fa) {
+        const callerId = fullCtx.context.session?.user.id;
+        const state = callerId ? await twoFactorEnrollmentState(fullCtx, callerId) : null;
+        if (!state || state.enrollmentPending) {
+          throw new APIError("BAD_REQUEST", {
+            code: "REQUIRE_2FA_PRECONDITION",
+            message:
+              "Requiring two-factor authentication needs the caller to have enrolled a second factor first.",
+          });
+        }
+      }
+
       if (next.ssoEnforced) {
         const { verifiedProvider } = await getPolicyPreconditions(fullCtx, orgId);
         const breakGlassIsOwner =
@@ -297,25 +323,48 @@ async function getEndpointJson(ctx: { context: { returned?: unknown } }): Promis
   return returned;
 }
 
-function buildRequire2faAfterHook() {
+/**
+ * Annotates a `/get-session` response with
+ * `enterprise: { require2fa, twoFactorEnabled, enrollmentRequired }` when
+ * some org with a claim on the user requires a second factor — the
+ * **effective** policy (`resolvePolicyOrgsForUser`: memberships, active org
+ * and verified-domain claims), not only the session's active organization,
+ * which nothing sets by default. `enrollmentRequired` is the very state the
+ * enrolment gate refuses on (`twoFactorEnrollmentState`), so a product
+ * redirects to its enrolment UI on that flag alone. Left untouched when no
+ * policy requires 2FA.
+ */
+function buildRequire2faAfterHook(opts: EnterpriseOptions) {
   return {
     matcher: (ctx: { path?: string }) => ctx.path === "/get-session",
     handler: createAuthMiddleware(async (ctx) => {
       const response = (await getEndpointJson(ctx)) as {
-        user: { twoFactorEnabled?: boolean };
+        user: { id: string; email: string; twoFactorEnabled?: boolean };
         session: { activeOrganizationId?: string | null };
       } | null;
-      if (!response?.user) return;
-      const orgId = response.session?.activeOrganizationId;
-      if (!orgId) return;
+      if (!response?.user?.id || !response.user.email) return;
 
       const fullCtx = ctx as unknown as GenericEndpointContext;
-      const policy = await getOrgPolicy(fullCtx, orgId);
-      if (!policy.require2fa) return;
+      // Same cheap probe as the gate: nothing to annotate on a deployment
+      // where no organization requires a second factor.
+      if (!(await anyOrgRequiresTwoFactor(fullCtx))) return;
+      const orgIds = await resolvePolicyOrgsForUser(fullCtx, {
+        userId: response.user.id,
+        email: response.user.email,
+        activeOrganizationId: response.session?.activeOrganizationId ?? null,
+      });
+      if (orgIds.length === 0) return;
+      const eff = await getEffectivePolicy(fullCtx, orgIds, response.user.id, opts);
+      if (!eff.require2fa) return;
 
+      const state = await twoFactorEnrollmentState(fullCtx, response.user.id);
       return ctx.json({
         ...response,
-        enterprise: { require2fa: true, twoFactorEnabled: !!response.user.twoFactorEnabled },
+        enterprise: {
+          require2fa: true,
+          twoFactorEnabled: state.twoFactorEnabled,
+          enrollmentRequired: state.enrollmentPending,
+        },
       });
     }),
   };
@@ -353,8 +402,12 @@ export function orgPolicy(opts: EnterpriseOptions) {
     endpoints: { ...buildPolicyEndpoints(opts), enterpriseHomeRealm: homeRealmEndpoint },
     rateLimit: [HOME_REALM_RATE_LIMIT],
     hooks: {
-      before: [buildSignInBeforeHook(opts)],
-      after: [buildRequire2faAfterHook()],
+      // The enrolment gate runs on every request outside its allow-list
+      // (`TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS`), after `../gate.ts`'s hooks
+      // (the preset mounts that plugin first): a request an API key or a
+      // missing entitlement already refused never reaches it.
+      before: [buildSignInBeforeHook(opts), buildTwoFactorEnrollmentGate(opts)],
+      after: [buildRequire2faAfterHook(opts)],
     },
     // `databaseHooks` is wired via `init()` returning `{options:
     // {databaseHooks}}` — the better-auth convention every plugin that

@@ -188,6 +188,13 @@ export async function makeAuth(
     // `enableSessionForAPIKeys` recipe. Appending a second `apiKey()` via
     // `plugins` would register every `/api-key/*` endpoint twice.
     apiKeyPlugin?: BetterAuthPlugin;
+    // Extra `rateLimit.customRules` merged over `TEST_RATE_LIMIT`'s — for a
+    // file that drives one plugin-rate-limited path (upstream `twoFactor()`
+    // caps `/two-factor/*` at 3 per 10 s per IP, and the limiter's store is
+    // shared across every `makeAuth()` of a file) more often than the
+    // plugin's own rule allows, the same way the sign-in special rule is
+    // relaxed above. Custom rules always win for a matching path.
+    rateLimitCustomRules?: NonNullable<BetterAuthOptions["rateLimit"]>["customRules"];
   } = {},
 ) {
   const entitled = new Set<Feature>([
@@ -198,7 +205,13 @@ export async function makeAuth(
     "api_keys",
     "teams",
   ]);
-  const { apiKeyPlugin, plugins: extraPlugins, trustedOrigins, ...enterpriseOverrides } = overrides;
+  const {
+    apiKeyPlugin,
+    plugins: extraPlugins,
+    trustedOrigins,
+    rateLimitCustomRules,
+    ...enterpriseOverrides
+  } = overrides;
   const opts: EnterpriseOptions = {
     product: "test",
     secretsKey: "s".repeat(32),
@@ -213,7 +226,12 @@ export async function makeAuth(
     secret: "x".repeat(32),
     baseURL: "http://localhost:3000",
     emailAndPassword: { enabled: true },
-    rateLimit: TEST_RATE_LIMIT,
+    rateLimit: rateLimitCustomRules
+      ? {
+          ...TEST_RATE_LIMIT,
+          customRules: { ...TEST_RATE_LIMIT.customRules, ...rateLimitCustomRules },
+        }
+      : TEST_RATE_LIMIT,
     plugins: [...presetPlugins, ...(extraPlugins ?? [])],
     ...(trustedOrigins ? { trustedOrigins } : {}),
   };

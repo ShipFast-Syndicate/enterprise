@@ -8,6 +8,7 @@ import {
 } from "../../src/server/policy/enforcement";
 import { ALLOWED_METHOD_VALUES } from "../../src/server/policy/store";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
+import { enrollTotp } from "../security/helpers";
 
 async function insertVerifiedProvider(
   t: TestAuth,
@@ -144,8 +145,12 @@ describe("POST /enterprise/policy/set", () => {
 
   it("persists require2fa:true, readable back from GET, and audits policy.updated targeting org_policy/orgId", async () => {
     const t = await makeAuth();
-    const { cookie } = await signUpOwner(t);
-    const { orgId } = await createOrg(t, cookie);
+    const { cookie: signUpCookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, signUpCookie);
+    // Requiring a second factor is done by someone who has one: an
+    // un-enrolled password user is refused (`REQUIRE_2FA_PRECONDITION`,
+    // `test/security/gap2-require2fa.test.ts`), so the owner enrols first.
+    const { cookie } = await enrollTotp(t, signUpCookie);
 
     const setRes = await t.api.post(
       "/enterprise/policy/set",
@@ -169,10 +174,16 @@ describe("POST /enterprise/policy/set", () => {
 
   it("a second call only patches the fields it sends, leaving the rest as previously set", async () => {
     const t = await makeAuth();
-    const { cookie } = await signUpOwner(t);
-    const { orgId } = await createOrg(t, cookie);
+    const { cookie: signUpCookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, signUpCookie);
+    const { cookie } = await enrollTotp(t, signUpCookie); // see the previous case
 
-    await t.api.post("/enterprise/policy/set", { orgId, require2fa: true }, { cookie });
+    const first = await t.api.post(
+      "/enterprise/policy/set",
+      { orgId, require2fa: true },
+      { cookie },
+    );
+    expect(first.status).toBe(200);
     const res = await t.api.post(
       "/enterprise/policy/set",
       { orgId, allowedMethods: ["password", "sso"] },
@@ -270,13 +281,20 @@ describe("home-realm rate limit wiring on the orgPolicy plugin", () => {
 });
 
 describe("require2fa on GET /get-session", () => {
-  it("adds enterprise.require2fa + twoFactorEnabled once the org's policy requires it", async () => {
+  it("adds enterprise.require2fa + twoFactorEnabled + enrollmentRequired once the org's policy requires it", async () => {
     const t = await makeAuth();
-    const { cookie } = await signUpOwner(t, "owner@acme.test");
-    const { orgId } = await createOrg(t, cookie); // sets this as the active org
+    const { cookie: signUpCookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, signUpCookie); // sets this as the active org
+    const { cookie } = await enrollTotp(t, signUpCookie); // the enabler must be enrolled
+    // A plain member who has not enrolled — reached through the membership,
+    // not through an active organization (nothing sets one by default).
+    const { cookie: memberCookie, userId: memberId } = await signUpOwner(t, "member@acme.test");
+    await insertMemberRow(t, orgId, memberId, "member");
 
     const before = await t.api.get("/get-session", { cookie });
     expect((await before.json()).enterprise).toBeUndefined();
+    const memberBefore = await t.api.get("/get-session", { cookie: memberCookie });
+    expect((await memberBefore.json()).enterprise).toBeUndefined();
 
     const setRes = await t.api.post(
       "/enterprise/policy/set",
@@ -287,8 +305,18 @@ describe("require2fa on GET /get-session", () => {
 
     const after = await t.api.get("/get-session", { cookie });
     expect(after.status).toBe(200);
-    const body = await after.json();
-    expect(body.enterprise).toEqual({ require2fa: true, twoFactorEnabled: false });
+    expect((await after.json()).enterprise).toEqual({
+      require2fa: true,
+      twoFactorEnabled: true,
+      enrollmentRequired: false,
+    });
+    const memberAfter = await t.api.get("/get-session", { cookie: memberCookie });
+    expect(memberAfter.status).toBe(200);
+    expect((await memberAfter.json()).enterprise).toEqual({
+      require2fa: true,
+      twoFactorEnabled: false,
+      enrollmentRequired: true,
+    });
   });
 });
 

@@ -184,7 +184,12 @@ if (result.method === "sso") {
 ```
 
 See [`docs/sso.md`](./docs/sso.md#home-realm-discovery-email-first-login) for the full flow,
-including what `org_policy.sso_enforced` does to non-SSO sign-in attempts.
+including what `org_policy.sso_enforced` does to non-SSO sign-in attempts. `org_policy.require_2fa`
+is enforced too: a session for a member of such an org stands only through a method that carries a
+second factor (SSO by default, `policy.twoFactor.satisfiedBy`) or a password sign-in that upstream's
+`twoFactor()` challenges, and a password user who has not enrolled reaches only the enrolment
+endpoints until they have — `/get-session` reports `enterprise.enrollmentRequired` for them. Details
+in [`docs/security.md`](./docs/security.md#policy-resolution-and-enforcement-points).
 
 ## Portal — embedding the admin UI
 

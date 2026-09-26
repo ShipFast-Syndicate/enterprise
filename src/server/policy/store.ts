@@ -261,6 +261,66 @@ export async function getEffectivePolicy(
   };
 }
 
+// --- two-factor enrolment state ----------------------------------------------
+
+/**
+ * Whether **some** organization on the deployment requires two-factor
+ * authentication at all — the cheap probe the enrolment gate
+ * (`./enforcement.ts`) runs before it resolves a session or a policy, so a
+ * deployment with no such organization pays one indexed read per request
+ * and nothing else.
+ */
+export async function anyOrgRequiresTwoFactor(ctx: GenericEndpointContext): Promise<boolean> {
+  const row = await ctx.context.adapter.findOne<{ orgId: string }>({
+    model: "orgPolicy",
+    where: [{ field: "require2fa", value: true }],
+  });
+  return row !== null;
+}
+
+/**
+ * Whether the user can enrol a second factor through upstream's
+ * `/two-factor/enable`: that endpoint re-authenticates with the user's
+ * password (`shouldRequirePassword`, `better-auth/dist/utils/password.mjs`),
+ * so the answer is exactly what upstream's own check reads — a `credential`
+ * account (`internalAdapter.findCredentialAccount`) that holds a password. A
+ * user without one (an SSO- or magic-link-only account) cannot enrol here;
+ * their second factor, when `require2fa` applies, is the sign-in method that
+ * satisfied it (`policy.twoFactor.satisfiedBy`).
+ */
+export async function canEnrollTwoFactor(
+  ctx: GenericEndpointContext,
+  userId: string,
+): Promise<boolean> {
+  const account = await ctx.context.internalAdapter.findCredentialAccount(userId);
+  return Boolean(account?.password);
+}
+
+export interface TwoFactorEnrollmentState {
+  twoFactorEnabled: boolean;
+  /** `true` when the user holds a password and is not yet enrolled — the one state a `require2fa` org gates. */
+  enrollmentPending: boolean;
+}
+
+/**
+ * The user's standing towards a `require2fa` policy, read from the live
+ * user row (never from a cached copy): enrolled, or able to enrol and not
+ * yet enrolled (`enrollmentPending`), or unable to enrol at all. Shared by
+ * the enrolment gate, the `/get-session` annotation and the
+ * `/enterprise/policy/set` precondition so the three never disagree.
+ */
+export async function twoFactorEnrollmentState(
+  ctx: GenericEndpointContext,
+  userId: string,
+): Promise<TwoFactorEnrollmentState> {
+  const user = (await ctx.context.internalAdapter.findUserById(userId)) as {
+    twoFactorEnabled?: boolean | null;
+  } | null;
+  const twoFactorEnabled = user?.twoFactorEnabled === true;
+  if (twoFactorEnabled) return { twoFactorEnabled, enrollmentPending: false };
+  return { twoFactorEnabled, enrollmentPending: await canEnrollTwoFactor(ctx, userId) };
+}
+
 // --- org membership/role helpers -----------------------------------------
 
 export async function getMemberRoles(

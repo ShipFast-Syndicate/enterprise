@@ -37,7 +37,17 @@ export {
   type VerifyResult,
 } from "./audit/chain";
 export { orgPolicy, getPolicyPreconditions, type OrgPolicy } from "./policy/plugin";
-export { getEffectivePolicy, type EffectivePolicy } from "./policy/store";
+export {
+  getEffectivePolicy,
+  twoFactorEnrollmentState,
+  type EffectivePolicy,
+  type TwoFactorEnrollmentState,
+} from "./policy/store";
+export {
+  DEFAULT_TWO_FACTOR_SATISFIED_BY,
+  TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS,
+  twoFactorEnrollmentAllowedPaths,
+} from "./policy/enforcement";
 export {
   findOrgByEmailDomain,
   findOrgsByEmailDomain,

@@ -27,9 +27,15 @@
 //   stays in the database but can no longer sign in — R4 of the fix plan).
 //   `ssoEnforced` is then satisfied only by the enforcing org's **own**
 //   IdP (R3), never by another tenant flipping their own org to enforce.
+// - `require2fa` — two places. The create hook refuses a session whose
+//   sign-in method carries no second factor and will not be challenged for
+//   one (`TWO_FACTOR_REQUIRED`); `buildTwoFactorEnrollmentGate`
+//   (`hooks.before` on every request outside a small allow-list) confines a
+//   signed-in user who holds a password but has not enrolled to the
+//   enrolment endpoints (`TWO_FACTOR_ENROLLMENT_REQUIRED`).
 
-import type { GenericEndpointContext } from "better-auth";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
+import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { auditRefusal } from "../audit/refusal";
 import type { EnterpriseOptions } from "../types";
 import { findOrgsByEmailDomain } from "./home-realm";
@@ -44,7 +50,13 @@ import {
   ssoProviderUnresolvedError,
   type SsoCallbackProvider,
 } from "./sso-jit";
-import { getEffectivePolicy, memberOrgIds, type EffectivePolicy } from "./store";
+import {
+  anyOrgRequiresTwoFactor,
+  getEffectivePolicy,
+  memberOrgIds,
+  twoFactorEnrollmentState,
+  type EffectivePolicy,
+} from "./store";
 
 // --- policy-org resolution -------------------------------------------------
 
@@ -289,6 +301,80 @@ function methodRefusedBy(eff: EffectivePolicy, method: string): boolean {
   return eff.sources.allowedMethodsBy.length > 0 && !eff.allowedMethods.includes(method);
 }
 
+// --- require2fa: sign-in methods ------------------------------------------
+
+/** `policy.twoFactor.satisfiedBy` default: the IdP did the second factor. */
+export const DEFAULT_TWO_FACTOR_SATISFIED_BY: readonly string[] = ["sso"];
+
+/** The sign-in methods that count as having satisfied `require2fa` on their own. */
+export function twoFactorSatisfiedBy(opts?: EnterpriseOptions): readonly string[] {
+  return opts?.policy?.twoFactor?.satisfiedBy ?? DEFAULT_TWO_FACTOR_SATISFIED_BY;
+}
+
+function twoFactorRequiredError(method: string): APIError {
+  return new APIError("FORBIDDEN", {
+    code: "TWO_FACTOR_REQUIRED",
+    message: `Your organization requires two-factor authentication; sign-in method "${method}" does not provide one.`,
+  });
+}
+
+/**
+ * Whether upstream's `twoFactor()` plugin will challenge the session this
+ * path is creating: its `hooks.after` withdraws the session of an enrolled
+ * user and issues the challenge cookie instead, so the session that finally
+ * stands is minted by `/two-factor/verify-*` (a continuation). The decision
+ * is read from the **mounted** plugin's own matcher — the same code path
+ * upstream runs after the endpoint — rather than from a list kept here:
+ * without the plugin, or for a path its matcher does not name, no challenge
+ * follows and the answer is `false`. `/sign-up/email` is the one addition:
+ * it creates the user in the same request, so there is nothing to
+ * challenge yet, and the session it mints is confined to enrolment by
+ * `buildTwoFactorEnrollmentGate` until the user has enrolled.
+ *
+ * An un-enrolled user on a challenged path gets no challenge either; their
+ * session is the enrolment-only one the gate confines. That is why the
+ * gate exists: this hook cannot tell a user who will enrol from one who
+ * never will.
+ */
+export function twoFactorChallengeFollows(ctx: {
+  path?: string;
+  context?: { options?: { plugins?: BetterAuthPlugin[] } } | null;
+}): boolean {
+  const path = ctx.path;
+  if (!path) return false;
+  if (path === "/sign-up/email") return true;
+  const plugin = ctx.context?.options?.plugins?.find((p) => p.id === "two-factor");
+  const afterHooks = plugin?.hooks?.after ?? [];
+  for (const hook of afterHooks) {
+    try {
+      if (hook.matcher({ path } as never)) return true;
+    } catch {
+      // a matcher that needs more than the path cannot be consulted here:
+      // no challenge is assumed (fail closed)
+    }
+  }
+  return false;
+}
+
+/**
+ * The `require2fa` rule for a session being created, given its
+ * classification: a continuation stands (the method that started the flow
+ * was judged when it started); a named method stands when it is in
+ * `satisfiedBy` or when upstream's challenge follows it; an unclassifiable
+ * path never stands. Returns the refusal to throw, or `null`.
+ */
+export function twoFactorRefusal(
+  ctx: { path?: string; context?: { options?: { plugins?: BetterAuthPlugin[] } } | null },
+  classified: SessionCreateClassification,
+  opts?: EnterpriseOptions,
+): APIError | null {
+  if (classified.kind === "continuation") return null;
+  if (classified.kind === "unknown") return methodNotAllowedError(classified.path ?? "unknown");
+  if (twoFactorSatisfiedBy(opts).includes(classified.method)) return null;
+  if (twoFactorChallengeFollows(ctx)) return null;
+  return twoFactorRequiredError(classified.method);
+}
+
 // --- sign-in pre-flight (hooks.before on /magic-link/verify) --------------
 
 /**
@@ -445,9 +531,20 @@ function sessionExpiryMs(session: { expiresAt?: unknown }, ctx: GenericEndpointC
  *    `policy.signInMethods`). Continuations are never refused here — and a
  *    `/verify-email` session for a user with no current session is not one
  *    (`isVerifyEmailContinuation`): it is enforced as `magic_link`.
- * 4. `sessionMaxAgeS` → `expiresAt = min(requested, now + cap)`; never
+ * 4. `require2fa` (`twoFactorRefusal`): a continuation stands; a method in
+ *    `policy.twoFactor.satisfiedBy` (default `sso`) stands; a path the
+ *    mounted `twoFactor()` plugin challenges (`/sign-in/email`, …) stands —
+ *    an enrolled user's session is withdrawn for the challenge and re-minted
+ *    by `/two-factor/verify-*`, an un-enrolled user's is confined to
+ *    enrolment by `buildTwoFactorEnrollmentGate`; `/sign-up/email` stands
+ *    for the same reason; anything else — magic link, passkey, a social
+ *    provider, an unclassified path — carries no second factor and gets
+ *    none → `TWO_FACTOR_REQUIRED` (`METHOD_NOT_ALLOWED` for the
+ *    unclassified path).
+ * 5. `sessionMaxAgeS` → `expiresAt = min(requested, now + cap)`; never
  *    extends a session past the global lifetime.
- * Break-glass is honoured per org inside `getEffectivePolicy`.
+ * Break-glass is honoured per org inside `getEffectivePolicy` (it exempts
+ * from `ssoEnforced` and `allowedMethods`, not from `require2fa`).
  */
 export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
   return async (
@@ -510,11 +607,16 @@ export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
     if (classified.kind === "method" && methodRefusedBy(eff, classified.method)) {
       throw methodNotAllowedError(classified.method);
     }
-    if (classified.kind === "unknown" && eff.restricted) {
+    if (classified.kind === "unknown" && (eff.restricted || eff.require2fa)) {
       ctx.context.logger.warn(
         `enterprise-policy: refusing a session from unclassified path ${JSON.stringify(classified.path)} for a user under a restricted policy — declare it in policy.signInMethods (METHOD_NOT_ALLOWED)`,
       );
       throw methodNotAllowedError(classified.path ?? "unknown");
+    }
+
+    if (eff.require2fa) {
+      const refusal = twoFactorRefusal(ctx, classified, opts);
+      if (refusal) throw refusal;
     }
 
     if (eff.sessionMaxAgeS != null) {
@@ -565,5 +667,103 @@ export function buildSessionUpdateBeforeHook(opts?: EnterpriseOptions) {
     const cap = createdAt + eff.sessionMaxAgeS * 1000;
     if (requested.getTime() <= cap) return;
     return { data: { ...data, expiresAt: new Date(cap) } };
+  };
+}
+
+// --- require2fa: enrolment gate (hooks.before, every request) --------------
+
+/**
+ * What a signed-in user who still has to enrol may call: read their own
+ * session (the `enterprise.enrollmentRequired` annotation is what the
+ * product's redirect keys on), sign out, and upstream's enrolment endpoints
+ * — `/two-factor/enable` (password re-auth, returns the TOTP URI),
+ * `/two-factor/get-totp-uri`, `/two-factor/verify-totp` (the first
+ * successful code is what flips `twoFactorEnabled` and re-issues the
+ * session), and the OTP pair for a product that configured `sendOTP`.
+ * `/enterprise/home-realm` is a public pre-sign-in probe with no session
+ * semantics, kept reachable so a sign-in page still renders next to a
+ * stale cookie. Everything else — every organization, enterprise, account,
+ * key and sign-in endpoint, and every endpoint of a plugin this package has
+ * never heard of — is refused until the user has enrolled. A product adds
+ * its own enrolment UI backend with `policy.twoFactor.enrollmentPaths`.
+ */
+export const TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS: ReadonlySet<string> = new Set([
+  "/get-session",
+  "/sign-out",
+  "/enterprise/home-realm",
+  "/two-factor/enable",
+  "/two-factor/get-totp-uri",
+  "/two-factor/verify-totp",
+  "/two-factor/send-otp",
+  "/two-factor/verify-otp",
+]);
+
+/** The built-in allow-list plus the product's `policy.twoFactor.enrollmentPaths`. */
+export function twoFactorEnrollmentAllowedPaths(opts?: EnterpriseOptions): ReadonlySet<string> {
+  const extra = opts?.policy?.twoFactor?.enrollmentPaths ?? [];
+  if (extra.length === 0) return TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS;
+  return new Set([...TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS, ...extra]);
+}
+
+function twoFactorEnrollmentRequiredError(allowed: ReadonlySet<string>): APIError {
+  return new APIError("FORBIDDEN", {
+    code: "TWO_FACTOR_ENROLLMENT_REQUIRED",
+    message:
+      "Your organization requires two-factor authentication. Enrol a second factor to continue.",
+    enrollmentPaths: [...allowed],
+  });
+}
+
+/**
+ * `hooks.before` on every request outside `twoFactorEnrollmentAllowedPaths`:
+ * a signed-in user who holds a password and has not enrolled a second
+ * factor, and on whom some org's `require2fa` applies (effective policy —
+ * memberships, active org and verified-domain claims alike), is answered
+ * `403 TWO_FACTOR_ENROLLMENT_REQUIRED` with the allow-list in the body.
+ *
+ * Order of the reads, cheapest first, each one ending the hook when it
+ * settles the answer: does any org on the deployment require 2FA at all
+ * (one indexed read; a deployment without such an org pays nothing else)
+ * → is there a session (the same `getSessionFromCtx` upstream's
+ * `sessionMiddleware` runs, so the endpoint reuses the result; an
+ * anonymous request, a SCIM bearer or an API key — which never reaches a
+ * gated path — has none and is left to the endpoint) → is the user
+ * enrolled, or unable to enrol (`twoFactorEnrollmentState`) → does
+ * `require2fa` actually reach this user. The refusal is audited through
+ * `auditRefusal` before it is thrown, the way every `hooks.before` refusal
+ * is.
+ */
+export function buildTwoFactorEnrollmentGate(opts?: EnterpriseOptions) {
+  const allowed = twoFactorEnrollmentAllowedPaths(opts);
+  return {
+    matcher: (ctx: { path?: string }) => !!ctx.path && !allowed.has(ctx.path),
+    handler: createAuthMiddleware(async (ctx) => {
+      const fullCtx = ctx as unknown as GenericEndpointContext;
+      if (!(await anyOrgRequiresTwoFactor(fullCtx))) return;
+      const session = await getSessionFromCtx(fullCtx);
+      const userId = session?.user?.id;
+      const email = session?.user?.email;
+      if (!userId || !email) return;
+      const state = await twoFactorEnrollmentState(fullCtx, userId);
+      if (!state.enrollmentPending) return;
+
+      const orgIds = await resolvePolicyOrgsForUser(fullCtx, {
+        userId,
+        email,
+        activeOrganizationId: session.session.activeOrganizationId ?? null,
+      });
+      if (orgIds.length === 0) return;
+      const eff = await getEffectivePolicy(fullCtx, orgIds, userId, opts);
+      if (!eff.require2fa) return;
+
+      await auditRefusal(fullCtx, {
+        path: ctx.path as string,
+        code: "TWO_FACTOR_ENROLLMENT_REQUIRED",
+        orgIds: eff.sources.require2faBy,
+        userId,
+        email,
+      });
+      throw twoFactorEnrollmentRequiredError(allowed);
+    }),
   };
 }

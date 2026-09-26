@@ -506,13 +506,16 @@ describe("gap 4 — unknown sign-in methods are not silently exempt", () => {
       hook({ userId } as never, { path: "/phone/verify", context } as never),
     ).resolves.toBeUndefined();
 
-    // A row listing the full vocabulary (written for another field) is the same thing.
+    // A row listing the full vocabulary (written for another field) is the
+    // same thing. The other field is a group mapping: `require2fa` is no
+    // longer inert towards an unclassified path (it refuses one — gap 2,
+    // `gap2-require2fa.test.ts`), so it cannot stand in for "some field".
     const { orgId: fullRowOrg } = await createOrg(t, cookie, "acme-full-row");
     expect(
       (
         await setPolicy(t, cookie, {
           orgId: fullRowOrg,
-          require2fa: true,
+          groupRoleMap: { "idp-group": "member" },
           allowedMethods: [...ALLOWED_METHOD_VALUES, "email_otp"],
         })
       ).status,

@@ -183,9 +183,18 @@ export interface EnterpriseOptions {
    * method in the org's `allowedMethods`. Method names are `[a-z_][a-z0-9_]*`.
    *
    * `twoFactor.satisfiedBy` (default `["sso"]`): sign-in methods that count
-   * as having satisfied `require2fa` on their own (the IdP did MFA).
-   * `twoFactor.enrollmentPaths`: extra request paths an un-enrolled user of
-   * a `require2fa` org may still call (the product's enrolment UI backend).
+   * as having satisfied `require2fa` on their own (the IdP did MFA). Under a
+   * `require2fa` policy a session stands only when its method is listed
+   * here, or when upstream's `twoFactor()` challenge follows it
+   * (`/sign-in/email` and the other paths that plugin challenges, plus
+   * `/sign-up/email`), or when it is a continuation of such a flow; every
+   * other method — magic link, passkey, a social provider — is refused
+   * (`TWO_FACTOR_REQUIRED`) unless named here. Name a method only when it
+   * carries a second factor by itself.
+   * `twoFactor.enrollmentPaths`: extra request paths a signed-in user who
+   * still has to enrol may call (the product's enrolment UI backend), on
+   * top of `TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS`; everything else answers
+   * `403 TWO_FACTOR_ENROLLMENT_REQUIRED` until they have.
    */
   policy?: {
     signInMethods?: Record<string, string>;
