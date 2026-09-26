@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { API_KEY_LIFECYCLE_PLUGIN_ID, enterprisePreset } from "../../src/server/preset";
+import {
+  API_KEY_LIFECYCLE_PLUGIN_ID,
+  API_KEY_STANDING_PLUGIN_ID,
+  enterprisePreset,
+} from "../../src/server/preset";
 import { EXPECTED_TABLES } from "../../src/schema/expected";
 import { makeAuth } from "../helpers/auth";
 
@@ -28,6 +32,23 @@ describe("enterprisePreset", () => {
       "enterprise-scim-membership",
       "enterprise-api",
     ]);
+  });
+
+  it("with apiKeys.enableSessionForAPIKeys, the key-standing plugin sits directly before upstream api-key (its /get-session hook must run first); nothing else moves", () => {
+    const base = {
+      product: "test",
+      secretsKey: "s".repeat(32),
+      scimCredentialHashSecret: "catalog-test-key-".repeat(3),
+      resolveEntitlements: async () => new Set<never>(),
+    };
+    const ids = enterprisePreset({ ...base, apiKeys: { enableSessionForAPIKeys: true } }).map(
+      (p) => p.id,
+    );
+    expect(API_KEY_STANDING_PLUGIN_ID).toBe("enterprise-api-key-standing");
+    expect(ids.indexOf(API_KEY_STANDING_PLUGIN_ID)).toBe(ids.indexOf("api-key") - 1);
+    expect(ids.filter((id) => id !== API_KEY_STANDING_PLUGIN_ID)).toEqual(
+      enterprisePreset(base).map((p) => p.id),
+    );
   });
 
   // `getAuthTables()`'s (and hence `$context.tables`'s) own top-level keys

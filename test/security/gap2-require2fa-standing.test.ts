@@ -253,7 +253,7 @@ describe.each(DEPLOYMENTS)(
       });
     });
 
-    it("any later edit of a requiring org's policy re-judges its members' older sessions (documented)", async () => {
+    it("a later edit of a requiring org's policy, made more than ~2 s after a session was admitted (the createdAt stamp window), re-judges its members' older sessions (documented)", async () => {
       const { sent, plugin } = magicSink();
       const t = await d.make({
         plugins: [plugin],
@@ -266,7 +266,11 @@ describe.each(DEPLOYMENTS)(
       const bob = await magicLinkSignIn(t, sent, "bob@acme.test");
       await expectStands(t, bob.cookie, bob.userId, "judged session");
 
-      // Past the judged session's stamp (the second after next), then an edit.
+      // Past the judged session's stamp (the second after next — up to ~2 s
+      // ahead of the clock), then an edit. An edit inside that window leaves
+      // the just-admitted session standing (its stamp is still later than
+      // the edit): no privilege follows, the creation rule admitted it
+      // whichever org imposes the requirement.
       await new Promise((resolve) => setTimeout(resolve, 2100));
       const edit = await setPolicy(t, owner.cookie, { orgId: owner.orgId, sessionMaxAgeS: 3600 });
       expect(edit.status).toBe(200);

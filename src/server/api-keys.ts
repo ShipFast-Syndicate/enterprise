@@ -23,14 +23,28 @@
 // answers `403 API_KEY_NOT_ALLOWED_HERE`.
 // Enforced twice: in the validator (`enterpriseApiKeyValidator`, whatever
 // carries the key) and on the `x-api-key` header alone
-// (`assertNotApiKeyRequest`, via the gate). Policy (`org_policy`) still
-// governs sessions only: keys are bound to the user at use time and bounded
-// by expiry (`apiKeys.*` in `./types.ts`).
+// (`assertNotApiKeyRequest`, via the gate). Keys are bound to the user at use
+// time and bounded by expiry (`apiKeys.*` in `./types.ts`). Of the policy
+// fields (`org_policy`), `require2fa` is the one that also judges a key: a
+// key stands in for its owner's session, so its owner is judged by the same
+// standing rule a session is (`apiKeyOwnerTwoFactorStanding`); the other
+// fields govern sign-in and session lifetime, which a key never goes
+// through.
 
 import type { AuthContext, BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import { APIError, createAuthMiddleware, getSessionFromCtx, isAPIError } from "better-auth/api";
 import { writeAudit, type ChainWriteOptions } from "./audit/chain";
-import { memberOrgIds } from "./policy/store";
+import {
+  resolvePolicyOrgsForUser,
+  resolveTwoFactorStanding,
+  type TwoFactorStanding,
+} from "./policy/enforcement";
+import {
+  anyOrgRequiresTwoFactor,
+  getEffectivePolicy,
+  memberOrgIds,
+  twoFactorEnrollmentState,
+} from "./policy/store";
 
 export const API_KEY_ERROR = {
   USER_BANNED: "USER_BANNED",
@@ -59,6 +73,13 @@ export const API_KEY_HEADERS: readonly string[] = ["x-api-key"];
  */
 export const API_KEY_LIFECYCLE_PLUGIN_ID = "enterprise-api-keys";
 
+/**
+ * Plugin id of `apiKeySessionStanding()`. The preset registers it directly
+ * **before** upstream `api-key`, and only with
+ * `apiKeys.enableSessionForAPIKeys` on (`./preset.ts`).
+ */
+export const API_KEY_STANDING_PLUGIN_ID = "enterprise-api-key-standing";
+
 /** Same hash upstream stores (`defaultKeyHasher`): SHA-256, base64url, unpadded. */
 export async function hashApiKey(key: string): Promise<string> {
   // Web Crypto, like `policy/enforcement.ts`'s magic-link token hash — no new dependency.
@@ -70,8 +91,14 @@ export async function hashApiKey(key: string): Promise<string> {
 
 interface UserRow {
   id: string;
+  email?: string | null;
   banned: boolean | null;
   banExpires: Date | number | string | null;
+}
+
+interface ApiKeyRow {
+  referenceId: string;
+  createdAt?: unknown;
 }
 
 /** Mirrors `admin()`'s session hook: an expired temporary ban is not a ban. */
@@ -80,6 +107,69 @@ function isBanned(user: UserRow): boolean {
   if (user.banExpires === null || user.banExpires === undefined) return true;
   const expires = new Date(user.banExpires).getTime();
   return Number.isNaN(expires) ? true : expires >= Date.now();
+}
+
+/**
+ * How a key's **owner** fares against a `require2fa` policy — the key's
+ * counterpart of `resolveTwoFactorStanding` (`./policy/enforcement.ts`), with
+ * the key row in place of a session row. A key stands in for its owner's
+ * session (upstream's mock session is built from it), so it must not carry an
+ * owner the policy would refuse a session to:
+ *
+ * - `"ok"` — no org on the deployment requires a second factor (one small
+ *   `org_policy` probe, the same one the enrolment gate starts with); or
+ *   `require2fa` does not reach the owner (memberships and verified-domain
+ *   claims, as for a session with no active organization); or the owner has
+ *   enrolled; or the owner holds no password and the key was created
+ *   **strictly after** the requirement's onset for them
+ *   (`twoFactorRequirementOnsetMs`, the same instant a session is judged
+ *   against, compared in epoch milliseconds whatever unit the column holds).
+ *   `/api-key/create` is itself refused to a session that does not stand, so
+ *   a key created after the onset was minted by a session that was judged
+ *   under the requirement.
+ * - `"enrollment-required"` — the owner holds a password and has not
+ *   enrolled. A session in that state is confined to enrolment and flagged
+ *   `enrollmentRequired`; a key can carry neither, so it is refused until the
+ *   owner enrols.
+ * - `"two-factor-required"` — the owner holds no password and the key was
+ *   created at or before the onset (before the org switched `require2fa` on
+ *   or last edited its policy, before the owner joined it, or before the
+ *   upgrade's `0003` data migration): the key was never judged under the
+ *   requirement. A creation time that cannot be read never stands.
+ */
+export async function apiKeyOwnerTwoFactorStanding(
+  ctx: GenericEndpointContext,
+  row: ApiKeyRow,
+  user: Pick<UserRow, "id" | "email">,
+): Promise<TwoFactorStanding> {
+  if (!(await anyOrgRequiresTwoFactor(ctx))) return "ok";
+  const state = await twoFactorEnrollmentState(ctx, user.id);
+  if (state.twoFactorEnabled) return "ok";
+  const orgIds = await resolvePolicyOrgsForUser(ctx, {
+    userId: user.id,
+    email: user.email ?? "",
+    activeOrganizationId: null,
+  });
+  if (orgIds.length === 0) return "ok";
+  // `require2fa` and its sources do not depend on the method vocabulary, so
+  // the product's `policy.signInMethods` is not needed here.
+  const eff = await getEffectivePolicy(ctx, orgIds, user.id);
+  if (!eff.require2fa) return "ok";
+  return resolveTwoFactorStanding(ctx, { createdAt: row.createdAt }, user.id, eff, state);
+}
+
+function apiKeyTwoFactorError(standing: Exclude<TwoFactorStanding, "ok">): APIError {
+  return standing === "enrollment-required"
+    ? new APIError("FORBIDDEN", {
+        code: "TWO_FACTOR_ENROLLMENT_REQUIRED",
+        message:
+          "The owner of this API key must enrol a second factor, which their organization requires, before the key can be used.",
+      })
+    : new APIError("FORBIDDEN", {
+        code: "TWO_FACTOR_REQUIRED",
+        message:
+          "This API key was created before its owner's organization required two-factor authentication. Create a new key from a session that satisfies the requirement.",
+      });
 }
 
 /**
@@ -108,12 +198,25 @@ function isBanned(user: UserRow): boolean {
  * 2. **Who** the key belongs to: the user row is re-read on every use and a
  *    banned (`USER_BANNED`; an expired temporary ban is not a ban) or missing
  *    (`USER_NOT_FOUND`) user is refused.
+ * 3. **Whether the owner stands** under `require2fa`
+ *    (`apiKeyOwnerTwoFactorStanding`): an un-enrolled password holder is
+ *    refused (`TWO_FACTOR_ENROLLMENT_REQUIRED`), and so is a no-password
+ *    owner's key created at or before the requirement's onset
+ *    (`TWO_FACTOR_REQUIRED`). This runs before upstream's `validateApiKey`
+ *    and therefore before the mock session is built — the one point every
+ *    carrier passes: upstream answers `/get-session` from that mock session
+ *    in its own before-hook, so no after-hook (the `/get-session` judgement
+ *    in `./policy/plugin.ts`) ever sees a key.
  *
  * Throws a typed `APIError` rather than returning `false` so both paths
  * surface a code: `/api-key/verify` answers `{ valid: false, error: { code }
  * }` and the mock-session hook a 401/403 — instead of upstream's generic
  * `KEY_NOT_FOUND`/`INVALID_API_KEY`. An unknown key returns `true` so
- * upstream keeps answering `INVALID_API_KEY` exactly as before.
+ * upstream keeps answering `INVALID_API_KEY` exactly as before. Under the
+ * preset's opt-in, `apiKeySessionStanding` answers the `require2fa` refusal
+ * on `/get-session` as "no session" (`null`) before this validator runs; the
+ * throw here is what every other carrier, and a hand-composed `apiKey()`
+ * without that plugin, gets.
  */
 export async function enterpriseApiKeyValidator({
   ctx,
@@ -132,28 +235,89 @@ export async function enterpriseApiKeyValidator({
       message: API_KEY_NOT_ALLOWED_HERE_MESSAGE,
     });
   }
-  const row = await ctx.context.adapter.findOne<{ referenceId: string }>({
-    model: "apikey",
-    where: [{ field: "key", value: await hashApiKey(key) }],
-  });
-  if (!row) return true;
-  const user = await ctx.context.adapter.findOne<UserRow>({
-    model: "user",
-    where: [{ field: "id", value: row.referenceId }],
-  });
-  if (!user) {
+  const owner = await findKeyOwner(ctx, key);
+  if (!owner) return true;
+  if (!owner.user) {
     throw new APIError("UNAUTHORIZED", {
       code: API_KEY_ERROR.USER_NOT_FOUND,
       message: "The user this API key belongs to no longer exists.",
     });
   }
-  if (isBanned(user)) {
+  if (isBanned(owner.user)) {
     throw new APIError("UNAUTHORIZED", {
       code: API_KEY_ERROR.USER_BANNED,
       message: "The user this API key belongs to is banned.",
     });
   }
+  const standing = await apiKeyOwnerTwoFactorStanding(ctx, owner.row, owner.user);
+  if (standing !== "ok") throw apiKeyTwoFactorError(standing);
   return true;
+}
+
+/** The key row (by upstream's hash) and its owner's live user row; `null` for an unknown key. */
+async function findKeyOwner(
+  ctx: GenericEndpointContext,
+  key: string,
+): Promise<{ row: ApiKeyRow; user: UserRow | null } | null> {
+  const row = await ctx.context.adapter.findOne<ApiKeyRow>({
+    model: "apikey",
+    where: [{ field: "key", value: await hashApiKey(key) }],
+  });
+  if (!row) return null;
+  const user = await ctx.context.adapter.findOne<UserRow>({
+    model: "user",
+    where: [{ field: "id", value: row.referenceId }],
+  });
+  return { row, user };
+}
+
+/**
+ * The preset's companion to the opt-in mock session
+ * (`apiKeys.enableSessionForAPIKeys`), registered directly **before**
+ * upstream `api-key` so its `hooks.before` runs first: on `/get-session`, a
+ * key header whose owner does not stand under `require2fa`
+ * (`apiKeyOwnerTwoFactorStanding`) is withdrawn from the request before
+ * upstream's hook looks for it. The endpoint then answers as it would for a
+ * request without the key — `null`, or the session of a cookie sent next to
+ * it (judged on its own) — so a product's `auth.api.getSession({ headers })`
+ * sees a signed-out visitor, exactly as for a cookie session that does not
+ * stand, instead of an error it would have to interpret.
+ *
+ * Only the `require2fa` answer is handled here. An unknown key, and a key of
+ * a banned or removed user, are left in place for upstream and
+ * `enterpriseApiKeyValidator` to answer as before (`INVALID_API_KEY`,
+ * `USER_BANNED`, `USER_NOT_FOUND`). The validator repeats the `require2fa`
+ * judgement and throws, so a key carried any other way (a hand-composed
+ * `apiKey()` with `customAPIKeyGetter`, or without this plugin) is refused
+ * with `403` rather than answered — fail-closed either way. The header is
+ * removed from this request's own copy of the headers (better-auth copies
+ * the caller's `Headers` per dispatch), never from the caller's object.
+ */
+export function apiKeySessionStanding() {
+  return {
+    id: API_KEY_STANDING_PLUGIN_ID,
+    hooks: {
+      before: [
+        {
+          matcher: (ctx) =>
+            ctx.path === "/get-session" && API_KEY_HEADERS.some((name) => !!ctx.headers?.get(name)),
+          handler: createAuthMiddleware(async (ctx) => {
+            const headers = ctx.headers;
+            if (!headers) return;
+            const full = ctx as unknown as GenericEndpointContext;
+            for (const name of API_KEY_HEADERS) {
+              const key = headers.get(name);
+              if (!key) continue;
+              const owner = await findKeyOwner(full, key);
+              if (!owner?.user || isBanned(owner.user)) continue;
+              const standing = await apiKeyOwnerTwoFactorStanding(full, owner.row, owner.user);
+              if (standing !== "ok") headers.delete(name);
+            }
+          }),
+        },
+      ],
+    },
+  } satisfies BetterAuthPlugin;
 }
 
 export interface ApiKeyRevocationActor {

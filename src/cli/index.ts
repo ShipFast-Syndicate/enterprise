@@ -8,13 +8,16 @@
 // framework — `node:util`'s `parseArgs` per ruling (e).
 //
 // Commands:
-//   ab-enterprise migrate --out <dir>   write every package migration the
+//   ab-enterprise migrate --out <dir> [--from <NNNN>]
+//                                        write every package migration the
 //                                        folder does not hold yet (0001, 0002,
-//                                        0003, ...) into a product's drizzle
-//                                        migrations folder as next-numbered
-//                                        NNNN_enterprise*.sql files, and
-//                                        register each in meta/_journal.json
-//                                        if the folder has one
+//                                        0003, ...; with --from, only those
+//                                        numbered NNNN or later) into a
+//                                        product's drizzle migrations folder
+//                                        as next-numbered NNNN_enterprise*.sql
+//                                        files, and register each in
+//                                        meta/_journal.json if the folder has
+//                                        one
 //   ab-enterprise verify [--url] [--token]
 //                                        check a live database against
 //                                        EXPECTED_TABLES, one line per
@@ -214,6 +217,24 @@ function appendJournalEntry(outDir: string, tag: string, when: number): string |
 }
 
 /**
+ * The newest `when` in the folder's drizzle journal (`-Infinity` without
+ * one). The migrator applies an entry only when its `when` is newer than the
+ * newest migration it has already recorded, and a product's journal can hold
+ * hand-set `when` values ahead of the clock — so the entries this command
+ * adds start after the newest one there, not merely at "now".
+ */
+function newestJournalWhen(outDir: string): number {
+  const journalPath = join(outDir, "meta", "_journal.json");
+  if (!existsSync(journalPath)) return -Infinity;
+  const journal = JSON.parse(readFileSync(journalPath, "utf8")) as DrizzleJournal;
+  const entries = Array.isArray(journal.entries) ? journal.entries : [];
+  return entries.reduce(
+    (max, entry) => (typeof entry.when === "number" ? Math.max(max, entry.when) : max),
+    -Infinity,
+  );
+}
+
+/**
  * The name suffix a package migration is emitted under, after the target
  * folder's next free `NNNN_` prefix. `0001` keeps the historic bare
  * `enterprise` suffix — the only file earlier releases of this command wrote —
@@ -224,46 +245,147 @@ function emittedSuffix(file: string): string {
   return file === MIGRATION_FILES[0] ? "enterprise" : `enterprise_${file.replace(/\.sql$/, "")}`;
 }
 
-function alreadyEmitted(outDir: string, file: string): string | null {
-  if (!existsSync(outDir)) return null;
-  const pattern = new RegExp(`^\\d{4}_${emittedSuffix(file)}\\.sql$`);
-  return readdirSync(outDir).find((entry) => pattern.test(entry)) ?? null;
+/** A package migration's own number — the `NNNN` of `NNNN_name.sql`. */
+function migrationNumber(file: string): string {
+  return file.slice(0, 4);
+}
+
+/** A migration's text with drizzle's breakpoint markers removed — what this command inserted them into. */
+function withoutBreakpoints(sql: string): string {
+  return sql.split(`\n${STATEMENT_BREAKPOINT}`).join("").trimEnd();
 }
 
 /**
- * Writes every package migration (`MIGRATION_FILES`) the folder does not
- * hold yet, each as its own next-numbered file registered in the drizzle
- * journal, in order — so running it again after an upgrade adds exactly the
- * migrations that release brought. A migration already applied by other
- * means (copied in by hand under another name) is not recognised: delete the
- * emitted duplicate before running the migrator.
+ * Whether `entry` (a file in the target folder) is **provably** package
+ * migration `file` as this command writes it: its name is the one this
+ * command gives that migration (`NNNN_<emittedSuffix>.sql`) **and** its
+ * content, breakpoint markers aside, is the package file's own. Every release
+ * of this command wrote exactly that (`0001` has not changed since 0.1.0), so
+ * a folder it wrote into is recognised; nothing else is — not a product's own
+ * migration that created the same tables under another name (a pilot's
+ * `0010_enterprise_pilot.sql`), not a hand-edited copy under the emitted
+ * name. The command cannot prove what such a file applied, so it never
+ * guesses: see `cmdMigrate` for what it does instead.
+ */
+function isEmissionOf(outDir: string, entry: string, file: string): boolean {
+  if (!new RegExp(`^\\d{4}_${emittedSuffix(file)}\\.sql$`).test(entry)) return false;
+  const emitted = readFileSync(join(outDir, entry), "utf8");
+  const source = readFileSync(migrationFilePath(file), "utf8");
+  return withoutBreakpoints(emitted) === withoutBreakpoints(source);
+}
+
+type EmissionState =
+  { kind: "absent" } | { kind: "present"; entry: string } | { kind: "conflict"; entry: string };
+
+/**
+ * `present` when the folder holds a proven emission of `file`
+ * (`isEmissionOf`); `conflict` when a file carries the name this command
+ * gives `file` but not its content (hand-edited, or not written by this
+ * command) — the command stops rather than guess; `absent` otherwise.
+ */
+function emissionState(outDir: string, file: string): EmissionState {
+  if (!existsSync(outDir)) return { kind: "absent" };
+  const pattern = new RegExp(`^\\d{4}_${emittedSuffix(file)}\\.sql$`);
+  const named = readdirSync(outDir).filter((entry) => pattern.test(entry));
+  const proven = named.find((entry) => isEmissionOf(outDir, entry, file));
+  if (proven) return { kind: "present", entry: proven };
+  if (named[0]) return { kind: "conflict", entry: named[0] };
+  return { kind: "absent" };
+}
+
+/**
+ * `.sql` files in the folder whose name mentions `enterprise` but that are
+ * not a proven emission of any package migration — typically the migration
+ * a product wrote itself when it first adopted this package (klar
+ * `0010_enterprise_pilot.sql`, dispatch `0011`, nomi `0023` + `0024_scim_1_7`,
+ * …). Its tables are already in the database; emitting `0001`/`0002` next to
+ * it would re-run their `ALTER TABLE`s and fail the product's migrator.
+ */
+function unprovenEnterpriseFiles(outDir: string): string[] {
+  if (!existsSync(outDir)) return [];
+  return readdirSync(outDir).filter(
+    (entry) =>
+      /\.sql$/.test(entry) &&
+      /enterprise/i.test(entry) &&
+      !MIGRATION_FILES.some((file) => isEmissionOf(outDir, entry, file)),
+  );
+}
+
+/**
+ * Writes the package migrations (`MIGRATION_FILES`) the folder does not hold
+ * yet, each as its own next-numbered file registered in the drizzle journal,
+ * in order — so running it again after an upgrade adds exactly the
+ * migrations that release brought, and a second run writes nothing.
+ *
+ * `--from <NNNN>` limits the run to package migrations numbered `NNNN` or
+ * later. It is how a product whose package tables came from **its own**
+ * migration upgrades: it already holds what `0001`/`0002` create, under a
+ * name this command cannot prove (`isEmissionOf`), so it runs
+ * `--from 0003` and gets exactly the one file it lacks.
+ *
+ * Without `--from`, a folder holding such an unproven `*enterprise*.sql` file
+ * is refused (exit 1, nothing written): the command recognises nothing it
+ * cannot prove, and emitting every migration next to that file would fail
+ * the product's migrator on the first `ALTER TABLE` it re-runs. A file under
+ * the emitted name but with other content is refused whatever `--from` says.
  */
 function cmdMigrate(argv: string[]): number {
   const { values } = parseArgs({
     args: argv,
-    options: { out: { type: "string" } },
+    options: { out: { type: "string" }, from: { type: "string" } },
   });
   if (!values.out) {
     console.error("ab-enterprise migrate: --out <dir> is required");
     return 1;
   }
+  const numbers = MIGRATION_FILES.map(migrationNumber);
+  const from = values.from;
+  if (from !== undefined && !numbers.includes(from)) {
+    console.error(
+      `ab-enterprise migrate: --from must be one of this package's migration numbers (${numbers.join(", ")}), got "${from}"`,
+    );
+    return 1;
+  }
   const outDir = values.out;
   mkdirSync(outDir, { recursive: true });
 
-  const when = Date.now();
+  const selected = MIGRATION_FILES.filter(
+    (file) => from === undefined || migrationNumber(file) >= from,
+  );
+  for (const file of selected) {
+    const state = emissionState(outDir, file);
+    if (state.kind === "conflict") {
+      console.error(
+        `ab-enterprise migrate: ${state.entry} has the name this command gives ${file} but not its content — nothing written. Restore it from this package or remove it (and its meta/_journal.json entry) before running again.`,
+      );
+      return 1;
+    }
+  }
+
+  if (from === undefined) {
+    const unproven = unprovenEnterpriseFiles(outDir);
+    if (unproven.length > 0) {
+      console.error(
+        `ab-enterprise migrate: ${outDir} holds ${unproven.join(", ")}, which this command did not write — it cannot tell which package migrations that applied. Nothing written. If it created the package tables (a product's own enterprise migration), run again with --from <the first package migration it lacks>, e.g. --from ${numbers[numbers.length - 1]}.`,
+      );
+      return 1;
+    }
+  }
+
+  let when = Math.max(Date.now(), newestJournalWhen(outDir) + 1);
   let written = 0;
   let journalPath: string | null = null;
-  for (const file of MIGRATION_FILES) {
-    const existing = alreadyEmitted(outDir, file);
-    if (existing) {
-      console.log(`ab-enterprise migrate: ${file} already present as ${existing} — skipped`);
+  for (const file of selected) {
+    const state = emissionState(outDir, file);
+    if (state.kind === "present") {
+      console.log(`ab-enterprise migrate: ${file} already present as ${state.entry} — skipped`);
       continue;
     }
     const tag = `${nextMigrationNumber(outDir)}_${emittedSuffix(file)}`;
     const dest = join(outDir, `${tag}.sql`);
     writeFileSync(dest, insertStatementBreakpoints(readFileSync(migrationFilePath(file), "utf8")));
     console.log(`ab-enterprise migrate: wrote ${dest}`);
-    const registered = appendJournalEntry(outDir, tag, when + written);
+    const registered = appendJournalEntry(outDir, tag, when++);
     if (registered) {
       journalPath = registered;
       console.log(`ab-enterprise migrate: registered ${tag} in ${registered}`);
@@ -272,7 +394,9 @@ function cmdMigrate(argv: string[]): number {
   }
 
   if (written === 0) {
-    console.log(`ab-enterprise migrate: ${outDir} already holds every migration — nothing written`);
+    console.log(
+      `ab-enterprise migrate: ${outDir} already holds every migration${from === undefined ? "" : ` from ${from}`} — nothing written`,
+    );
   } else if (!journalPath) {
     console.log(
       `ab-enterprise migrate: no drizzle meta/_journal.json in ${outDir} — apply the files in order with applyMigration() from @alphabros/enterprise/schema, or your own SQL runner`,
@@ -386,13 +510,13 @@ async function main(): Promise<number> {
     case undefined:
       console.error("ab-enterprise: no command given");
       console.error(
-        "usage: ab-enterprise migrate --out <dir> | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>]",
+        "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>]",
       );
       return 1;
     default:
       console.error(`ab-enterprise: unknown command "${command}"`);
       console.error(
-        "usage: ab-enterprise migrate --out <dir> | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>]",
+        "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>]",
       );
       return 1;
   }

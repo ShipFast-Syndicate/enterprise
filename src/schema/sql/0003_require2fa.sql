@@ -19,7 +19,9 @@
 -- none on 2026-09-26, where this is a no-op).
 --
 -- Run it once, as part of the upgrade: through `ab-enterprise migrate --out`
--- (a drizzle journal applies it exactly once) or `applyMigration()`. Running
+-- (a drizzle journal applies it exactly once; a product whose package tables
+-- came from its own migration adds `--from 0003`, so this is the only file
+-- written) or `applyMigration()`. Running
 -- it again later is safe but not free — it moves the onset again, so members
 -- of requiring orgs who hold no password and are not enrolled sign in once
 -- more.

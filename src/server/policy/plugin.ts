@@ -362,7 +362,11 @@ async function getEndpointJson(ctx: { context: { returned?: unknown } }): Promis
  *   password holder who has not enrolled) — the flag a product's enrolment
  *   redirect keys on.
  *
- * Left untouched when no policy requires 2FA.
+ * Left untouched when no policy requires 2FA. Never reached for an API key
+ * under the opt-in mock session: upstream's api-key before-hook answers
+ * `/get-session` itself and better-auth runs no after-hook then. A key's
+ * owner is judged before that, in `enterpriseApiKeyValidator` and
+ * `apiKeySessionStanding` (`../api-keys.ts`).
  */
 function buildRequire2faAfterHook(opts: EnterpriseOptions) {
   return {

@@ -229,6 +229,12 @@ export interface EnterpriseOptions {
      * endpoint of a plugin you add — answers `403 API_KEY_NOT_ALLOWED_HERE`
      * whichever way the key is carried (`isApiKeyRefusedPath` in
      * `./api-keys.ts`; see `docs/security.md`).
+     *
+     * A key is judged by its owner's `require2fa` standing on every use
+     * (`apiKeyOwnerTwoFactorStanding`): an owner who holds a password and
+     * has not enrolled, or a no-password owner whose key predates the
+     * requirement's onset, gets no session — `/get-session` answers `null`
+     * for such a key.
      */
     enableSessionForAPIKeys?: boolean;
     /**

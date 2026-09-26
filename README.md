@@ -190,9 +190,14 @@ second factor (SSO by default, `policy.twoFactor.satisfiedBy`) or a password sig
 `twoFactor()` challenges, and a password user who has not enrolled reaches only the enrolment
 endpoints until they have — `/get-session` reports `enterprise.enrollmentRequired` for them. A session
 that predates the requirement for a user who cannot enrol (switched on later, or the user joined
-later) is refused, and `/get-session` — hence `auth.api.getSession` — answers `null` for it. No schema
-change: upgrading needs only the data-only migration `0003`, which `ab-enterprise migrate --out`
-emits with the others. Details in
+later) is refused, and `/get-session` — hence `auth.api.getSession` — answers `null` for it; with the
+opt-in API-key mock session, a key's owner is judged the same way (a no-password owner's key must
+postdate the requirement, an un-enrolled password holder's key yields no session). No schema change:
+upgrading needs only the data-only migration `0003`. A product whose package tables came from its
+own migration (every fleet product) emits just that one with
+`ab-enterprise migrate --out <folder> --from 0003` — never the full emit, which would re-run `0001`
+and `0002` after its own; a folder this command wrote before gets it with a plain `migrate --out`.
+Details in
 [`docs/security.md`](./docs/security.md#policy-resolution-and-enforcement-points).
 
 ## Portal — embedding the admin UI
@@ -352,6 +357,12 @@ deploy step or locally, not from an edge/Workers runtime:
 # are separated by `--> statement-breakpoint`, which is what lets drizzle run
 # them one at a time; it is an ordinary SQL comment everywhere else.
 ab-enterprise migrate --out ./drizzle/migrations
+
+# A product whose package tables came from its OWN migration (e.g. a hand-written
+# NNNN_enterprise_pilot.sql) takes only the migrations it lacks — for 1.1.0,
+# the data-only 0003. A plain run refuses a folder holding an *enterprise*.sql
+# file this command did not write, rather than re-emit 0001/0002 next to it.
+ab-enterprise migrate --out ./drizzle/migrations --from 0003
 
 # No journal in the target folder? The command says so, and the supported
 # application paths are `applyMigration()` from `@alphabros/enterprise/schema`

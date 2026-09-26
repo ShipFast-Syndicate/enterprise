@@ -166,7 +166,10 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
     just after creating the session in the same callback. Consequences, all fail-closed:
     - switching `require2fa` on signs out, once, every member who holds no password and is not
       enrolled (their next sign-in is judged) — the admin who switched it included;
-    - **any** later edit of a requiring org's policy (any field) moves `updated_at` and does the same;
+    - **any** later edit of a requiring org's policy (any field) moves `updated_at` and does the same
+      for every session admitted more than about two seconds before the edit — a session admitted
+      within that window carries a `createdAt` stamp still later than the edit and keeps standing (no
+      privilege follows: the creation rule admitted it whichever org imposes the requirement);
     - joining a requiring org re-judges the joiner's older sessions;
     - an org that claims a user only through its verified e-mail domain, without a membership,
       contributes its `updated_at` alone (`ssoProvider` records no time for a domain verification).
@@ -187,7 +190,22 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
     includes `sso` and this org owns a verified SSO provider for the caller's e-mail domain. A
     magic-link- or social-only admin cannot switch it on — they could never sign in under it, and the
     org would be left with nobody able to switch it off.
-  - API keys are unaffected (a key never creates a session and reaches `/get-session` only).
+  - API keys: a key stands in for its owner's session, so with the opt-in mock session
+    (`apiKeys.enableSessionForAPIKeys`) — and on `auth.api.verifyApiKey` — the key's **owner** is
+    judged by the same rule, with the `apikey` row's own `createdAt` in place of the session's
+    (`apiKeyOwnerTwoFactorStanding`, run inside `enterpriseApiKeyValidator` before upstream builds
+    the mock session): an enrolled owner stands; an owner who holds a password and has not enrolled
+    is refused (a key cannot carry `enrollmentRequired`); a no-password owner's key stands only if it
+    was created strictly after the requirement's onset for them (`/api-key/create` is refused to a
+    session that does not stand, so such a key was minted by a judged session). A refused key yields
+    no session: `/get-session` with it answers `null` over HTTP and through
+    `auth.api.getSession({ headers })`, as for a cookie session that does not stand, and
+    `verifyApiKey` answers `{ valid: false }` with `TWO_FACTOR_REQUIRED` or
+    `TWO_FACTOR_ENROLLMENT_REQUIRED`. Consequences: switching `require2fa` on, a later policy edit and
+    joining a requiring org make a no-password member's older keys stop working (they mint a new one
+    from a session that satisfies the policy); an un-enrolled password holder's keys work again once
+    they enrol. A key minted within the same whole second as the onset, in a product whose `apikey`
+    timestamps keep whole seconds, reads as not after it and is refused.
 - **SCIM-required JIT** (`src/server/policy/scim-required.ts`) refuses an SSO-callback account
   creation — from the per-provider `/sso/callback/:providerId`, the shared `/sso/callback` that
   `@better-auth/sso` registers unconditionally, or the SAML ACS — when _any_ org matched by the
@@ -203,13 +221,17 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   IdP: on an SSO callback the provider's org must be one of the orgs enforcing SSO on the user
   and, when verified providers claim the e-mail domain at all, one of those. Details and the
   opt-outs in [`sso.md`](./sso.md#domain-binding-ssodomainbinding-default-verified-domain).
-- **API keys** (`src/server/api-keys.ts`). Policy governs _sessions_; an API key never creates
-  one, so `ssoEnforced`, `allowedMethods`, `sessionMaxAgeS` and `require2fa` do not apply to a
-  key. Keys are instead bound to the user at use time and bounded by expiry: the preset's
-  `customAPIKeyValidator` re-reads the user row on every use (`/api-key/verify` and, if a product
-  opts into `enableSessionForAPIKeys`, the `x-api-key` mock session) and refuses a banned user
-  (`USER_BANNED`; an expired temporary ban is not a ban) or a key whose user no longer exists
-  (`USER_NOT_FOUND`); an unknown key stays upstream's `INVALID_API_KEY`. New keys expire after
+- **API keys** (`src/server/api-keys.ts`). An API key never signs in and never creates a session,
+  so `ssoEnforced`, `allowedMethods` and `sessionMaxAgeS` — which govern sign-in and a session's
+  lifetime — do not apply to a key. `require2fa` does: a key stands in for its owner's session, so
+  its owner is judged on every use by the session rule (previous section, "API keys"). Keys are
+  also bound to the user at use time and bounded by expiry: the preset's `customAPIKeyValidator`
+  re-reads the user row on every use (`/api-key/verify` and, if a product opts into
+  `enableSessionForAPIKeys`, the `x-api-key` mock session) and refuses a banned user
+  (`USER_BANNED`; an expired temporary ban is not a ban), a key whose user no longer exists
+  (`USER_NOT_FOUND`), or an owner who does not stand under `require2fa`
+  (`TWO_FACTOR_ENROLLMENT_REQUIRED`, `TWO_FACTOR_REQUIRED`); an unknown key stays upstream's
+  `INVALID_API_KEY`. New keys expire after
   `apiKeys.defaultExpiresInS` (90 days; `null` = never unless the caller asks) and may never be
   created for longer than `apiKeys.maxExpiresInDays` (365). Every deprovisioning path revokes the
   user's keys and audits `api_key.revoked` (one row per key) into every organization the user
@@ -259,9 +281,13 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   keep `customAPIKeyValidator: enterpriseApiKeyValidator` (the one layer every carrier passes
   through), `apiKeyHeaders: [...API_KEY_HEADERS]` (so the gate's header-alone layer still sees
   the key) and a `keyExpiration` matching the preset (`defaultExpiresIn` in **seconds**,
-  `maxExpiresIn` in days) — omitting it restores perpetual keys at create. A
-  `customAPIKeyGetter` or another header name is still confined to the allow-list by the
-  validator, but forfeits the header-alone layer.
+  `maxExpiresIn` in days) — omitting it restores perpetual keys at create — and should mount
+  `apiKeySessionStanding()` directly before its `apiKey()` (the preset does): that plugin's
+  `/get-session` hook withdraws a key whose owner does not stand under `require2fa` before
+  upstream's hook answers from it, so the product sees `null`. Without it the validator still
+  refuses such a key, as a `403` (`auth.api.getSession` then throws instead of returning
+  `null`). A `customAPIKeyGetter` or another header name is still confined to the allow-list
+  and judged by the validator, but forfeits the header-alone layer and the `null` answer.
 
 ## Upgrading from 1.0.x
 
@@ -317,13 +343,35 @@ migration, `0003_require2fa.sql`: it moves `org_policy.updated_at` of every `req
 the moment it runs (keeping the column's unit, rounded up). Sessions that exist at that moment were
 minted by 1.0.x, which never judged them against the requirement; moving the onset past them makes
 them unjudged, so a member who holds no password and is not enrolled signs in again once (an SSO
-sign-in then satisfies the policy). Apply it as part of the upgrade, **once**:
-`ab-enterprise migrate --out <drizzle migrations folder>` now writes every package migration the
-folder does not hold yet (`0001`, `0002`, `0003`, each next-numbered and registered in the journal),
-so the product's migrator applies `0003` exactly once; `applyMigration()` runs every file on each call,
-and a second run of `0003` signs those members out once more. A migration you already applied by hand
-under another name (e.g. a copied `0002`) is not recognised — delete the emitted duplicate before
-migrating. Where no org has `require_2fa = 1` (production on 2026-09-26), `0003` changes nothing.
+sign-in then satisfies the policy). Apply it as part of the upgrade, **once**, through the product's
+own migrator:
+
+- **A product whose package tables came from its own migration** — every fleet product today: klar
+  `drizzle/0010_enterprise_pilot.sql`, dispatch `0011`, nomi `0023` plus `0024_scim_1_7.sql`,
+  rendra `migrations/0004`, pagr `0008`, opensalary `0006`, publishr `0014` — runs
+  `ab-enterprise migrate --out <drizzle migrations folder> --from 0003`. It writes exactly one
+  file, `NNNN_enterprise_0003_require2fa.sql`, next-numbered and registered in
+  `meta/_journal.json` after the product's own entries, and a second run writes nothing. Never
+  the full emit: `0001` and `0002` would re-run `ALTER TABLE`s that product's own migration
+  already applied (or target tables it named differently), and its migrator stops on the first
+  one (`no such table: organization`, `duplicate column name: id`). Alternatively add `0003`'s
+  statement as a hand-numbered migration of the product's own. If a full emit already happened,
+  remove every emitted file other than `NNNN_enterprise_0003_require2fa.sql` **and** its
+  `meta/_journal.json` entry — deleting the file alone makes the migrator fail on the missing
+  file.
+- **A product that took the package tables from this command** (its folder holds the
+  `NNNN_enterprise.sql` an earlier release wrote) runs `ab-enterprise migrate --out <folder>`,
+  which writes `0002` and `0003` after it.
+
+The command recognises nothing it cannot prove: a file counts as an earlier emission only when it
+carries the name this command gives that migration **and** the package file's own content
+(breakpoint markers aside — every release wrote exactly that). Without `--from`, a folder holding
+any other `*enterprise*.sql` file is refused with exit 1 and nothing written, naming the file and
+`--from`; a file under an emitted name with other content is refused whatever `--from` says.
+Journal entries it adds start after the newest `when` already in the journal, so the migrator never
+skips them. `applyMigration()` runs every file on each call, and a second run of `0003` signs those
+members out once more. Where no org has `require_2fa = 1` (production on 2026-09-26), `0003`
+changes nothing.
 
 Check first, and add a redirect-to-enrolment on `enterprise.enrollmentRequired` in a product that
 offers password sign-in before upgrading:

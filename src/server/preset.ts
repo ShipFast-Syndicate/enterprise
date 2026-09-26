@@ -14,11 +14,13 @@ import { assertEnterpriseOptions } from "./options";
 import {
   API_KEY_HEADERS,
   API_KEY_LIFECYCLE_PLUGIN_ID,
+  API_KEY_STANDING_PLUGIN_ID,
   apiKeyLifecycle,
+  apiKeySessionStanding,
   enterpriseApiKeyValidator,
 } from "./api-keys";
 
-export { API_KEY_LIFECYCLE_PLUGIN_ID };
+export { API_KEY_LIFECYCLE_PLUGIN_ID, API_KEY_STANDING_PLUGIN_ID };
 
 /** 90 days, in seconds — the default lifetime of a key created without `expiresIn`. */
 const DEFAULT_API_KEY_EXPIRES_IN_S = 90 * 24 * 3600;
@@ -48,6 +50,11 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
     }),
     twoFactor(),
     passkey(),
+    // With the opt-in mock session on, a key whose owner does not stand under
+    // `require2fa` answers `/get-session` as "no session" (`null`): this
+    // plugin's before-hook has to run ahead of upstream's, which answers
+    // `/get-session` itself (`./api-keys.ts`).
+    ...(opts.apiKeys?.enableSessionForAPIKeys ? [apiKeySessionStanding()] : []),
     apiKey({
       // The header list is shared with `assertNotApiKeyRequest` (`./api-keys.ts`).
       apiKeyHeaders: [...API_KEY_HEADERS],
