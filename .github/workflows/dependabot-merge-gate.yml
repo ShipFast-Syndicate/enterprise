@@ -2,6 +2,7 @@
 # plus hold visibility (::warning:: + step summary) from
 # @79416e50a4754e7a7b94288c0d532cc7f822be9f, refactored here into report()
 # with a best-effort summary write (an OSError never changes the outcome).
+# Local addition: MAINTAINER_* updates (auth peers, release tooling) are held.
 # The hub's settled() mergeability wait at that revision is intentionally not
 # ported: after_ci below already re-reads the same head for two minutes.
 # Owned local copy because this public repository cannot call the private hub.
@@ -47,6 +48,7 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
+          import fnmatch
           import json
           import os
           import re
@@ -57,6 +59,19 @@ jobs:
 
           SUMMARY = 'ci / summary'
           HOLDS = {'hold', 'do-not-merge', 'wip'}
+          # Updates that always wait for a maintainer: the auth peer group, and
+          # everything the release job executes (semantic-release, its plugins
+          # and changelog preset, the build toolchain and the release job's
+          # actions). Dependabot still opens these PRs and CI still runs on
+          # them; only the automated merge is withheld.
+          MAINTAINER_GROUPS = {'better-auth', 'release-tooling'}
+          MAINTAINER_DEPENDENCIES = (
+              'better-auth', '@better-auth/*', 'better-call', '@better-fetch/*',
+              'semantic-release', 'semantic-release-*', '@semantic-release/*',
+              'conventional-changelog-*', 'conventional-commits-*',
+              'tsup', 'esbuild', '@esbuild/*', 'typescript',
+              'actions/checkout', 'actions/setup-node', 'actions/create-github-app-token',
+              'pnpm/action-setup')
 
           def api(path, method='GET', body=None):
               request = urllib.request.Request(
@@ -133,8 +148,11 @@ jobs:
               path = f'repos/{repo}/pulls/{number}'
               if not identity(reader(path), repo, head):
                   return 'hold: PR identity, mergeability or hold label'
-              if not update_allowed(reader, path, allowed):
+              metadata = update_allowed(reader, path, allowed)
+              if not metadata:
                   return 'hold: unsigned, unsupported or ineligible dependency update'
+              if maintainer_only(metadata):
+                  return 'hold: release tooling or auth dependency needs maintainer review'
               if not green(reader, repo, head, summary_run_url):
                   return 'hold: current-head CI is missing, pending or unsuccessful'
               reviews = latest([x for x in pages(reader, path + '/reviews?sort=created')
@@ -165,19 +183,32 @@ jobs:
               # Same authenticity boundary as fetch-metadata: first PR commit, exact
               # Dependabot author, and a verified commit signature. Later maintainer
               # commits are preserved and still need exact-head CI.
+              # Returns the verified metadata block, or None when ineligible.
               commits = reader(path + '/commits?per_page=1')
               if not commits:
-                  return False
+                  return None
               first = commits[0]
               if (first.get('author') or {}).get('login') != 'dependabot[bot]' or (first.get('commit') or {}).get('verification', {}).get('verified') is not True:
-                  return False
+                  return None
               message = first['commit'].get('message', '')
               blocks = re.findall(r'(?:^|\n)---\nupdated-dependencies:\n(.*?)\n\.\.\.(?:\n|$)', message, re.S)
               if len(blocks) != 1:
-                  return False
+                  return None
               dependencies = re.findall(r'^- dependency-name: .+$', blocks[0], re.M)
               updates = re.findall(r'^  update-type: (\S+)\s*$', blocks[0], re.M)
-              return bool(dependencies) and len(dependencies) == len(updates) and set(updates).issubset(permitted)
+              if bool(dependencies) and len(dependencies) == len(updates) and set(updates).issubset(permitted):
+                  return blocks[0]
+              return None
+
+          def maintainer_only(metadata):
+              # Names may be YAML-quoted (e.g. scoped npm packages); compare case-insensitively.
+              def values(field, indent):
+                  return [x.strip().strip('\'"') for x in re.findall(rf'^{indent}{field}: (.+?)\s*$', metadata, re.M)]
+              names = values('dependency-name', '- ')
+              groups = values('dependency-group', '  ')
+              return (not names
+                      or any(fnmatch.fnmatchcase(name.lower(), pattern) for name in names for pattern in MAINTAINER_DEPENDENCIES)
+                      or bool(MAINTAINER_GROUPS.intersection(groups)))
 
           def ci_pull_request(reader, repo, run_id, head):
               if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not str(run_id).isdigit() or not re.fullmatch(r'[0-9a-f]{40}', head):

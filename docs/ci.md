@@ -24,8 +24,12 @@ Branch protection continues to use `ci / summary`. This job requires:
   `release_grant` override.
 
 Failures, cancellations, missing reports and unexpected skipped jobs block the
-summary. The existing Dependabot policy skips only the Node quality job; security
-scans, dependency audit, build and CI contract tests still run. E2E and migration
+summary. Dependabot PRs run the full set, including the Node quality job (lint,
+typecheck, formatting, tests and coverage); none of these jobs use secrets. The
+Dependabot merge gate only merges patch/minor updates on a green exact head, and
+never merges the `better-auth` group or tooling the release job executes
+(semantic-release and its plugins, tsup, esbuild, typescript, the release job's
+actions): those PRs are opened and tested, then wait for a maintainer. E2E and migration
 dry-run jobs were disabled for this package and remain disabled. There is no
 numeric coverage threshold configured; the coverage command must succeed.
 
