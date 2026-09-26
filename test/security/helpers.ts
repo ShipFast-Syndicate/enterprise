@@ -79,3 +79,86 @@ export async function coreUserId(t: TestAuth, scimUserId: string): Promise<strin
   });
   return String(result.rows[0]!.userId);
 }
+
+/** Flips the `user.twoFactorEnabled` flag directly — for tests that only need the *state*, not a real enrolment. */
+export async function setTwoFactorEnabled(
+  t: TestAuth,
+  userId: string,
+  enabled: boolean,
+): Promise<void> {
+  await t.client.execute({
+    sql: `UPDATE user SET twoFactorEnabled = ? WHERE id = ?`,
+    args: [enabled ? 1 : 0, userId],
+  });
+}
+
+/** RFC 4648 base32 (no padding) → bytes, for the secret inside a `totpURI`. */
+function base32Decode(input: string): Uint8Array<ArrayBuffer> {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const clean = input.toUpperCase().replace(/=+$/, "");
+  const bytes: number[] = [];
+  let bits = 0;
+  let value = 0;
+  for (const char of clean) {
+    const index = alphabet.indexOf(char);
+    if (index === -1) throw new Error(`invalid base32 character ${JSON.stringify(char)}`);
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      bytes.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+  const out = new Uint8Array(new ArrayBuffer(bytes.length));
+  out.set(bytes);
+  return out;
+}
+
+/** RFC 6238 TOTP (HMAC-SHA1, 6 digits, 30 s) — what `twoFactor()`'s default `createOTP` verifies. */
+async function totpCode(secretBase32: string, digits = 6, period = 30): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    base32Decode(secretBase32),
+    { name: "HMAC", hash: "SHA-1" },
+    false,
+    ["sign"],
+  );
+  const counter = new DataView(new ArrayBuffer(8));
+  counter.setBigUint64(0, BigInt(Math.floor(Date.now() / 1000 / period)));
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, counter.buffer));
+  const offset = mac[mac.length - 1]! & 0x0f;
+  const binary =
+    ((mac[offset]! & 0x7f) << 24) |
+    (mac[offset + 1]! << 16) |
+    (mac[offset + 2]! << 8) |
+    mac[offset + 3]!;
+  return String(binary % 10 ** digits).padStart(digits, "0");
+}
+
+/**
+ * Real TOTP enrolment through the preset's `twoFactor()` plugin:
+ * `/two-factor/enable` (password re-auth) → parse the secret out of the
+ * returned `totpURI` → `/two-factor/verify-totp` with a code computed from
+ * it. Returns the post-enrolment session cookie (upstream re-issues the
+ * session on verification) and a `totp()` generator for later challenges.
+ */
+export async function enrollTotp(
+  t: TestAuth,
+  cookie: string,
+  password = "password1234",
+): Promise<{ cookie: string; totp: () => Promise<string> }> {
+  const enable = await t.api.post("/two-factor/enable", { password }, { cookie });
+  if (!enable.ok) {
+    throw new Error(`two-factor/enable failed: ${enable.status} ${await enable.text()}`);
+  }
+  const { totpURI } = (await enable.json()) as { totpURI: string };
+  const secret = new URL(totpURI).searchParams.get("secret");
+  if (!secret) throw new Error(`two-factor/enable returned no secret in ${totpURI}`);
+  const totp = () => totpCode(secret);
+  const verify = await t.api.post("/two-factor/verify-totp", { code: await totp() }, { cookie });
+  if (!verify.ok) {
+    throw new Error(`two-factor/verify-totp failed: ${verify.status} ${await verify.text()}`);
+  }
+  const setCookies = verify.headers.getSetCookie().map((raw) => raw.split(";")[0]);
+  return { cookie: setCookies.length ? setCookies.join("; ") : cookie, totp };
+}

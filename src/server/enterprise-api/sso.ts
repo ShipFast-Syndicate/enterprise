@@ -27,6 +27,7 @@ import {
 import type { GenericEndpointContext } from "better-auth";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
+import { domainMatches, emailDomain, normalizeProviderDomains } from "../policy/domains";
 import { getOrgPolicy, requireOrgMember, requireOwnerOrAdmin } from "../policy/store";
 import { forwardJson, forwardToAuth, relayStatus } from "./forward";
 
@@ -230,7 +231,28 @@ function buildRegisterEndpoint() {
       await requireOwnerOrAdmin(fullCtx, organizationId);
       await requireFeature(fullCtx, organizationId, "sso");
 
-      const { status, data } = await forwardJson(fullCtx, "POST", "/sso/register", ctx.body);
+      // Upstream `/sso/register` stores `domain` verbatim and matches it as a
+      // comma-separated, case-insensitive list; the enterprise read paths
+      // now match the same way (`../policy/domains.ts`, F-04). Storing the
+      // normalised form (trimmed, lower-cased, de-duplicated) keeps what an
+      // admin sees in the portal identical to what both halves match on —
+      // and refuses a list that neither half could ever match, instead of
+      // persisting a provider that silently authorises nobody.
+      const body: Record<string, unknown> = { ...ctx.body };
+      if (body.domain !== undefined) {
+        const domains =
+          typeof body.domain === "string" ? normalizeProviderDomains(body.domain) : null;
+        if (!domains) {
+          throw new APIError("BAD_REQUEST", {
+            code: "SSO_DOMAIN_INVALID",
+            message:
+              "domain must be a comma-separated list of plain hostnames (e.g. acme.test, acme-two.test).",
+          });
+        }
+        body.domain = domains.join(",");
+      }
+
+      const { status, data } = await forwardJson(fullCtx, "POST", "/sso/register", body);
       relayStatus(ctx, status);
       return ctx.json(data ? redactRegisterResponse(data) : data);
     },
@@ -313,11 +335,6 @@ function buildTestLoginStartEndpoint() {
 
 const testLoginFinishQuerySchema = z.object({ providerId: z.string() });
 
-function emailDomain(email: string): string | null {
-  const at = email.lastIndexOf("@");
-  return at === -1 ? null : email.slice(at + 1).toLowerCase();
-}
-
 // Every check on this endpoint is local, and the org it acts on is derived
 // from the **provider row**, never from the session (C-1).
 //
@@ -382,9 +399,13 @@ function buildTestLoginFinishEndpoint() {
         model: "ssoProvider",
         where: [{ field: "providerId", value: providerId }],
       });
-      const domains = (provider?.domain ?? "").split(",").map((d) => d.trim().toLowerCase());
-      const userDomain = emailDomain(session.user.email);
-      if (!provider || !userDomain || !domains.includes(userDomain)) throw fail("domain_mismatch");
+      // Same matcher as every other enterprise read path (`domainMatches`,
+      // `../policy/domains.ts`): comma lists, any case, subdomains — an admin
+      // on `eu.acme.test` passes the test login for an `acme.test` provider
+      // exactly as upstream would let them sign in through it (F-04).
+      if (!provider || !domainMatches(emailDomain(session.user.email), provider.domain)) {
+        throw fail("domain_mismatch");
+      }
 
       // The org this whole request is about. `enterprisePreset` only ever
       // registers org-scoped providers, so a row without one is a hand-made

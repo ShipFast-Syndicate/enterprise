@@ -56,6 +56,20 @@ export const ALLOWED_METHOD_VALUES = [
   "passkey",
 ] as const;
 
+/**
+ * The vocabulary `POST /enterprise/policy/set` accepts for `allowedMethods`:
+ * the closed set above plus every method name the product declared through
+ * `policy.signInMethods` (`../types.ts`) — so an org can list `email_otp`
+ * once the product maps `/sign-in/email-otp` to it. De-duplicated, closed
+ * set first. Validation of the option itself lives in `../options.ts`.
+ */
+export function allowedMethodValues(opts?: {
+  policy?: { signInMethods?: Record<string, string> };
+}): string[] {
+  const declared = Object.values(opts?.policy?.signInMethods ?? {});
+  return [...new Set<string>([...ALLOWED_METHOD_VALUES, ...declared])];
+}
+
 function defaultPolicy(orgId: string): OrgPolicy {
   return {
     orgId,
@@ -304,8 +318,9 @@ export async function isOrgOwner(
 
 /**
  * All `organizationId`s a user belongs to, via a raw `member` scan — used by
- * `./enforcement.ts`'s `resolvePolicyOrgForUser` to find "the user's single
- * org" without assuming a particular adapter's `distinct`/`groupBy` support.
+ * `./enforcement.ts`'s `resolvePolicyOrgsForUser` to collect every org with
+ * a claim on the user, without assuming a particular adapter's
+ * `distinct`/`groupBy` support.
  */
 export async function memberOrgIds(ctx: GenericEndpointContext, userId: string): Promise<string[]> {
   const rows = await ctx.context.adapter.findMany<{ organizationId: string }>({

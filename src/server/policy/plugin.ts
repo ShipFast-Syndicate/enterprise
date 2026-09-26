@@ -9,10 +9,11 @@
 // - `./store.ts` — the `OrgPolicy` shape, defaults, and org-membership/role
 //   reads (`getOrgPolicy`, `getMemberRoles`, `requireOrgMember`,
 //   `requireOwnerOrAdmin`, `isOrgOwner`).
-// - `./enforcement.ts` — sign-in `hooks.before`, the `databaseHooks.
-//   session.create.before` backstop, and `resolvePolicyOrgForUser` (the
-//   membership-first, domain-fallback org resolver both enforcement points
-//   share).
+// - `./enforcement.ts` — the `/magic-link/verify` `hooks.before`
+//   pre-flight, the `databaseHooks.session.create.before` backstop, the
+//   `databaseHooks.session.update.before` refresh clamp, and
+//   `resolvePolicyOrgsForUser` (the union-of-orgs resolver every
+//   enforcement point feeds into `getEffectivePolicy`).
 // SCIM deactivation runs in the native identity transaction (../scim.ts).
 // - `./home-realm.ts` — `findOrgByEmailDomain` and the public
 //   `/enterprise/home-realm` endpoint.
@@ -37,11 +38,15 @@ import {
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
 import type { EnterpriseOptions } from "../types";
-import { buildSessionCreateBeforeHook, buildSignInBeforeHook } from "./enforcement";
+import {
+  buildSessionCreateBeforeHook,
+  buildSessionUpdateBeforeHook,
+  buildSignInBeforeHook,
+} from "./enforcement";
 import { findOrgByEmailDomain, HOME_REALM_RATE_LIMIT, homeRealmEndpoint } from "./home-realm";
 import { buildScimRequiredUserCreateBeforeHook } from "./scim-required";
 import {
-  ALLOWED_METHOD_VALUES,
+  allowedMethodValues,
   findPolicyRow,
   getOrgPolicy,
   isOrgOwner,
@@ -53,7 +58,7 @@ import {
 
 export type { OrgPolicy } from "./store";
 export { ALLOWED_METHOD_VALUES } from "./store";
-export { deriveSessionCreateMethod } from "./enforcement";
+export { classifySessionCreate, deriveSessionCreateMethod } from "./enforcement";
 
 // --- SSO-enforcement preconditions (controller ruling (b)) -----------------
 
@@ -97,17 +102,27 @@ export async function getPolicyPreconditions(
 
 const getPolicyQuerySchema = z.object({ orgId: z.string() });
 
-const setPolicyBodySchema = z.object({
-  orgId: z.string(),
-  require2fa: z.boolean().optional(),
-  ssoEnforced: z.boolean().optional(),
-  breakGlassUserId: z.string().nullable().optional(),
-  sessionMaxAgeS: z.number().int().positive().nullable().optional(),
-  allowedMethods: z.array(z.enum(ALLOWED_METHOD_VALUES)).min(1).optional(),
-  groupRoleMap: z.record(z.string(), z.enum(["owner", "admin", "member"])).optional(),
-});
+/**
+ * `allowedMethods` accepts the closed `ALLOWED_METHOD_VALUES` set plus the
+ * method names the product declared in `policy.signInMethods`
+ * (`allowedMethodValues`, `./store.ts`) — the only way an org can list a
+ * sign-in plugin this preset does not ship.
+ */
+function buildSetPolicyBodySchema(opts: EnterpriseOptions) {
+  const methods = allowedMethodValues(opts) as [string, ...string[]];
+  return z.object({
+    orgId: z.string(),
+    require2fa: z.boolean().optional(),
+    ssoEnforced: z.boolean().optional(),
+    breakGlassUserId: z.string().nullable().optional(),
+    sessionMaxAgeS: z.number().int().positive().nullable().optional(),
+    allowedMethods: z.array(z.enum(methods)).min(1).optional(),
+    groupRoleMap: z.record(z.string(), z.enum(["owner", "admin", "member"])).optional(),
+  });
+}
 
-function buildPolicyEndpoints() {
+function buildPolicyEndpoints(opts: EnterpriseOptions) {
+  const setPolicyBodySchema = buildSetPolicyBodySchema(opts);
   const getPolicy = createAuthEndpoint(
     "/enterprise/policy",
     { method: "GET", use: [sessionMiddleware], query: getPolicyQuerySchema },
@@ -331,7 +346,7 @@ export function orgPolicy(opts: EnterpriseOptions) {
         },
       },
     },
-    endpoints: { ...buildPolicyEndpoints(), enterpriseHomeRealm: homeRealmEndpoint },
+    endpoints: { ...buildPolicyEndpoints(opts), enterpriseHomeRealm: homeRealmEndpoint },
     rateLimit: [HOME_REALM_RATE_LIMIT],
     hooks: {
       before: [buildSignInBeforeHook()],
@@ -356,7 +371,12 @@ export function orgPolicy(opts: EnterpriseOptions) {
           databaseHooks: {
             session: {
               create: {
-                before: buildSessionCreateBeforeHook(),
+                before: buildSessionCreateBeforeHook(opts),
+              },
+              // F-05: `/get-session`'s refresh rewrites `expiresAt` to the
+              // global lifetime; the clamp keeps it within `sessionMaxAgeS`.
+              update: {
+                before: buildSessionUpdateBeforeHook(),
               },
             },
             // Task 8, controller ruling (e): "SSO only for SCIM-active

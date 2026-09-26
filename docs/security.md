@@ -45,6 +45,60 @@ domain. Users and Groups enforce the same `scim` entitlement before mutation.
   before it reaches a browser client is application logic in scope for that audit's part 2, not
   this document.
 
+## Policy resolution and enforcement points
+
+`org_policy` is enforced against the **union of every organization with a claim on the user**,
+never against one "chosen" org:
+
+- **Which orgs.** `resolvePolicyOrgsForUser` (`src/server/policy/enforcement.ts`) collects the
+  request's active organization, every org the user holds a `member` row in, and every org owning
+  a domain-verified SSO provider whose `domain` list authorises the user's e-mail domain
+  (`findOrgsByEmailDomain` — comma-separated lists, case-insensitive, subdomains, the same rules
+  upstream `@better-auth/sso` applies). An empty set means no policy applies (free agents are
+  unchanged). A non-empty set is never narrowed by ambiguity: the old resolver returned _no_ org
+  for a user in two or more orgs, so any member could shed their org's `ssoEnforced`/
+  `allowedMethods` by creating a second organization (F-03). Self-serve org creation stays on
+  (`organization.allowUserToCreateOrganization`, default `true`) precisely because it is no longer
+  an escape hatch.
+- **Effective policy** (`getEffectivePolicy`, `src/server/policy/store.ts`): `ssoEnforced` is OR
+  over the orgs where the user is _not_ that org's break-glass user; `allowedMethods` is the
+  intersection over the same orgs; `sessionMaxAgeS` is the minimum over all orgs; `require2fa` is
+  OR over all orgs. **Break-glass is per org** — the break-glass owner of org A is still bound by
+  org B's rules. Two orgs whose `allowedMethods` do not overlap lock their shared member out of
+  every sign-in method; that is the configuration, not a bug — check the intersection before
+  narrowing a list.
+- **Where.** `databaseHooks.session.create.before` is the backstop every sign-in path funnels
+  through _after_ upstream has checked the credential (password, social, passkey, magic link, the
+  SSO callback itself). The only pre-authentication hook left is on `/magic-link/verify`, whose
+  pending token — not a guessable address — is what identifies the user. `/sign-in/email` and
+  `/sign-in/magic-link` are deliberately no longer pre-flighted: answering `SSO_REQUIRED` before
+  the password was checked told a stranger "this address belongs to an SSO-enforced org" (audit
+  gap 3); a wrong password is now a plain `401`.
+- **Classification** (`classifySessionCreate`): the path creating the session maps to a method
+  name (`password`, `magic_link`, `passkey`, `sso`, the social provider id) which `allowedMethods`
+  binds once some org has narrowed the list; a _continuation_ (`/two-factor/verify-*`,
+  `/two-factor/enable|disable`, `/verify-email`, `/change-password`, `/admin/impersonate-user`)
+  re-issues a session inside a flow whose method was already enforced and is never refused as a
+  method; anything else is **unknown** and is refused (`METHOD_NOT_ALLOWED`) for a user under any
+  restriction (audit gap 4). A product that ships a sign-in plugin this preset does not (e-mail
+  OTP, phone, username, generic OAuth, SIWE, …) declares it in `policy.signInMethods`
+  (`"/sign-in/email-otp": "email_otp"`, or a prefix `"/phone/*": "phone"`); the declared names
+  become valid `allowedMethods` values on `POST /enterprise/policy/set`. An org that never narrowed
+  `allowedMethods` allows every method, declared or not.
+- **Session cap.** `sessionMaxAgeS` is applied at creation (`expiresAt = min(requested, now +
+cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now + expiresIn`
+  once `session.updateAge` has elapsed, which silently restored the global 7-day lifetime on the
+  first authenticated request (F-05). `databaseHooks.session.update.before` now clamps that write to
+  `createdAt + cap` for the session being refreshed. Tightening a cap below a live session's age
+  ends that session at its next refresh. `session.disableSessionRefresh` and `updateAge` keep
+  their upstream meaning; the cap is an upper bound on top of them, and the browser cookie's
+  `Max-Age` may outlive the row (the server side is authoritative).
+- **SCIM-required JIT** (`src/server/policy/scim-required.ts`) refuses an SSO-callback account
+  creation when _any_ org matched by the e-mail domain has a live SCIM connection; the SSO
+  test-login finish and `/enterprise/sso/register` use the same domain matcher, and register stores
+  the normalised list (trimmed, lower-cased, de-duplicated) or refuses one that could never match
+  (`SSO_DOMAIN_INVALID`).
+
 ## Audit chain limits
 
 - The hash chain (`audit_event.prev_hash`/`hash`) is **per organization**, not global — `seq`

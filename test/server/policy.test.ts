@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { magicLink } from "better-auth/plugins";
 import { orgPolicy } from "../../src/server/policy/plugin";
 import {
+  classifySessionCreate,
   deriveSessionCreateMethod,
   buildSessionCreateBeforeHook,
 } from "../../src/server/policy/enforcement";
@@ -315,7 +316,7 @@ describe("sign-in enforcement + session-creation backstop", () => {
     return { cookie, ownerId, orgId };
   }
 
-  it("magic-link sign-in for a non-break-glass user in the SSO-enforced org -> 403 SSO_REQUIRED", async () => {
+  it("magic-link for a non-break-glass user in the SSO-enforced org: the request is not an oracle, the verify step is 403 SSO_REQUIRED", async () => {
     const sent: Array<{ email: string; token: string }> = [];
     const t = await makeAuth({
       plugins: [
@@ -328,11 +329,20 @@ describe("sign-in enforcement + session-creation backstop", () => {
     });
     await setUpSsoEnforcedOrg(t, ["bob@acme.test"]);
 
+    // Audit gap 3: refusing `/sign-in/magic-link` before any credential was
+    // presented told a stranger "this address belongs to an SSO-enforced
+    // org's member". The request now answers exactly as for any address;
+    // the link itself is what gets refused.
     const res = await t.api.post("/sign-in/magic-link", { email: "bob@acme.test" }, {});
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
 
-    expect(res.status).toBe(403);
-    expect((await res.json()).code).toBe("SSO_REQUIRED");
-    expect(sent).toHaveLength(0); // blocked before the link was ever sent
+    const sessionsBefore = (await t.client.execute(`SELECT id FROM session`)).rows.length;
+    const verifyRes = await t.api.get(`/magic-link/verify?token=${sent[0]!.token}`);
+    expect(verifyRes.status).toBe(403);
+    expect((await verifyRes.json()).code).toBe("SSO_REQUIRED");
+    const sessionsAfter = (await t.client.execute(`SELECT id FROM session`)).rows.length;
+    expect(sessionsAfter).toBe(sessionsBefore); // the refused link minted no session
   });
 
   it("magic-link sign-in for the break-glass owner succeeds end to end (request + verify)", async () => {
@@ -464,7 +474,7 @@ describe("sign-in enforcement + session-creation backstop", () => {
   });
 });
 
-describe("resolvePolicyOrgForUser (via the sign-in backstop, membership priority)", () => {
+describe("resolvePolicyOrgsForUser (via the sign-in backstop, union of every org with a claim)", () => {
   it("a single, unambiguous org membership resolves the policy even with no SSO provider configured at all", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");
@@ -486,7 +496,7 @@ describe("resolvePolicyOrgForUser (via the sign-in backstop, membership priority
     expect((await res.json()).code).toBe("METHOD_NOT_ALLOWED");
   });
 
-  it("a user belonging to two orgs is ambiguous — membership resolution defers, so no policy applies without a matching SSO domain", async () => {
+  it("a user belonging to two orgs gets the union of both policies — never none (F-03)", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId: orgA } = await createOrg(t, cookie, "acme-a");
@@ -508,9 +518,32 @@ describe("resolvePolicyOrgForUser (via the sign-in backstop, membership priority
       {},
     );
 
-    // Neither org's policy is applied — ambiguous membership, and
-    // owner@acme.test's domain has no verified ssoProvider either.
-    expect(res.status).toBe(200);
+    // Both orgs exclude `password`; two memberships used to resolve to *no*
+    // org at all (the F-03 escape hatch: any member could create a second
+    // org to shed the first one's policy). The intersection binds.
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("METHOD_NOT_ALLOWED");
+  });
+
+  it("two orgs, only one of them restrictive — the restrictive one still binds", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId: orgA } = await createOrg(t, cookie, "acme-a");
+    await createOrg(t, cookie, "acme-b"); // unrestricted second org
+    await t.api.post(
+      "/enterprise/policy/set",
+      { orgId: orgA, allowedMethods: ["sso"] },
+      { cookie },
+    );
+
+    const res = await t.api.post(
+      "/sign-in/email",
+      { email: "owner@acme.test", password: "password1234" },
+      {},
+    );
+
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("METHOD_NOT_ALLOWED");
   });
 });
 
@@ -532,10 +565,19 @@ describe("deriveSessionCreateMethod (session-creation backstop's path -> method 
     ).toBe("linkedin");
   });
 
-  it("returns null (never blocked) for unrecognized paths", () => {
+  it("returns null for unrecognized paths, which classifySessionCreate reports as `unknown` (refused under a restricted policy, gap 4)", () => {
     expect(deriveSessionCreateMethod({ path: "/some/other/endpoint" })).toBeNull();
     expect(deriveSessionCreateMethod({})).toBeNull();
     expect(deriveSessionCreateMethod({ path: "/callback/:id" })).toBeNull(); // pattern, no params.id
+    expect(classifySessionCreate({ path: "/some/other/endpoint" })).toEqual({
+      kind: "unknown",
+      path: "/some/other/endpoint",
+    });
+    expect(classifySessionCreate({})).toEqual({ kind: "unknown", path: null });
+    expect(classifySessionCreate({ path: "/callback/:id" })).toEqual({
+      kind: "unknown",
+      path: "/callback/:id",
+    });
   });
 });
 
@@ -574,8 +616,8 @@ describe("sessionMaxAgeS", () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, cookie);
-    // `resolvePolicyOrgForUser` (`../../src/server/policy/enforcement.ts`)
-    // resolves the org via the owner's single, unambiguous `member` row —
+    // `resolvePolicyOrgsForUser` (`../../src/server/policy/enforcement.ts`)
+    // resolves the org via the owner's `member` row —
     // no `ssoProvider` row exists for this org at all, proving
     // `sessionMaxAgeS` enforcement isn't tied to SSO being configured.
     const setRes = await t.api.post(

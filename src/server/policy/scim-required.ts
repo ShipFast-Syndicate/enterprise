@@ -14,11 +14,13 @@
 // `databaseHooks.user.create.before`, the same mechanism `./enforcement.ts`'s
 // session-creation backstop already uses for policy enforcement that has no
 // upstream per-org knob: it only inspects requests whose path names one of
-// the two SSO callback route families, resolves the org via the new user's
-// *verified* email domain (`findOrgByEmailDomain`, `./home-realm.ts` — the
-// same lookup the home-realm endpoint and `./enforcement.ts`'s policy
-// resolution both already use), and refuses account creation when that org
-// has any `scimManagedConnection` row.
+// the two SSO callback route families, resolves **every** org owning a
+// verified SSO provider for the new user's email domain
+// (`findOrgsByEmailDomain`, `./home-realm.ts` — the same upstream-parity
+// lookup the home-realm endpoint and `./enforcement.ts`'s policy resolution
+// both use, so a comma-list, mixed-case or subdomain provider matches here
+// too, F-04), and refuses account creation when **any** of those orgs has a
+// live `scimManagedConnection` row.
 //
 // `ctx.path` at a `databaseHooks` call site cannot be trusted to be either
 // the registered route *pattern* or the concrete resolved path (see
@@ -40,7 +42,7 @@
 
 import type { GenericEndpointContext } from "better-auth";
 import { APIError } from "better-auth/api";
-import { findOrgByEmailDomain } from "./home-realm";
+import { findOrgsByEmailDomain } from "./home-realm";
 
 function isSsoCallbackPath(path: string | undefined): boolean {
   if (!path) return false;
@@ -49,8 +51,8 @@ function isSsoCallbackPath(path: string | undefined): boolean {
 
 /**
  * `databaseHooks.user.create.before` — refuses a new user row being created
- * from an SSO callback when the org owning a verified SSO provider for the
- * user's email domain has any SCIM provider connected. Never blocks account
+ * from an SSO callback when any org owning a verified SSO provider for the
+ * user's email domain has a SCIM provider connected. Never blocks account
  * creation from any other path (email/password sign-up, magic link, social
  * sign-in, a SCIM-driven `/scim/v2/Users` POST, ...) — only the two SSO
  * callback route families above, and only once a domain match resolves an
@@ -66,21 +68,21 @@ export function buildScimRequiredUserCreateBeforeHook() {
     const email = typeof user.email === "string" ? user.email : null;
     if (!email) return;
 
-    const match = await findOrgByEmailDomain(ctx, email);
-    if (!match) return;
+    const orgIds = new Set((await findOrgsByEmailDomain(ctx, email)).map((m) => m.orgId));
+    for (const orgId of orgIds) {
+      const scimManagedConnection = await ctx.context.adapter.findOne({
+        model: "scimManagedConnection",
+        where: [
+          { field: "provisioningDomainId", value: orgId },
+          { field: "status", value: "decommissioned", operator: "ne" },
+        ],
+      });
+      if (!scimManagedConnection) continue;
 
-    const scimManagedConnection = await ctx.context.adapter.findOne({
-      model: "scimManagedConnection",
-      where: [
-        { field: "provisioningDomainId", value: match.orgId },
-        { field: "status", value: "decommissioned", operator: "ne" },
-      ],
-    });
-    if (!scimManagedConnection) return;
-
-    throw new APIError("FORBIDDEN", {
-      code: "SCIM_PROVISIONING_REQUIRED",
-      message: "Your account was not provisioned by your IT admin",
-    });
+      throw new APIError("FORBIDDEN", {
+        code: "SCIM_PROVISIONING_REQUIRED",
+        message: "Your account was not provisioned by your IT admin",
+      });
+    }
   };
 }

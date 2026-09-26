@@ -1,14 +1,32 @@
 // Alpha Bros enterprise layer — sign-in enforcement, session-creation
-// backstop, and policy-org resolution (controller ruling (d)).
+// backstop, session-refresh clamp, and policy-org resolution.
 //
-// Depends only on `./home-realm` (a leaf) and `./store` (a leaf) — not on
-// `./plugin.ts` — so `./plugin.ts` can import everything here without a
-// cycle.
+// Depends only on `./home-realm` (a leaf), `./store` (a leaf) and
+// `../audit/refusal` (a leaf) — not on `./plugin.ts` — so `./plugin.ts` can
+// import everything here without a cycle.
+//
+// Where each policy field is enforced:
+//
+// - `ssoEnforced` / `allowedMethods` — `buildSessionCreateBeforeHook`
+//   (`databaseHooks.session.create.before`), the one place every sign-in
+//   path funnels through *after* the credential has been checked. The only
+//   pre-authentication hook left is the `/magic-link/verify` pre-flight
+//   (`buildSignInBeforeHook`), whose "credential" — the pending token — is
+//   what resolves the e-mail, so refusing there reveals nothing a stranger
+//   could not already learn. `/sign-in/email` and `/sign-in/magic-link` are
+//   deliberately *not* pre-flighted any more: answering `SSO_REQUIRED` before
+//   the password was checked told anyone "this address is a member of an
+//   SSO-enforced org" (audit gap 3).
+// - `sessionMaxAgeS` — the same create hook (cap at creation) plus
+//   `buildSessionUpdateBeforeHook` (`databaseHooks.session.update.before`),
+//   which clamps the refresh `/get-session` writes back (F-05).
 
 import type { GenericEndpointContext } from "better-auth";
 import { APIError, createAuthMiddleware } from "better-auth/api";
-import { findOrgByEmailDomain, findOrgsByEmailDomain } from "./home-realm";
-import { getOrgPolicy, memberOrgIds } from "./store";
+import { auditRefusal } from "../audit/refusal";
+import type { EnterpriseOptions } from "../types";
+import { findOrgsByEmailDomain } from "./home-realm";
+import { getEffectivePolicy, memberOrgIds, type EffectivePolicy } from "./store";
 
 // --- policy-org resolution -------------------------------------------------
 
@@ -19,12 +37,12 @@ import { getOrgPolicy, memberOrgIds } from "./store";
  * (`findOrgsByEmailDomain`, upstream-parity matching). De-duplicated, in that
  * order. Feed the result to `getEffectivePolicy` (`./store.ts`).
  *
- * This replaces the single-org, priority-ordered `resolvePolicyOrgForUser`
- * below, which returned `null` — no policy at all — for a user in two or
- * more orgs and let any member escape `ssoEnforced`/`allowedMethods` by
- * creating a second organization (F-03). An empty result still means "no
- * policy applies" (free agents unchanged); a non-empty one is never
- * narrowed by ambiguity.
+ * This replaced the single-org, priority-ordered `resolvePolicyOrgForUser`,
+ * which returned `null` — no policy at all — for a user in two or more orgs
+ * and let any member escape `ssoEnforced`/`allowedMethods` by creating a
+ * second organization (F-03). An empty result still means "no policy
+ * applies" (free agents unchanged); a non-empty one is never narrowed by
+ * ambiguity.
  */
 export async function resolvePolicyOrgsForUser(
   ctx: GenericEndpointContext,
@@ -39,66 +57,157 @@ export async function resolvePolicyOrgsForUser(
   return [...orgIds];
 }
 
+// --- sign-in method classification ---------------------------------------
+
+export type SessionCreateClassification =
+  /** A sign-in method this layer knows by name; subject to `allowedMethods`. */
+  | { kind: "method"; method: string }
+  /**
+   * A session (re)issued inside a flow the user already authenticated for —
+   * a 2FA challenge answered, e-mail verified, password changed, 2FA
+   * toggled, an admin impersonating. The sign-in method was classified and
+   * enforced when the flow started; the continuation itself is not a
+   * method and is never refused as one.
+   */
+  | { kind: "continuation"; path: string }
+  /**
+   * A session-creating path this layer cannot name. Refused for a user under
+   * a restricted policy (fail closed, audit gap 4); a product that ships such
+   * a plugin declares it in `policy.signInMethods`.
+   */
+  | { kind: "unknown"; path: string | null };
+
 /**
- * Resolves which org's policy applies to a user, in priority order:
- *
- * 1. The session/request's active organization, if one is known —
- *    trustworthy as-is, same convention `../gate.ts`'s `GATED_PATHS`
- *    resolver already uses for `session.activeOrganizationId`.
- * 2. The org the user is a member of, *if they belong to exactly one* — an
- *    unambiguous single-org membership is a much stronger signal than a
- *    shared SSO domain (a domain match only tells you the *domain* has SSO
- *    configured somewhere, not that this particular user is that org's
- *    member). Zero or multiple memberships fall through — this resolver
- *    can't disambiguate which of several orgs a policy check should target,
- *    so it defers to the domain signal instead of guessing.
- * 3. The org owning a verified `ssoProvider` for the user's email domain
- *    (`findOrgByEmailDomain`, `./home-realm.ts`) — the only signal available
- *    pre-authentication (no session/membership exists yet) or for a user
- *    who isn't a member of any org at all yet (SCIM/SSO JIT provisioning).
- * 4. `null` — no policy is resolvable, so no enforcement applies.
+ * Session-creating paths that are not a sign-in method of their own (see
+ * `SessionCreateClassification["kind"] === "continuation"`). Every entry was
+ * traced to an `internalAdapter.createSession` call in the pinned
+ * better-auth 1.7.5 or one of the preset's plugins.
  */
-export async function resolvePolicyOrgForUser(
-  ctx: GenericEndpointContext,
-  params: { userId: string; email: string; activeOrganizationId?: string | null },
-): Promise<string | null> {
-  if (params.activeOrganizationId) return params.activeOrganizationId;
-
-  const orgIds = await memberOrgIds(ctx, params.userId);
-  if (orgIds.length === 1) return orgIds[0]!;
-
-  const match = await findOrgByEmailDomain(ctx, params.email);
-  return match?.orgId ?? null;
-}
-
-// --- sign-in pre-flight (hooks.before on the sign-in paths) ---------------
-
-const SIGNIN_ENFORCEMENT_PATHS = new Set<string>([
-  "/sign-in/email",
-  "/sign-in/social",
-  "/sign-in/magic-link",
-  "/sign-in/passkey",
-  "/magic-link/verify",
+const CONTINUATION_PATHS = new Set<string>([
+  "/two-factor/verify-totp",
+  "/two-factor/verify-otp",
+  "/two-factor/verify-backup-code",
+  "/two-factor/enable",
+  "/two-factor/disable",
+  "/verify-email",
+  "/change-password",
+  "/admin/impersonate-user",
 ]);
 
-// Only `/sign-in/email`/`/sign-in/magic-link`/`/magic-link/verify` ever
-// resolve an email pre-authentication (see `resolveSignInEmail` below);
-// `/sign-in/social`/`/sign-in/passkey` always resolve `null` there, so
-// `enforceForEmail` never runs for them from this hook — enforcement for
-// those two (and for `allowedMethods` generally, which needs the org
-// resolved via the *authenticated* user, not just an unauthenticated email
-// guess) is `buildSessionCreateBeforeHook`'s job below.
-function deriveMethod(path: string): "password" | "magic_link" | null {
-  switch (path) {
-    case "/sign-in/email":
-      return "password";
-    case "/sign-in/magic-link":
-    case "/magic-link/verify":
-      return "magic_link";
-    default:
-      return null;
+function classifyFromOptions(path: string, opts: EnterpriseOptions | undefined): string | null {
+  const map = opts?.policy?.signInMethods;
+  if (!map) return null;
+  const exact = map[path];
+  if (typeof exact === "string") return exact;
+  for (const [key, method] of Object.entries(map)) {
+    if (!key.endsWith("/*")) continue;
+    const prefix = key.slice(0, -1); // keep the trailing slash: "/phone/*" -> "/phone/"
+    if (path.startsWith(prefix)) return method;
   }
+  return null;
 }
+
+/**
+ * Classifies the endpoint whose call is creating a session. `ctx.path`
+ * inside a request handler can be either the endpoint's registered
+ * *pattern* (`/callback/:id`, with the provider in `ctx.params.id`) or a
+ * *concrete* resolved path (`/callback/google`) — `../audit/plugin.ts`'s
+ * header comment documents this ambiguity across better-auth dispatch
+ * layers — so both forms are handled here rather than assuming one.
+ *
+ * Order: the product's `policy.signInMethods` first (so a product can
+ * re-name or add a path), then the built-in map for the methods this
+ * preset's own plugins expose, then continuations, then `unknown`.
+ */
+export function classifySessionCreate(
+  ctx: { path?: string; params?: Record<string, string | undefined>; body?: unknown },
+  opts?: EnterpriseOptions,
+): SessionCreateClassification {
+  const path = ctx.path;
+  if (!path) return { kind: "unknown", path: null };
+
+  const configured = classifyFromOptions(path, opts);
+  if (configured) return { kind: "method", method: configured };
+
+  if (path === "/sign-in/email" || path === "/sign-up/email") {
+    return { kind: "method", method: "password" };
+  }
+  if (path === "/magic-link/verify") return { kind: "method", method: "magic_link" };
+  if (path === "/passkey/verify-authentication" || path === "/passkey/verify-registration") {
+    return { kind: "method", method: "passkey" };
+  }
+  if (path.startsWith("/sso/")) return { kind: "method", method: "sso" };
+  if (path === "/sign-in/social") {
+    const body = ctx.body as { provider?: unknown } | undefined;
+    return typeof body?.provider === "string"
+      ? { kind: "method", method: body.provider }
+      : { kind: "unknown", path };
+  }
+  const callbackMatch = /^\/callback\/(.+)$/.exec(path);
+  if (callbackMatch) {
+    const segment = callbackMatch[1];
+    if (segment && segment !== ":id") return { kind: "method", method: segment }; // concrete: /callback/google
+    const id = ctx.params?.id;
+    return typeof id === "string" ? { kind: "method", method: id } : { kind: "unknown", path }; // pattern: /callback/:id
+  }
+  if (CONTINUATION_PATHS.has(path)) return { kind: "continuation", path };
+  return { kind: "unknown", path };
+}
+
+/**
+ * The sign-in *method* a session-creating call carries, or `null` when the
+ * path is a continuation or unknown — a thin wrapper over
+ * `classifySessionCreate` kept for callers (and tests) that only need the
+ * name. `null` no longer means "never blocked": see the hook below.
+ */
+export function deriveSessionCreateMethod(
+  ctx: { path?: string; params?: Record<string, string | undefined>; body?: unknown },
+  opts?: EnterpriseOptions,
+): string | null {
+  const classified = classifySessionCreate(ctx, opts);
+  return classified.kind === "method" ? classified.method : null;
+}
+
+// --- shared refusal helpers ------------------------------------------------
+
+function ssoRequiredError(): APIError {
+  return new APIError("FORBIDDEN", {
+    code: "SSO_REQUIRED",
+    message: "Your organization requires SSO",
+  });
+}
+
+function methodNotAllowedError(method: string): APIError {
+  return new APIError("FORBIDDEN", {
+    code: "METHOD_NOT_ALLOWED",
+    message: `Sign-in method "${method}" is not allowed for this organization.`,
+  });
+}
+
+/**
+ * `allowedMethods` binds only once some contributing org actually narrowed
+ * the list (`sources.allowedMethodsBy`). An org that never touched it — or
+ * stored the full closed set — allows every method, including ones a
+ * product declares through `policy.signInMethods` that the closed set cannot
+ * name; a narrowed org allows exactly its list.
+ */
+function methodRefusedBy(eff: EffectivePolicy, method: string): boolean {
+  return eff.sources.allowedMethodsBy.length > 0 && !eff.allowedMethods.includes(method);
+}
+
+// --- sign-in pre-flight (hooks.before on /magic-link/verify) --------------
+
+/**
+ * The only sign-in path still pre-flighted. Password sign-in is enforced by
+ * the session-creation backstop after the credential check; the magic-link
+ * *request* is left alone (it must not reveal whether the address belongs
+ * to a policy-bound member — gap 3). The *verify* step is safe to pre-flight
+ * because the pending token, not a guessable e-mail, is what identifies the
+ * user — and refusing before the real handler runs keeps the single-use
+ * token unconsumed, which the audit row and the user's next attempt both
+ * want.
+ */
+const SIGNIN_ENFORCEMENT_PATHS = new Set<string>(["/magic-link/verify"]);
 
 /** Web-Crypto reimplementation of `magicLink`'s default `storeToken: "hashed"` hasher (see `resolveSignInEmail` below for why). */
 async function hashMagicLinkToken(token: string): Promise<string> {
@@ -109,13 +218,12 @@ async function hashMagicLinkToken(token: string): Promise<string> {
 }
 
 /**
- * Resolves the email a sign-in request is *for* — straightforward for
- * `/sign-in/email`/`/sign-in/magic-link` (`body.email`); for
- * `/magic-link/verify` (a GET with a `?token=`, no email in the request)
- * best-effort via a non-destructive `findVerificationValue` read of the
- * still-pending token (never `consumeVerificationValue` — that's the real
- * endpoint's job, and consuming it here would burn the token before the
- * user's actual verification request).
+ * Resolves the email a `/magic-link/verify` request (a GET with a
+ * `?token=`, no email in the request) is *for*, best-effort via a
+ * non-destructive `findVerificationValue` read of the still-pending token
+ * (never `consumeVerificationValue` — that's the real endpoint's job, and
+ * consuming it here would burn the token before the user's actual
+ * verification request).
  *
  * `magicLink`'s `storeToken` option controls what identifier the
  * verification row is actually keyed by
@@ -131,63 +239,54 @@ async function hashMagicLinkToken(token: string): Promise<string> {
  * to the `databaseHooks.session.create.before` backstop) for a custom
  * hasher or an already-consumed/unknown token.
  */
-async function resolveSignInEmail(
+async function resolveMagicLinkEmail(
   ctx: GenericEndpointContext,
-  path: string,
-  body: { email?: unknown } | undefined,
   query: { token?: unknown } | undefined,
 ): Promise<string | null> {
-  if (path === "/sign-in/email" || path === "/sign-in/magic-link") {
-    return typeof body?.email === "string" ? body.email : null;
-  }
-  if (path === "/magic-link/verify") {
-    const token = typeof query?.token === "string" ? query.token : null;
-    if (!token) return null;
-    const candidates = [token, await hashMagicLinkToken(token)];
-    for (const identifier of candidates) {
-      const verification = await ctx.context.internalAdapter
-        .findVerificationValue(identifier)
-        .catch(() => null);
-      if (!verification) continue;
-      try {
-        const parsed = JSON.parse(verification.value) as { email?: unknown };
-        if (typeof parsed.email === "string") return parsed.email;
-      } catch {
-        // malformed verification value — fall through to the backstop
-      }
+  const token = typeof query?.token === "string" ? query.token : null;
+  if (!token) return null;
+  const candidates = [token, await hashMagicLinkToken(token)];
+  for (const identifier of candidates) {
+    const verification = await ctx.context.internalAdapter
+      .findVerificationValue(identifier)
+      .catch(() => null);
+    if (!verification) continue;
+    try {
+      const parsed = JSON.parse(verification.value) as { email?: unknown };
+      if (typeof parsed.email === "string") return parsed.email;
+    } catch {
+      // malformed verification value — fall through to the backstop
     }
-    return null;
   }
   return null;
 }
 
 async function enforceForEmail(
   ctx: GenericEndpointContext,
+  path: string,
   email: string,
-  method: "password" | "magic_link" | null,
+  method: string,
 ): Promise<void> {
-  if (!method) return;
   const targetUser = await ctx.context.internalAdapter.findUserByEmail(email);
-  const orgId = targetUser
-    ? await resolvePolicyOrgForUser(ctx, { userId: targetUser.user.id, email })
-    : ((await findOrgByEmailDomain(ctx, email))?.orgId ?? null);
-  if (!orgId) return;
-  const policy = await getOrgPolicy(ctx, orgId);
+  const userId = targetUser?.user.id ?? null;
+  const orgIds = await resolvePolicyOrgsForUser(ctx, { userId, email });
+  if (orgIds.length === 0) return;
+  const eff = await getEffectivePolicy(ctx, orgIds, userId);
 
-  const isBreakGlass = !!policy.breakGlassUserId && targetUser?.user.id === policy.breakGlassUserId;
+  const refuse = async (error: APIError): Promise<never> => {
+    await auditRefusal(ctx, {
+      path,
+      code: String(error.body?.code ?? ""),
+      orgIds: eff.orgIds,
+      userId,
+      email,
+      method,
+    });
+    throw error;
+  };
 
-  if (policy.ssoEnforced && !isBreakGlass) {
-    throw new APIError("FORBIDDEN", {
-      code: "SSO_REQUIRED",
-      message: "Your organization requires SSO",
-    });
-  }
-  if (!isBreakGlass && !policy.allowedMethods.includes(method)) {
-    throw new APIError("FORBIDDEN", {
-      code: "METHOD_NOT_ALLOWED",
-      message: `Sign-in method "${method}" is not allowed for this organization.`,
-    });
-  }
+  if (eff.ssoEnforced) await refuse(ssoRequiredError());
+  if (methodRefusedBy(eff, method)) await refuse(methodNotAllowedError(method));
 }
 
 export function buildSignInBeforeHook() {
@@ -196,73 +295,45 @@ export function buildSignInBeforeHook() {
     handler: createAuthMiddleware(async (ctx) => {
       const path = ctx.path as string;
       const fullCtx = ctx as unknown as GenericEndpointContext;
-      const email = await resolveSignInEmail(
+      const email = await resolveMagicLinkEmail(
         fullCtx,
-        path,
-        ctx.body as { email?: unknown } | undefined,
         ctx.query as { token?: unknown } | undefined,
       );
-      if (!email) return; // social/passkey (no email pre-auth), or an unresolvable magic-link token
-      await enforceForEmail(fullCtx, email, deriveMethod(path));
+      if (!email) return; // custom hasher or an already-consumed/unknown token: the backstop still applies
+      await enforceForEmail(fullCtx, path, email, "magic_link");
     }),
   };
 }
 
 // --- session-creation backstop ---------------------------------------------
 
-/**
- * Derives the sign-in *method* from the endpoint whose call is creating the
- * session — the only place `allowedMethods` can be enforced for
- * `/sign-in/social`/`/sign-in/passkey`/SSO, since none of those resolve an
- * email pre-authentication (`resolveSignInEmail` above always returns
- * `null` for them, so `buildSignInBeforeHook` never reaches
- * `enforceForEmail`). Exported standalone so it's unit-testable against a
- * fake `ctx` without driving a real OAuth/passkey round trip.
- *
- * `ctx.path` inside a request handler can be either the endpoint's
- * registered *pattern* (`/callback/:id`, with the provider in
- * `ctx.params.id`) or a *concrete* resolved path (`/callback/google`) —
- * `../audit/plugin.ts`'s header comment documents this ambiguity existing
- * across different better-auth dispatch layers (hook handlers reliably see
- * the pattern; `databaseHooks`, sourced from `getCurrentAuthContext()`
- * inside the live endpoint call, is not verified against the same evidence)
- * — so both forms are handled here rather than assuming one.
- *
- * Unknown/unrecognized paths return `null` and are never blocked — only the
- * methods this preset's own plugins expose are enforceable at all.
- */
-export function deriveSessionCreateMethod(ctx: {
-  path?: string;
-  params?: Record<string, string | undefined>;
-  body?: unknown;
-}): string | null {
-  const path = ctx.path;
-  if (!path) return null;
-  if (path === "/sign-in/email") return "password";
-  if (path === "/magic-link/verify") return "magic_link";
-  if (path === "/passkey/verify-authentication") return "passkey";
-  if (path.startsWith("/sso/")) return "sso";
-  if (path === "/sign-in/social") {
-    const body = ctx.body as { provider?: unknown } | undefined;
-    return typeof body?.provider === "string" ? body.provider : null;
-  }
-  const callbackMatch = /^\/callback\/(.+)$/.exec(path);
-  if (callbackMatch) {
-    const segment = callbackMatch[1];
-    if (segment && segment !== ":id") return segment; // concrete: /callback/google
-    return typeof ctx.params?.id === "string" ? ctx.params.id : null; // pattern: /callback/:id
-  }
-  return null;
+function sessionExpiryMs(session: { expiresAt?: unknown }, ctx: GenericEndpointContext): number {
+  const requested = session.expiresAt;
+  if (requested instanceof Date && Number.isFinite(requested.getTime())) return requested.getTime();
+  if (typeof requested === "number" && Number.isFinite(requested)) return requested;
+  return Date.now() + ctx.context.sessionConfig.expiresIn * 1000;
 }
 
 /**
  * `databaseHooks.session.create.before` — the backstop every sign-in path
- * (including the ones the pre-flight hook above can't cover: social,
- * passkey, and the SSO callback itself) ultimately funnels through. Wired
- * via `init()` in `./plugin.ts` (see that file's header comment for why —
- * `BetterAuthPlugin` has no top-level `databaseHooks` field).
+ * (including the ones no pre-flight hook can cover: password, social,
+ * passkey, and the SSO callback itself) ultimately funnels through, *after*
+ * upstream has checked the credential. Wired via `init()` in `./plugin.ts`
+ * (see that file's header comment for why — `BetterAuthPlugin` has no
+ * top-level `databaseHooks` field).
+ *
+ * Rules, in order, against the **effective** policy of every org with a
+ * claim on the user (`resolvePolicyOrgsForUser` + `getEffectivePolicy`):
+ * 1. `ssoEnforced` and this is not an SSO callback → `SSO_REQUIRED`.
+ * 2. a named method some org excluded → `METHOD_NOT_ALLOWED`.
+ * 3. a path this layer cannot classify, for a user under any restriction →
+ *    `METHOD_NOT_ALLOWED` (fail closed; declare it in
+ *    `policy.signInMethods`). Continuations are never refused here.
+ * 4. `sessionMaxAgeS` → `expiresAt = min(requested, now + cap)`; never
+ *    extends a session past the global lifetime.
+ * Break-glass is honoured per org inside `getEffectivePolicy`.
  */
-export function buildSessionCreateBeforeHook() {
+export function buildSessionCreateBeforeHook(opts?: EnterpriseOptions) {
   return async (
     session: { userId: string; expiresAt?: unknown } & Record<string, unknown>,
     ctx: GenericEndpointContext | null,
@@ -273,36 +344,75 @@ export function buildSessionCreateBeforeHook() {
 
     const activeOrganizationId =
       typeof session.activeOrganizationId === "string" ? session.activeOrganizationId : null;
-    const orgId = await resolvePolicyOrgForUser(ctx, {
+    const orgIds = await resolvePolicyOrgsForUser(ctx, {
       userId: session.userId,
       email: user.email,
       activeOrganizationId,
     });
-    if (!orgId) return;
-    const policy = await getOrgPolicy(ctx, orgId);
+    if (orgIds.length === 0) return;
+    const eff = await getEffectivePolicy(ctx, orgIds, session.userId);
 
     const isSsoPath = typeof ctx.path === "string" && ctx.path.startsWith("/sso/");
-    const isBreakGlass = !!policy.breakGlassUserId && session.userId === policy.breakGlassUserId;
-    if (policy.ssoEnforced && !isSsoPath && !isBreakGlass) {
-      throw new APIError("FORBIDDEN", {
-        code: "SSO_REQUIRED",
-        message: "Your organization requires SSO",
-      });
+    if (eff.ssoEnforced && !isSsoPath) throw ssoRequiredError();
+
+    const classified = classifySessionCreate(ctx, opts);
+    if (classified.kind === "method" && methodRefusedBy(eff, classified.method)) {
+      throw methodNotAllowedError(classified.method);
+    }
+    if (classified.kind === "unknown" && eff.restricted) {
+      ctx.context.logger.warn(
+        `enterprise-policy: refusing a session from unclassified path ${JSON.stringify(classified.path)} for a user under a restricted policy — declare it in policy.signInMethods (METHOD_NOT_ALLOWED)`,
+      );
+      throw methodNotAllowedError(classified.path ?? "unknown");
     }
 
-    const method = deriveSessionCreateMethod(ctx);
-    if (method && !isBreakGlass && !policy.allowedMethods.includes(method)) {
-      throw new APIError("FORBIDDEN", {
-        code: "METHOD_NOT_ALLOWED",
-        message: `Sign-in method "${method}" is not allowed for this organization.`,
-      });
-    }
-
-    if (policy.sessionMaxAgeS != null) {
-      return {
-        data: { ...session, expiresAt: new Date(Date.now() + policy.sessionMaxAgeS * 1000) },
-      };
+    if (eff.sessionMaxAgeS != null) {
+      const cap = Date.now() + eff.sessionMaxAgeS * 1000;
+      const expiresAt = new Date(Math.min(sessionExpiryMs(session, ctx), cap));
+      return { data: { ...session, expiresAt } };
     }
     return;
+  };
+}
+
+// --- session-refresh clamp -------------------------------------------------
+
+/**
+ * `databaseHooks.session.update.before` — F-05. Upstream `/get-session`
+ * refreshes a session by writing `expiresAt = now + expiresIn` (the global
+ * 7-day lifetime) whenever `updateAge` has elapsed, which silently undid the
+ * cap the create hook applied on the first authenticated request. This hook
+ * sees that write (`data.expiresAt`) and clamps it to
+ * `createdAt + sessionMaxAgeS` for the session being refreshed — the one
+ * `/get-session` has already loaded into `ctx.context.session` — so a
+ * capped session can be refreshed within its window but never past it.
+ * Writes that do not touch `expiresAt` (`/organization/set-active`, …) and
+ * writes outside a request context pass through untouched.
+ */
+export function buildSessionUpdateBeforeHook() {
+  return async (
+    data: { expiresAt?: unknown } & Record<string, unknown>,
+    ctx: GenericEndpointContext | null,
+  ) => {
+    if (!ctx) return;
+    const requested = data.expiresAt;
+    if (!(requested instanceof Date) || !Number.isFinite(requested.getTime())) return;
+    const current = ctx.context.session;
+    if (!current?.session || !current.user?.email) return;
+
+    const orgIds = await resolvePolicyOrgsForUser(ctx, {
+      userId: current.session.userId,
+      email: current.user.email,
+      activeOrganizationId: current.session.activeOrganizationId ?? null,
+    });
+    if (orgIds.length === 0) return;
+    const eff = await getEffectivePolicy(ctx, orgIds, current.session.userId);
+    if (eff.sessionMaxAgeS == null) return;
+
+    const createdAt = new Date(current.session.createdAt).getTime();
+    if (!Number.isFinite(createdAt)) return;
+    const cap = createdAt + eff.sessionMaxAgeS * 1000;
+    if (requested.getTime() <= cap) return;
+    return { data: { ...data, expiresAt: new Date(cap) } };
   };
 }
