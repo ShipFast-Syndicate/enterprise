@@ -11,6 +11,7 @@ export {
   apiKeyLifecycle,
   assertNotApiKeyRequest,
   enterpriseApiKeyValidator,
+  isApiKeyRefusedPath,
   revokeUserApiKeys,
   type ApiKeyRevocationActor,
   type ApiKeyRevocationContext,

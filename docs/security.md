@@ -149,11 +149,20 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   connection decommission (actor `scim`, reason `scim.deactivate`; the provisioning organization
   is handed over by the SCIM projector in-transaction, since its membership row is already gone).
   Revoking sessions alone (`/admin/revoke-user-sessions`, `/revoke-sessions`) is deliberately not
-  a key revocation: the identity is unchanged. Finally, a request that carries an API key is
-  refused with `403 API_KEY_NOT_ALLOWED_HERE` on `/enterprise/*` and on every gated path
-  (`GATED_PATHS`, including `/api-key/create`) before any session or org resolution — a key can
-  neither mint another key nor reconfigure the organization, whether or not the mock session is
-  on.
+  a key revocation: the identity is unchanged. The expiry bound also holds on update:
+  `/api-key/update { expiresIn: null }` (which upstream accepts and writes as "never") is refused
+  with `400 API_KEY_EXPIRY_REQUIRED` unless the operator chose `apiKeys.defaultExpiresInS: null`;
+  a finite lifetime still goes through upstream's ceiling check. Finally, a request that carries
+  an API key is refused with `403 API_KEY_NOT_ALLOWED_HERE`, before any session or org
+  resolution and whether or not the mock session is on, on: `/enterprise/*`, every gated path
+  (`GATED_PATHS`), every key write (`/api-key/create|update|delete` — a key never mints another
+  key nor re-issues its own lifetime), every `/organization/*` write (reads such as
+  `/organization/list`, `/organization/get-full-organization` or `/organization/list-members`
+  stay reachable, as an integrator's API handler needs them for the key's owner), the account
+  and credential writes (`/update-user`, `/change-email`, `/change-password`, `/set-password`,
+  `/delete-user`, passkey registration/update/delete, `/two-factor/*`) and `/admin/*`
+  (`isApiKeyRefusedPath` in `src/server/api-keys.ts`). `/get-session`, `/api-key/verify`,
+  `/api-key/list` and `/api-key/get` are never refused.
 
 ## Upgrading from 1.0.x
 

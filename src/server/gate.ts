@@ -17,7 +17,7 @@ import { getMemberRoles } from "./policy/store";
 import { withSecretEncryption } from "./secrets";
 import { buildSsoDomainGuardHook } from "./sso-domain";
 import { assertEnterpriseOptions, takeDomainBindingOffUnlistedWarning } from "./options";
-import { assertNotApiKeyRequest } from "./api-keys";
+import { assertNotApiKeyRequest, isApiKeyRefusedPath } from "./api-keys";
 
 export const GATED_PATHS: Record<string, Feature> = {
   "/sso/register": "sso",
@@ -133,12 +133,14 @@ export function enterpriseGate(opts: EnterpriseOptions) {
     hooks: {
       before: [
         {
-          // First, before any session/org resolution: the management surface
-          // and credential minting are never key-authenticated (gap 1 —
-          // `./api-keys.ts`). `403 API_KEY_NOT_ALLOWED_HERE` on the header
-          // alone, whatever else the request carries.
+          // First, before any session/org resolution: the management surface,
+          // credential minting, key/account/credential writes and every
+          // organization write are never key-authenticated (gap 1 —
+          // `./api-keys.ts`, `isApiKeyRefusedPath` covers `/enterprise/*`).
+          // `403 API_KEY_NOT_ALLOWED_HERE` on the header alone, whatever
+          // else the request carries.
           matcher: (ctx) =>
-            !!ctx.path && (ctx.path in GATED_PATHS || ctx.path.startsWith("/enterprise/")),
+            !!ctx.path && (ctx.path in GATED_PATHS || isApiKeyRefusedPath(ctx.path)),
           handler: createAuthMiddleware(async (ctx) => {
             assertNotApiKeyRequest(ctx);
           }),

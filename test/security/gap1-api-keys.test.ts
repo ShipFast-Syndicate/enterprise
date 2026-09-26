@@ -26,6 +26,7 @@ import {
   API_KEY_HEADERS,
   assertNotApiKeyRequest,
   enterpriseApiKeyValidator,
+  isApiKeyRefusedPath,
   revokeUserApiKeys,
 } from "../../src/server/api-keys";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
@@ -97,12 +98,13 @@ async function revokedRows(t: TestAuth, orgId: string) {
 }
 
 /** The integrator's documented opt-in recipe: mock sessions from `x-api-key`, still bound to the user. */
-const optIn = () =>
+const optIn = (extra: Record<string, unknown> = {}) =>
   makeAuth({
     apiKeyPlugin: apiKey({
       enableSessionForAPIKeys: true,
       apiKeyHeaders: [...API_KEY_HEADERS],
       customAPIKeyValidator: enterpriseApiKeyValidator,
+      ...extra,
     }),
   });
 
@@ -154,6 +156,79 @@ describe("gap 1 — keys are bounded by expiry", () => {
     expect((await createKey(tight, o.cookie, tOrg, { expiresIn: 30 * DAY_S })).res.status).toBe(
       200,
     );
+  });
+
+  it("/api-key/update { expiresIn: null } cannot strip the expiry (400 API_KEY_EXPIRY_REQUIRED); over-max stays 400; the operator's `defaultExpiresInS: null` opt-out allows it", async () => {
+    // Upstream `updateApiKey` skips the min/max check for `null` and writes
+    // `expiresAt = null` — a perpetual key past both the default and the
+    // `maxExpiresInDays` ceiling (PR-4 verifier round 1, A1).
+    const t = await makeAuth({ apiKeys: { maxExpiresInDays: 30 } });
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { body } = await createKey(t, cookie, orgId);
+    expect(body!.expiresAt).not.toBeNull();
+    const expiresAtOf = async (keyId: string) =>
+      (
+        await t.client.execute({
+          sql: `SELECT expiresAt FROM apikey WHERE id = ?`,
+          args: [keyId],
+        })
+      ).rows[0]!.expiresAt;
+    const before = await expiresAtOf(body!.id);
+
+    const stripped = await t.api.post(
+      "/api-key/update",
+      { keyId: body!.id, expiresIn: null },
+      { cookie },
+    );
+    expect(stripped.status).toBe(400);
+    expect(await errorCode(stripped)).toBe("API_KEY_EXPIRY_REQUIRED");
+    expect(await expiresAtOf(body!.id)).toBe(before);
+
+    const tooLong = await t.api.post(
+      "/api-key/update",
+      { keyId: body!.id, expiresIn: 31 * DAY_S },
+      { cookie },
+    );
+    expect(tooLong.status).toBe(400);
+    expect(await errorCode(tooLong)).toBe("EXPIRES_IN_IS_TOO_LARGE");
+    expect(await expiresAtOf(body!.id)).toBe(before);
+
+    // A lifetime within the ceiling, and a rename that leaves the expiry
+    // alone, still work (controls).
+    const atMax = await t.api.post(
+      "/api-key/update",
+      { keyId: body!.id, expiresIn: 30 * DAY_S },
+      { cookie },
+    );
+    expect(atMax.status).toBe(200);
+    expect(await expiresAtOf(body!.id)).not.toBeNull();
+    const renamed = await t.api.post(
+      "/api-key/update",
+      { keyId: body!.id, name: "renamed" },
+      { cookie },
+    );
+    expect(renamed.status).toBe(200);
+    expect(await expiresAtOf(body!.id)).not.toBeNull();
+
+    // The operator who chose "never expire" as the default may also clear an
+    // expiry: that is their explicit opt-out, not a bypass.
+    const never = await makeAuth({ apiKeys: { defaultExpiresInS: null } });
+    const n = await signUpOwner(never);
+    const { orgId: nOrg } = await createOrg(never, n.cookie);
+    const nk = await createKey(never, n.cookie, nOrg, { expiresIn: 7 * DAY_S });
+    expect(nk.body!.expiresAt).not.toBeNull();
+    const cleared = await never.api.post(
+      "/api-key/update",
+      { keyId: nk.body!.id, expiresIn: null },
+      { cookie: n.cookie },
+    );
+    expect(cleared.status).toBe(200);
+    const row = await never.client.execute({
+      sql: `SELECT expiresAt FROM apikey WHERE id = ?`,
+      args: [nk.body!.id],
+    });
+    expect(row.rows[0]!.expiresAt).toBeNull();
   });
 });
 
@@ -354,6 +429,156 @@ describe("gap 1 — opt-in mock session (enableSessionForAPIKeys) stays bound to
     const gs = await t.api.get("/get-session", headers);
     expect(gs.status).toBe(200);
   });
+
+  it("a key cannot re-issue its own lifetime or delete keys: /api-key/update and /api-key/delete are refused and the row is untouched", async () => {
+    // "A key never mints another key" also has to mean "a key never
+    // re-mints itself": with the mock session on, the leaked key could
+    // extend, un-expire, rename or delete its own row (verifier A3).
+    const t = await optIn();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { body } = await createKey(t, cookie, orgId);
+    const headers = { "x-api-key": body!.key };
+    const rowOf = async () =>
+      (
+        await t.client.execute({
+          sql: `SELECT expiresAt, name, enabled FROM apikey WHERE id = ?`,
+          args: [body!.id],
+        })
+      ).rows[0]!;
+    const before = await rowOf();
+
+    const attempts = [
+      t.api.post("/api-key/update", { keyId: body!.id, expiresIn: 365 * DAY_S }, headers),
+      t.api.post("/api-key/update", { keyId: body!.id, expiresIn: null }, headers),
+      t.api.post("/api-key/update", { keyId: body!.id, enabled: true, name: "renamed" }, headers),
+      t.api.post("/api-key/delete", { keyId: body!.id }, headers),
+    ];
+    for (const res of await Promise.all(attempts)) {
+      expect(res.status).toBe(403);
+      expect(await errorCode(res)).toBe("API_KEY_NOT_ALLOWED_HERE");
+    }
+    expect(await rowOf()).toEqual(before);
+    // The owner's browser session still manages the key.
+    expect(
+      (await t.api.post("/api-key/update", { keyId: body!.id, name: "mine" }, { cookie })).status,
+    ).toBe(200);
+  });
+
+  it("a key cannot reconfigure the organization, the account or its credentials; reads and the product's own session lookup still work", async () => {
+    // Verifier B2: with the mock session on, a leaked owner key reached
+    // `/organization/create` (attacker = owner of a fresh org),
+    // `/organization/invite-member` (pending admin invitation),
+    // `/organization/update-member-role`, `/update-user` and
+    // `/passkey/generate-register-options` (a new long-lived credential).
+    // Upstream's per-key rate limit (10 requests/day by default) is consumed
+    // by the mock-session hook *before* the gate runs, so a refused request
+    // still counts; this case makes ~20 of them with one key, hence the
+    // plugin-level opt-out — the property under test is the 403, not the
+    // 429 that would otherwise follow it.
+    const t = await optIn({ rateLimit: { enabled: false } });
+    const { cookie, userId: ownerId } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const victim = await memberWithKey(t, orgId, "victim@acme.test");
+    const { body } = await createKey(t, cookie, orgId);
+    const headers = { "x-api-key": body!.key };
+    const memberId = `member_${victim.userId}_${orgId}`;
+
+    const refused: Array<[string, Promise<Response>]> = [
+      [
+        "/organization/create",
+        t.api.post("/organization/create", { name: "viakey", slug: "viakey" }, headers),
+      ],
+      [
+        "/organization/invite-member",
+        t.api.post(
+          "/organization/invite-member",
+          { email: "inv@acme.test", role: "admin", organizationId: orgId },
+          headers,
+        ),
+      ],
+      [
+        "/organization/update-member-role",
+        t.api.post(
+          "/organization/update-member-role",
+          { memberId, role: "admin", organizationId: orgId },
+          headers,
+        ),
+      ],
+      [
+        "/organization/remove-member",
+        t.api.post(
+          "/organization/remove-member",
+          { memberIdOrEmail: memberId, organizationId: orgId },
+          headers,
+        ),
+      ],
+      [
+        "/organization/update",
+        t.api.post(
+          "/organization/update",
+          { data: { name: "pwned" }, organizationId: orgId },
+          headers,
+        ),
+      ],
+      [
+        "/organization/delete",
+        t.api.post("/organization/delete", { organizationId: orgId }, headers),
+      ],
+      ["/update-user", t.api.post("/update-user", { name: "pwned" }, headers)],
+      ["/change-email", t.api.post("/change-email", { newEmail: "attacker@evil.test" }, headers)],
+      [
+        "/change-password",
+        t.api.post(
+          "/change-password",
+          { currentPassword: "x", newPassword: "y".repeat(12) },
+          headers,
+        ),
+      ],
+      [
+        "/passkey/generate-register-options",
+        t.api.get("/passkey/generate-register-options", headers),
+      ],
+      ["/two-factor/enable", t.api.post("/two-factor/enable", { password: "x" }, headers)],
+      ["/admin/list-users", t.api.get("/admin/list-users?limit=5", headers)],
+      ["/admin/ban-user", t.api.post("/admin/ban-user", { userId: victim.userId }, headers)],
+    ];
+    for (const [name, pending] of refused) {
+      const res = await pending;
+      expect(res.status, name).toBe(403);
+      expect(await errorCode(res), name).toBe("API_KEY_NOT_ALLOWED_HERE");
+    }
+    // Nothing changed.
+    expect((await t.client.execute(`SELECT id FROM organization`)).rows).toHaveLength(1);
+    expect((await t.client.execute(`SELECT id FROM invitation`)).rows).toHaveLength(0);
+    const member = await t.client.execute({
+      sql: `SELECT role FROM member WHERE id = ?`,
+      args: [memberId],
+    });
+    expect(member.rows[0]!.role).toBe("member");
+    const owner = await t.client.execute({
+      sql: `SELECT name, email, banned FROM user WHERE id = ?`,
+      args: [ownerId],
+    });
+    expect(owner.rows[0]!.name).not.toBe("pwned");
+    expect(owner.rows[0]!.email).not.toBe("attacker@evil.test");
+    const v = await t.client.execute({
+      sql: `SELECT banned FROM user WHERE id = ?`,
+      args: [victim.userId],
+    });
+    expect(Boolean(v.rows[0]!.banned)).toBe(false);
+
+    // Reads — what an integrator's API handler legitimately needs from the
+    // key's owner — are untouched.
+    const allowed = [
+      t.api.get("/get-session", headers),
+      t.api.get("/organization/list", headers),
+      t.api.get(`/organization/get-full-organization?organizationId=${orgId}`, headers),
+      t.api.get("/api-key/list", headers),
+      t.api.get("/passkey/list-user-passkeys", headers),
+    ];
+    for (const res of await Promise.all(allowed)) expect(res.status).toBe(200);
+  });
 });
 
 describe("gap 1 — the management surface refuses any request carrying an API key (preset defaults too)", () => {
@@ -376,6 +601,103 @@ describe("gap 1 — the management surface refuses any request carrying an API k
     expect(pol.status).toBe(403);
     expect(await errorCode(pol)).toBe("API_KEY_NOT_ALLOWED_HERE");
     expect((await createKey(t, cookie, orgId)).res.status).toBe(200);
+  });
+
+  it("the header alone is refused on /api-key/update, /organization/create and /update-user next to a valid cookie; the same requests without it succeed", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { body } = await createKey(t, cookie, orgId);
+    const both = { cookie, "x-api-key": body!.key };
+    const refused = [
+      t.api.post("/api-key/update", { keyId: body!.id, name: "x" }, both),
+      t.api.post("/api-key/delete", { keyId: body!.id }, both),
+      t.api.post("/organization/create", { name: "second", slug: "second" }, both),
+      t.api.post("/update-user", { name: "x" }, both),
+    ];
+    for (const res of await Promise.all(refused)) {
+      expect(res.status).toBe(403);
+      expect(await errorCode(res)).toBe("API_KEY_NOT_ALLOWED_HERE");
+    }
+    expect((await t.client.execute(`SELECT id FROM organization`)).rows).toHaveLength(1);
+    expect((await t.client.execute(`SELECT id FROM apikey`)).rows).toHaveLength(1);
+    expect(
+      (await t.api.post("/api-key/update", { keyId: body!.id, name: "x" }, { cookie })).status,
+    ).toBe(200);
+    expect(
+      (await t.api.post("/organization/create", { name: "second", slug: "second" }, { cookie }))
+        .status,
+    ).toBe(200);
+    expect((await t.api.post("/update-user", { name: "x" }, { cookie })).status).toBe(200);
+  });
+
+  it("isApiKeyRefusedPath: management, credential-minting, account and organization writes are refused; reads, sign-in and /api-key/verify are not", () => {
+    // `GATED_PATHS` (e.g. `/sso/register`) is the gate's own table, ORed in
+    // by its matcher — pinned over HTTP above, not by this predicate.
+    for (const path of [
+      "/enterprise/policy",
+      "/enterprise/scim/tokens/create",
+      "/organization/create-team",
+      "/api-key/create",
+      "/api-key/update",
+      "/api-key/delete",
+      "/organization/create",
+      "/organization/update",
+      "/organization/delete",
+      "/organization/invite-member",
+      "/organization/accept-invitation",
+      "/organization/update-member-role",
+      "/organization/remove-member",
+      "/organization/leave",
+      "/organization/create-role",
+      "/organization/set-active",
+      "/passkey/generate-register-options",
+      "/passkey/verify-registration",
+      "/passkey/delete-passkey",
+      "/two-factor/enable",
+      "/two-factor/disable",
+      "/update-user",
+      "/change-email",
+      "/change-password",
+      "/set-password",
+      "/delete-user",
+      "/admin/list-users",
+      "/admin/ban-user",
+    ]) {
+      expect(isApiKeyRefusedPath(path), path).toBe(true);
+    }
+    for (const path of [
+      "/get-session",
+      "/api-key/verify",
+      "/api-key/list",
+      "/api-key/get",
+      "/organization/list",
+      "/organization/get-full-organization",
+      "/organization/get-organization",
+      "/organization/list-members",
+      "/organization/get-active-member",
+      "/organization/get-active-member-role",
+      "/organization/has-permission",
+      "/organization/check-slug",
+      "/organization/get-invitation",
+      "/organization/list-invitations",
+      "/organization/list-user-invitations",
+      "/organization/list-teams",
+      "/organization/list-user-teams",
+      "/organization/list-team-members",
+      "/organization/list-roles",
+      "/organization/get-role",
+      "/passkey/list-user-passkeys",
+      "/passkey/generate-authenticate-options",
+      "/passkey/verify-authentication",
+      "/sign-in/email",
+      "/sign-out",
+      "/list-sessions",
+      "/enterprise",
+      "/organizations/create",
+    ]) {
+      expect(isApiKeyRefusedPath(path), path).toBe(false);
+    }
   });
 
   it("assertNotApiKeyRequest: throws API_KEY_NOT_ALLOWED_HERE for any configured header, passes otherwise", () => {

@@ -204,9 +204,12 @@ deactivation, `/admin/ban-user`, `/admin/remove-user` — revokes all of that us
 the ones they used for this org, audited as `api_key.revoked` into every org the user belonged
 to. (A user who holds an `owner` membership anywhere is never _banned_ by a SCIM feed, but their
 keys are revoked like everyone else's; they can sign in and mint new ones.) A request carrying an
-API key is refused on `/enterprise/*` and on every credential-minting path (`403
-API_KEY_NOT_ALLOWED_HERE`), including `/api-key/create` — a key never mints another key. Per-org
-key scoping remains a follow-up.
+API key is refused (`403 API_KEY_NOT_ALLOWED_HERE`) on `/enterprise/*`, on every credential-minting
+path, on every key write (`/api-key/create|update|delete` — a key never mints another key nor
+extends itself), on every organization, account and credential write and on `/admin/*`; reads
+(`/get-session`, `/organization/list`, `/api-key/list`, ...) stay reachable. An expiry can never be
+removed from a key (`/api-key/update { expiresIn: null }` → `400 API_KEY_EXPIRY_REQUIRED`) unless
+the operator set `apiKeys.defaultExpiresInS: null`. Per-org key scoping remains a follow-up.
 
 **Import the elements only from a browser-only context.** Lit's browser build references
 `HTMLElement`, which doesn't exist on the server; importing the module in server-rendered code

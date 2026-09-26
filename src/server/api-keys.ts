@@ -29,6 +29,7 @@ export const API_KEY_ERROR = {
   USER_BANNED: "USER_BANNED",
   USER_NOT_FOUND: "USER_NOT_FOUND",
   API_KEY_NOT_ALLOWED_HERE: "API_KEY_NOT_ALLOWED_HERE",
+  API_KEY_EXPIRY_REQUIRED: "API_KEY_EXPIRY_REQUIRED",
 } as const;
 
 /**
@@ -235,13 +236,48 @@ function targetUserId(body: unknown): string | null {
  * sessions`, `/revoke-sessions`) is deliberately *not* a key revocation —
  * the identity is unchanged and `enterpriseApiKeyValidator` keeps binding
  * each use to the live user row.
+ *
+ * Also keeps the expiry bound honest on `/api-key/update`: upstream's
+ * `updateApiKey` accepts `expiresIn: null`, skips the min/max check for it
+ * and writes `expiresAt = null` — so any key owner could turn a 90-day key
+ * into a perpetual one, past both `apiKeys.defaultExpiresInS` and the
+ * `apiKeys.maxExpiresInDays` ceiling. Refused with `400
+ * API_KEY_EXPIRY_REQUIRED` unless the operator chose `defaultExpiresInS:
+ * null` ("never expire") — their explicit opt-out, applied consistently to
+ * create and update. A finite `expiresIn` still goes through upstream's
+ * ceiling check (`EXPIRES_IN_IS_TOO_LARGE`).
  */
-export function apiKeyLifecycle(opts: { audit?: { chainKey?: string } } = {}) {
+export function apiKeyLifecycle(
+  opts: {
+    audit?: { chainKey?: string };
+    apiKeys?: { defaultExpiresInS?: number | null };
+  } = {},
+) {
   const chainKey = opts.audit?.chainKey;
+  const perpetualKeysAllowed = opts.apiKeys?.defaultExpiresInS === null;
   return {
     id: API_KEY_LIFECYCLE_PLUGIN_ID,
     hooks: {
       before: [
+        {
+          matcher: (ctx) => ctx.path === "/api-key/update",
+          handler: createAuthMiddleware(async (ctx) => {
+            // A key never re-issues its own lifetime: the gate refuses the
+            // header on this path too, but this plugin's hooks run first
+            // (preset order), so the refusal has to be here as well for a
+            // key-carrying request to get the 403, not a 400.
+            assertNotApiKeyRequest(ctx);
+            if (perpetualKeysAllowed) return;
+            const body = ctx.body as { expiresIn?: unknown } | undefined;
+            if (body && "expiresIn" in body && body.expiresIn === null) {
+              throw new APIError("BAD_REQUEST", {
+                code: API_KEY_ERROR.API_KEY_EXPIRY_REQUIRED,
+                message:
+                  "An API key's expiry cannot be removed; pass a lifetime within apiKeys.maxExpiresInDays or omit expiresIn.",
+              });
+            }
+          }),
+        },
         {
           matcher: (ctx) => ctx.path === "/admin/remove-user",
           handler: createAuthMiddleware(async (ctx) => {
@@ -283,15 +319,85 @@ export function apiKeyLifecycle(opts: { audit?: { chainKey?: string } } = {}) {
   } satisfies BetterAuthPlugin;
 }
 
+// `/organization/*` is refused wholesale except these reads — the paths an
+// integrator's API handler legitimately resolves for a key's owner (which
+// orgs, which members, which role). Fail-closed on purpose: a write endpoint
+// upstream adds later is refused until it is reviewed here, a read one
+// merely needs adding to this list (upstream is pinned exactly, `README.md`).
+const API_KEY_ALLOWED_ORG_READS: ReadonlySet<string> = new Set([
+  "/organization/list",
+  "/organization/get-full-organization",
+  "/organization/get-organization",
+  "/organization/list-members",
+  "/organization/get-active-member",
+  "/organization/get-active-member-role",
+  "/organization/has-permission",
+  "/organization/check-slug",
+  "/organization/get-invitation",
+  "/organization/list-invitations",
+  "/organization/list-user-invitations",
+  "/organization/list-teams",
+  "/organization/list-user-teams",
+  "/organization/list-team-members",
+  "/organization/list-roles",
+  "/organization/get-role",
+]);
+
+// Exact paths refused to a key-carrying request, on top of `GATED_PATHS`
+// (the gate adds those — they are its own table) and the prefixes below.
+const API_KEY_REFUSED_PATHS: ReadonlySet<string> = new Set([
+  // Key writes: a key must never mint, extend, un-expire, re-enable or
+  // delete a key — including itself. `/api-key/verify`, `/api-key/get` and
+  // `/api-key/list` stay reachable (the verify path is what products call,
+  // often forwarding the incoming request's headers).
+  "/api-key/create",
+  "/api-key/update",
+  "/api-key/delete",
+  // Account and credential writes: a leaked key must not rewrite the
+  // profile, move the e-mail, set a password or register a new long-lived
+  // credential (passkey) for its owner.
+  "/update-user",
+  "/change-email",
+  "/change-password",
+  "/set-password",
+  "/delete-user",
+  "/passkey/generate-register-options",
+  "/passkey/verify-registration",
+  "/passkey/update-passkey",
+  "/passkey/delete-passkey",
+]);
+
+// Whole surfaces refused to a key: the enterprise management API, the admin
+// plugin, and two-factor enrolment/verification (a key never satisfies or
+// disables a second factor).
+const API_KEY_REFUSED_PREFIXES: readonly string[] = ["/enterprise/", "/admin/", "/two-factor/"];
+
+/**
+ * Whether a request carrying an API key is refused on `path` (`403
+ * API_KEY_NOT_ALLOWED_HERE`, `assertNotApiKeyRequest`) — the management
+ * surface, credential minting, account/credential writes and every
+ * organization write. The gate ORs this with its own `GATED_PATHS` table.
+ * Reads, sign-in flows and `/api-key/verify` are never refused: a key is for
+ * a product's own API, and with the opt-in mock session the product's
+ * handler still needs `/get-session` and the owner's org reads.
+ */
+export function isApiKeyRefusedPath(path: string): boolean {
+  if (API_KEY_REFUSED_PATHS.has(path)) return true;
+  if (API_KEY_REFUSED_PREFIXES.some((prefix) => path.startsWith(prefix))) return true;
+  return path.startsWith("/organization/") && !API_KEY_ALLOWED_ORG_READS.has(path);
+}
+
 /**
  * Gate helper: refuses a request that carries an API key on the management
- * surface (`/enterprise/*`) or a credential-minting path (`GATED_PATHS`,
- * incl. `/api-key/create`). Keys are for a product's own API; with the
- * opt-in mock session on they would otherwise authenticate the key's owner
- * to everything that owner can do, including minting further keys — a
- * leaked key must never be able to re-mint itself or reconfigure the org.
- * Judged on the header alone (so it also holds under the preset default,
- * where upstream ignores the header): a browser session never sends one.
+ * surface (`/enterprise/*`), a credential-minting path (`GATED_PATHS`,
+ * incl. `/api-key/create`) and every path `isApiKeyRefusedPath` names (key,
+ * account, credential and organization writes). Keys are for a product's
+ * own API; with the opt-in mock session on they would otherwise authenticate
+ * the key's owner to everything that owner can do, including minting
+ * further keys, re-issuing their own lifetime or reconfiguring the org — a
+ * leaked key must never be able to do any of that. Judged on the header
+ * alone (so it also holds under the preset default, where upstream ignores
+ * the header): a browser session never sends one.
  */
 export function assertNotApiKeyRequest(ctx: { headers?: Headers | null }): void {
   const headers = ctx.headers;
