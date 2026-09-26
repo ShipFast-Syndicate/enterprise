@@ -12,10 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { BetterAuthPlugin } from "better-auth";
 import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import { magicLink } from "better-auth/plugins";
-import {
-  buildSessionCreateBeforeHook,
-  SESSION_AUTH_METHOD_FIELD,
-} from "../../src/server/policy/enforcement";
+import { buildSessionCreateBeforeHook } from "../../src/server/policy/enforcement";
 import type { EnterpriseOptions } from "../../src/server/types";
 import {
   createOrg,
@@ -349,20 +346,27 @@ describe("gap 2 — which sessions stand under require2fa (session-creation hook
           body: { code: "METHOD_NOT_ALLOWED" },
         });
       }
-      // Paths that stand and are classified as a *method*: the session is
-      // allowed AND the method is recorded on it (`enterpriseAuthMethod`), the
-      // durable record the enrolment gate later re-judges from.
-      for (const { path, method } of [
-        { path: "/sign-in/email", method: "password" }, // upstream challenges an enrolled user; the gate confines an un-enrolled one
-        { path: "/sign-up/email", method: "password" },
+      // Paths that stand as a named *method* were judged under the
+      // requirement: the session is allowed and stamped as such — its
+      // `createdAt` moved past the requirement's onset (the policy write)
+      // into the second after next, the only change to the row.
+      for (const path of [
+        "/sign-in/email", // upstream challenges an enrolled user; the gate confines an un-enrolled one
+        "/sign-up/email",
       ]) {
-        await expect(
-          hook({ userId } as never, { path, context } as never),
-          `${path} enrolled=${enrolled}`,
-        ).resolves.toMatchObject({ data: { [SESSION_AUTH_METHOD_FIELD]: method } });
+        const before = Date.now();
+        const result = (await hook({ userId } as never, { path, context } as never)) as {
+          data: Record<string, unknown>;
+        };
+        expect(Object.keys(result.data).sort(), `${path} enrolled=${enrolled}`).toEqual([
+          "createdAt",
+          "userId",
+        ]);
+        expect((result.data.createdAt as Date).getTime()).toBeGreaterThan(before + 1000);
+        expect((result.data.createdAt as Date).getTime() % 1000).toBe(0);
       }
-      // Continuations stand and record no method (the session's factor state
-      // already governs it): the hook returns nothing to change.
+      // Continuations stand without a judgement of their own: the hook
+      // returns nothing to change.
       for (const ctx of [
         { path: "/two-factor/verify-totp" },
         { path: "/two-factor/verify-otp" },
@@ -398,7 +402,7 @@ describe("gap 2 — which sessions stand under require2fa (session-creation hook
 
     await expect(
       hook({ userId } as never, { path: "/passkey/verify-authentication", context } as never),
-    ).resolves.toMatchObject({ data: { [SESSION_AUTH_METHOD_FIELD]: "passkey" } });
+    ).resolves.toMatchObject({ data: { createdAt: expect.any(Date) } });
     await expect(
       hook({ userId } as never, { path: "/magic-link/verify", context } as never),
     ).rejects.toMatchObject({ body: { code: "TWO_FACTOR_REQUIRED" } });
@@ -494,7 +498,7 @@ describe("gap 2 — SSO users", () => {
     await issuer.close();
   });
 
-  it("an SSO-only admin can switch require2fa on (nothing to enrol), keeps signing in through the IdP and is never gated; the org's un-enrolled password owner is", async () => {
+  it("an SSO-only admin can switch require2fa on (the org's verified IdP is their way back in), is signed out once by the flip, and signs in through the IdP from then on; the org's un-enrolled password owner is confined", async () => {
     const t = await makeAuth({ trustedOrigins: [issuer.issuerUrl] });
     const { cookie: ownerCookie } = await signUpOwner(t, "owner@acme.test");
     const { orgId } = await createOrg(t, ownerCookie);
@@ -509,24 +513,30 @@ describe("gap 2 — SSO users", () => {
       args: [orgId, alice.user.id],
     });
 
-    // No password account: exempt from the precondition and from the gate.
+    // No password account, but the org owns a verified provider for her
+    // domain and `sso` satisfies the requirement: she may switch it on.
     expect((await setPolicy(t, aliceCookie, { orgId, require2fa: true })).status).toBe(200);
+    // The flip re-judges every session that predates it — hers included: the
+    // session she flipped it with was never judged under the requirement.
+    const stale = await t.api.get(`/enterprise/members?orgId=${orgId}`, { cookie: aliceCookie });
+    expect(stale.status).toBe(403);
+    expect(await codeOf(stale)).toBe("TWO_FACTOR_REQUIRED");
+    expect(await (await t.api.get("/get-session", { cookie: aliceCookie })).json()).toBeNull();
+
+    // A new SSO session under the policy: `sso` satisfies it by default.
+    const second = await driveSsoSignIn(t, issuer, "acme-oidc");
+    expect(second.headers.get("location") ?? "").not.toContain("error=");
+    const secondCookie = sessionCookieOf(second);
+    expect((await t.api.get("/organization/list", { cookie: secondCookie })).status).toBe(200);
     expect(
-      (await t.api.get(`/enterprise/members?orgId=${orgId}`, { cookie: aliceCookie })).status,
+      (await t.api.get(`/enterprise/members?orgId=${orgId}`, { cookie: secondCookie })).status,
     ).toBe(200);
-    const annotated = await t.api.get("/get-session", { cookie: aliceCookie });
+    const annotated = await t.api.get("/get-session", { cookie: secondCookie });
     expect(((await annotated.json()) as { enterprise: unknown }).enterprise).toEqual({
       require2fa: true,
       twoFactorEnabled: false,
       enrollmentRequired: false,
     });
-
-    // A new SSO session under the policy: `sso` satisfies it by default.
-    const second = await driveSsoSignIn(t, issuer, "acme-oidc");
-    expect(second.headers.get("location") ?? "").not.toContain("error=");
-    expect(
-      (await t.api.get("/organization/list", { cookie: sessionCookieOf(second) })).status,
-    ).toBe(200);
 
     // The password owner who never enrolled is confined.
     const gated = await t.api.get(`/enterprise/members?orgId=${orgId}`, { cookie: ownerCookie });

@@ -134,37 +134,59 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
     it stands for the same reason; a method that carries a second factor by itself (a passkey policy,
     an OTP plugin the product vouches for) is named in `satisfiedBy`.
   - _On every request_ (`buildTwoFactorEnrollmentGate`, a `hooks.before` outside
-    `TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS`): the session is judged the same way the create rule judges
-    a new one, so a policy that came to apply **after** the session was minted (an org flips
-    `require2fa` on, or the user later joins — or is domain-claimed by — an org that already required
-    it) is enforced on the standing session, not only at the next sign-in. A signed-in user who
-    **holds a password** (upstream's `/two-factor/enable` re-authenticates with it —
-    `findCredentialAccount`, the same read) and has not enrolled is confined to the enrolment
+    `TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS`): a policy that came to apply **after** the session was
+    minted (an org switches `require2fa` on, or the user later joins — or is domain-claimed by — an
+    org that already required it) is enforced on the standing session, not only at the next sign-in.
+    A signed-in user who **holds a password** (upstream's `/two-factor/enable` re-authenticates with
+    it — `findCredentialAccount`, the same read) and has not enrolled is confined to the enrolment
     allow-list (`403 TWO_FACTOR_ENROLLMENT_REQUIRED` with the list in the body): `/get-session`,
     `/sign-out`, `/enterprise/home-realm`, `/two-factor/enable|get-totp-uri|verify-totp|send-otp|verify-otp`,
     plus the product's `policy.twoFactor.enrollmentPaths`. The first successful
     `/two-factor/verify-totp` flips `twoFactorEnabled` and lifts the gate. A user with **no password**
-    (SSO-, magic-link-, social- or passkey-only) cannot enrol here: their session stands only when the
-    method it was minted with satisfies the policy (`policy.twoFactor.satisfiedBy`); otherwise — a
-    session that predates the requirement, or a session minted before this version recorded a method
-    (see below) — it is refused (`403 TWO_FACTOR_REQUIRED`) and the user signs in again. Impersonating
-    such a user inherits the same standing. The session is resolved through the same path the endpoint
+    (SSO-, magic-link-, social- or passkey-only) cannot enrol here: their session stands only when it
+    was **judged under the requirement when it was created** — see the next point — and is otherwise
+    refused (`403 TWO_FACTOR_REQUIRED`); the user signs in again, through a method that satisfies the
+    policy or not at all. An impersonation session (upstream's `impersonatedBy`) is admitted as a
+    continuation of the admin's sign-in and never judged for the impersonated user, so impersonating
+    such a user yields a refused session. The session is resolved through the same path the endpoint
     will use, so a session carried by `Authorization: Bearer` (upstream's `bearer()` plugin) is judged
-    like a cookie one. The gate reads nothing beyond one indexed `org_policy` probe on a deployment
-    where no org requires a second factor.
-  - _The sign-in method recorded on the session._ The session-creation hook records the classified
-    method on the session row (`enterprise_auth_method`, added by migration `0003_require2fa.sql`;
-    server-written only). It is the durable record the gate and the refresh clamp re-judge from — the
-    one signal on a standing session of how it was authenticated. A session minted before this version
-    records nothing and is treated as satisfying no policy (fail closed): a no-credential holder of
-    such a session is refused until they sign in again. The refresh clamp does not extend a session
-    the gate would refuse, so `/get-session` cannot renew one indefinitely.
-  - `/get-session` carries `enterprise: { require2fa, twoFactorEnabled, enrollmentRequired }` for a
-    user under such a policy; `enrollmentRequired` is exactly the state the gate refuses on, so a
-    product redirects to its enrolment UI on that flag.
+    like a cookie one. The gate reads nothing beyond one small `org_policy` probe on a deployment where
+    no org requires a second factor.
+  - _Which sessions were judged — timestamps, no new column._ Every session created while the
+    requirement applies to its user went through the creation rule above. So the requirement has an
+    **onset** per user — the latest, over the orgs that require it, of the org's
+    `org_policy.updated_at` and the user's `member.createdAt` in it — and a no-password session
+    stands only if its `session.createdAt` is **strictly after** that onset. Timestamps are compared in
+    epoch milliseconds whatever unit a product keeps them in (a `session.created_at` in whole seconds
+    next to millisecond policy and membership stamps is the fleet's reality); a stamp that falls on a
+    whole second is read as the last millisecond of that second, and a stamp that cannot be read makes
+    the session not stand. The creation rule stamps each session it admits for a named method with a
+    `createdAt` at the start of the second after next, so a judged session never reads as "not after"
+    its onset — even in a seconds column, and even when `@better-auth/sso` provisions the membership
+    just after creating the session in the same callback. Consequences, all fail-closed:
+    - switching `require2fa` on signs out, once, every member who holds no password and is not
+      enrolled (their next sign-in is judged) — the admin who switched it included;
+    - **any** later edit of a requiring org's policy (any field) moves `updated_at` and does the same;
+    - joining a requiring org re-judges the joiner's older sessions;
+    - an org that claims a user only through its verified e-mail domain, without a membership,
+      contributes its `updated_at` alone (`ssoProvider` records no time for a domain verification).
+      Such a claim gives no access to that org's data; the org's members are judged by membership.
+      The refresh clamp does not extend a session that does not stand, so `/get-session` cannot renew one
+      indefinitely.
+  - `/get-session` — and therefore `auth.api.getSession({ headers })`, which is what products
+    authorize their own routes with — answers **`null`** for a session that does not stand (a
+    no-password user's session that was never judged under the requirement): the product sees a
+    signed-out visitor, with no flag to interpret. For any other user under such a policy it carries
+    `enterprise: { require2fa, twoFactorEnabled, enrollmentRequired }`; `enrollmentRequired: true` is
+    the enrolment-only session of a password holder who has not enrolled — the only session under the
+    requirement that is presented while confined — so a product that offers password sign-in
+    redirects to its enrolment UI on that flag and must not treat such a session as fully signed in.
   - Switching `require2fa` on (`POST /enterprise/policy/set`, the `false → true` transition) needs a
-    caller who is enrolled or cannot enrol (`400 REQUIRE_2FA_PRECONDITION` otherwise): an un-enrolled
-    admin would lock themselves out of this very endpoint on the next request.
+    caller who can sign in again afterwards (`400 REQUIRE_2FA_PRECONDITION` otherwise, row
+    unchanged): the caller has enrolled a second factor, **or** `policy.twoFactor.satisfiedBy`
+    includes `sso` and this org owns a verified SSO provider for the caller's e-mail domain. A
+    magic-link- or social-only admin cannot switch it on — they could never sign in under it, and the
+    org would be left with nobody able to switch it off.
   - API keys are unaffected (a key never creates a session and reaches `/get-session` only).
 - **SCIM-required JIT** (`src/server/policy/scim-required.ts`) refuses an SSO-callback account
   creation — from the per-provider `/sso/callback/:providerId`, the shared `/sso/callback` that
@@ -287,12 +309,24 @@ whose `org_policy` row already has `require_2fa = 1` starts enforcing at upgrade
 hold a password and have not enrolled are confined to the enrolment allow-list
 (`TWO_FACTOR_ENROLLMENT_REQUIRED`) and its members who sign in with a magic link, a passkey or a
 social provider are refused (`TWO_FACTOR_REQUIRED`) unless `policy.twoFactor.satisfiedBy` names
-that method. There is no grace period. Sessions that existed before the upgrade record no sign-in
-method, so a no-credential holder of one (SSO-, magic-link-, social- or passkey-only) is refused
-until they sign in again — an SSO sign-in then satisfies the policy. Apply the migration
-(`0003_require2fa.sql` adds `enterprise_auth_method` to `session`) as part of the upgrade. Check
-first, and add a redirect-to-enrolment on `enterprise.enrollmentRequired` in the product before
-upgrading:
+that method. There is no grace period.
+
+The upgrade changes **no schema** — no column is added to `session`, `member`, `user` or
+`org_policy`, so a product's hand-maintained Drizzle tables need no edit. It ships one **data-only**
+migration, `0003_require2fa.sql`: it moves `org_policy.updated_at` of every `require_2fa = 1` row to
+the moment it runs (keeping the column's unit, rounded up). Sessions that exist at that moment were
+minted by 1.0.x, which never judged them against the requirement; moving the onset past them makes
+them unjudged, so a member who holds no password and is not enrolled signs in again once (an SSO
+sign-in then satisfies the policy). Apply it as part of the upgrade, **once**:
+`ab-enterprise migrate --out <drizzle migrations folder>` now writes every package migration the
+folder does not hold yet (`0001`, `0002`, `0003`, each next-numbered and registered in the journal),
+so the product's migrator applies `0003` exactly once; `applyMigration()` runs every file on each call,
+and a second run of `0003` signs those members out once more. A migration you already applied by hand
+under another name (e.g. a copied `0002`) is not recognised — delete the emitted duplicate before
+migrating. Where no org has `require_2fa = 1` (production on 2026-09-26), `0003` changes nothing.
+
+Check first, and add a redirect-to-enrolment on `enterprise.enrollmentRequired` in a product that
+offers password sign-in before upgrading:
 
 ```sql
 -- organizations that will start enforcing at upgrade

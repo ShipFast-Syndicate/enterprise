@@ -27,6 +27,7 @@ import {
   signUpOwner,
   type TestAuth,
 } from "../helpers/auth";
+import { applyMigration } from "../../src/schema";
 import { enrollTotp, insertMemberRow, insertSessionCookie, setPolicy } from "./helpers";
 
 /** Same `/two-factor/*` rate-limit relaxation the sibling suite uses — several enrolments per file share one limiter store. */
@@ -181,14 +182,14 @@ describe("gap 2 R2 — a session is re-judged for a policy that came to apply af
     expect(gated.status, "the pre-flip magic-link session must now be refused").toBe(403);
     expect(await codeOf(gated)).toBe("TWO_FACTOR_REQUIRED");
     // No path to enrol (no password account): the answer is REQUIRED, not the
-    // enrolment redirect, and /get-session reports him un-enrollable.
+    // enrolment redirect — and `/get-session`, which the product's own routes
+    // authorize with, no longer presents the session at all (round 3).
     const gs = await t.api.get("/get-session", { cookie: bob.cookie });
-    expect(await gs.json()).toMatchObject({
-      enterprise: { require2fa: true, twoFactorEnabled: false, enrollmentRequired: false },
-    });
+    expect(gs.status).toBe(200);
+    expect(await gs.json()).toBeNull();
   });
 
-  it("a no-credential session that records no method (a pre-upgrade row) is refused and /get-session does not extend it", async () => {
+  it("a session minted before the upgrade in an org that already required 2FA is refused once the 0003 data migration ran, and /get-session does not extend it", async () => {
     const { sent, plugin } = magicSink();
     const t = await makeAuth({ plugins: [plugin] });
     const owner = await enrolledOwner(t);
@@ -196,19 +197,28 @@ describe("gap 2 R2 — a session is re-judged for a policy that came to apply af
     await insertMemberRow(t, owner.orgId, bob.userId, "member");
     await requireTwoFactor(t, owner.cookie, owner.orgId);
 
-    // A forged session row with a near expiry and no recorded method — what a
-    // session minted before this version existed looks like. Its short expiry
-    // puts it inside upstream's refresh window, so `/get-session` would extend
-    // it to the 7-day lifetime unless the clamp stops it.
+    // A session row the running version never minted — what a 1.0.x session
+    // looks like: 1.0.x surfaced `require2fa` but enforced nothing, so a
+    // member's magic-link session could be created after the org required a
+    // second factor. Its near expiry puts it inside upstream's refresh window,
+    // so `/get-session` would extend it to the 7-day lifetime unless the clamp
+    // stops it.
     const forged = await insertSessionCookie(t, bob.userId);
     const beforeExpiry = await minSessionExpiry(t, bob.userId);
 
+    // The upgrade's data migration (0003) — applied through the package runner.
+    await applyMigration(t.client);
+
+    // An enrolled member is unaffected by the migration.
+    expect((await t.api.get("/organization/list", { cookie: owner.cookie })).status).toBe(200);
+
     const gated = await t.api.get("/organization/list", { cookie: forged });
-    expect(gated.status, "a null-method no-credential session must be refused").toBe(403);
+    expect(gated.status, "a pre-upgrade no-credential session must be refused").toBe(403);
     expect(await codeOf(gated)).toBe("TWO_FACTOR_REQUIRED");
 
     const gs = await t.api.get("/get-session", { cookie: forged });
     expect(gs.status).toBe(200);
+    expect(await gs.json()).toBeNull();
     const afterExpiry = await minSessionExpiry(t, bob.userId);
     // A refresh would push the forged session's expiry out by days; the clamp
     // keeps it where it was (allowing only clock jitter).

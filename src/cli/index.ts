@@ -8,10 +8,12 @@
 // framework — `node:util`'s `parseArgs` per ruling (e).
 //
 // Commands:
-//   ab-enterprise migrate --out <dir>   write 0001_enterprise.sql into a
-//                                        product's drizzle migrations folder
-//                                        as the next-numbered NNNN_enterprise.sql,
-//                                        and register it in meta/_journal.json
+//   ab-enterprise migrate --out <dir>   write every package migration the
+//                                        folder does not hold yet (0001, 0002,
+//                                        0003, ...) into a product's drizzle
+//                                        migrations folder as next-numbered
+//                                        NNNN_enterprise*.sql files, and
+//                                        register each in meta/_journal.json
 //                                        if the folder has one
 //   ab-enterprise verify [--url] [--token]
 //                                        check a live database against
@@ -27,7 +29,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from "node:path";
 import { createClient, type Row } from "@libsql/client";
 import { verifyDatabase } from "../schema/verify";
-import { migrationFilePath } from "../schema/migrate";
+import { MIGRATION_FILES, migrationFilePath } from "../schema/migrate";
 import { verifyChain, type AuditRow } from "../server/audit/chain";
 
 const MIGRATION_FILE_RE = /^(\d{4})_.*\.sql$/;
@@ -138,8 +140,17 @@ export function insertStatementBreakpoints(sql: string): string {
   }
 
   // A marker after the *last* statement would leave drizzle with a trailing
-  // whitespace-only chunk, which the driver rejects as an empty statement.
-  return out.replace(new RegExp(`\\n${STATEMENT_BREAKPOINT}(\\s*)$`), "$1");
+  // chunk holding no statement — whitespace, or only comments (`0002` ends
+  // with a note) — which the driver rejects as an empty statement.
+  const marker = `\n${STATEMENT_BREAKPOINT}`;
+  const last = out.lastIndexOf(marker);
+  if (last === -1) return out;
+  const tail = out.slice(last + marker.length);
+  const tailCode = tail
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/--[^\n]*/g, "")
+    .trim();
+  return tailCode === "" ? out.slice(0, last) + tail : out;
 }
 
 interface JournalEntry {
@@ -172,7 +183,7 @@ interface DrizzleJournal {
  *
  * Returns the journal path if an entry was added, else `null`.
  */
-function appendJournalEntry(outDir: string, tag: string): string | null {
+function appendJournalEntry(outDir: string, tag: string, when: number): string | null {
   const journalPath = join(outDir, "meta", "_journal.json");
   if (!existsSync(journalPath)) return null;
 
@@ -191,8 +202,9 @@ function appendJournalEntry(outDir: string, tag: string): string | null {
     // `drizzle-kit` itself produces and its own tooling stays happy.
     version: "6",
     // Newer than every `created_at` already recorded in
-    // `__drizzle_migrations`, which is what makes the migrator pick it up.
-    when: Date.now(),
+    // `__drizzle_migrations`, which is what makes the migrator pick it up
+    // (and strictly increasing across the files one run writes).
+    when,
     tag,
     breakpoints: true,
   });
@@ -201,6 +213,31 @@ function appendJournalEntry(outDir: string, tag: string): string | null {
   return journalPath;
 }
 
+/**
+ * The name suffix a package migration is emitted under, after the target
+ * folder's next free `NNNN_` prefix. `0001` keeps the historic bare
+ * `enterprise` suffix — the only file earlier releases of this command wrote —
+ * so a folder that already holds it is recognised; the later ones carry their
+ * own file stem (`enterprise_0002_scim_1_7`, `enterprise_0003_require2fa`).
+ */
+function emittedSuffix(file: string): string {
+  return file === MIGRATION_FILES[0] ? "enterprise" : `enterprise_${file.replace(/\.sql$/, "")}`;
+}
+
+function alreadyEmitted(outDir: string, file: string): string | null {
+  if (!existsSync(outDir)) return null;
+  const pattern = new RegExp(`^\\d{4}_${emittedSuffix(file)}\\.sql$`);
+  return readdirSync(outDir).find((entry) => pattern.test(entry)) ?? null;
+}
+
+/**
+ * Writes every package migration (`MIGRATION_FILES`) the folder does not
+ * hold yet, each as its own next-numbered file registered in the drizzle
+ * journal, in order — so running it again after an upgrade adds exactly the
+ * migrations that release brought. A migration already applied by other
+ * means (copied in by hand under another name) is not recognised: delete the
+ * emitted duplicate before running the migrator.
+ */
 function cmdMigrate(argv: string[]): number {
   const { values } = parseArgs({
     args: argv,
@@ -212,17 +249,33 @@ function cmdMigrate(argv: string[]): number {
   }
   const outDir = values.out;
   mkdirSync(outDir, { recursive: true });
-  const tag = `${nextMigrationNumber(outDir)}_enterprise`;
-  const dest = join(outDir, `${tag}.sql`);
-  writeFileSync(dest, insertStatementBreakpoints(readFileSync(migrationFilePath(), "utf8")));
-  console.log(`ab-enterprise migrate: wrote ${dest}`);
 
-  const journalPath = appendJournalEntry(outDir, tag);
-  if (journalPath) {
-    console.log(`ab-enterprise migrate: registered ${tag} in ${journalPath}`);
-  } else {
+  const when = Date.now();
+  let written = 0;
+  let journalPath: string | null = null;
+  for (const file of MIGRATION_FILES) {
+    const existing = alreadyEmitted(outDir, file);
+    if (existing) {
+      console.log(`ab-enterprise migrate: ${file} already present as ${existing} — skipped`);
+      continue;
+    }
+    const tag = `${nextMigrationNumber(outDir)}_${emittedSuffix(file)}`;
+    const dest = join(outDir, `${tag}.sql`);
+    writeFileSync(dest, insertStatementBreakpoints(readFileSync(migrationFilePath(file), "utf8")));
+    console.log(`ab-enterprise migrate: wrote ${dest}`);
+    const registered = appendJournalEntry(outDir, tag, when + written);
+    if (registered) {
+      journalPath = registered;
+      console.log(`ab-enterprise migrate: registered ${tag} in ${registered}`);
+    }
+    written++;
+  }
+
+  if (written === 0) {
+    console.log(`ab-enterprise migrate: ${outDir} already holds every migration — nothing written`);
+  } else if (!journalPath) {
     console.log(
-      `ab-enterprise migrate: no drizzle meta/_journal.json in ${outDir} — apply it with applyMigration() from @alphabros/enterprise/schema, or your own SQL runner`,
+      `ab-enterprise migrate: no drizzle meta/_journal.json in ${outDir} — apply the files in order with applyMigration() from @alphabros/enterprise/schema, or your own SQL runner`,
     );
   }
   return 0;

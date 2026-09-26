@@ -5,7 +5,15 @@
 // end to end, not just the TS source.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -152,15 +160,41 @@ describe("ab-enterprise CLI (built binary)", () => {
     client.close();
   });
 
-  it("migrate --out writes the SQL as the next-numbered migration file", () => {
+  it("migrate --out writes every package migration as next-numbered files, and only the missing ones on a later run", () => {
     const outDir = join(workDir, "migrations");
     const first = runCli(["migrate", "--out", outDir]);
     expect(first.status).toBe(0);
-    expect(existsSync(join(outDir, "0000_enterprise.sql"))).toBe(true);
+    expect(readdirSync(outDir).sort()).toEqual([
+      "0000_enterprise.sql",
+      "0001_enterprise_0002_scim_1_7.sql",
+      "0002_enterprise_0003_require2fa.sql",
+    ]);
 
+    // Nothing new to write: a second run (a redeploy) adds no duplicate.
     const second = runCli(["migrate", "--out", outDir]);
     expect(second.status).toBe(0);
-    expect(existsSync(join(outDir, "0001_enterprise.sql"))).toBe(true);
+    expect(second.stdout).toMatch(/already holds every migration/);
+    expect(readdirSync(outDir)).toHaveLength(3);
+
+    // A folder an earlier release wrote 0001 into (its only file) gets the
+    // rest after it, numbered on from what is there.
+    const upgradeDir = join(workDir, "migrations-upgrade");
+    mkdirSync(upgradeDir, { recursive: true });
+    writeFileSync(join(upgradeDir, "0004_enterprise.sql"), "-- written by an earlier release\n");
+    expect(runCli(["migrate", "--out", upgradeDir]).status).toBe(0);
+    expect(readdirSync(upgradeDir).sort()).toEqual([
+      "0004_enterprise.sql",
+      "0005_enterprise_0002_scim_1_7.sql",
+      "0006_enterprise_0003_require2fa.sql",
+    ]);
+
+    // 0003 is data only: no schema change reaches a product table.
+    const require2fa = readFileSync(join(outDir, "0002_enterprise_0003_require2fa.sql"), "utf8")
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
+    expect(require2fa).toMatch(/UPDATE org_policy/);
+    expect(require2fa).not.toMatch(/\b(ALTER|CREATE|DROP)\b/i);
 
     const copied = readFileSync(join(outDir, "0000_enterprise.sql"), "utf8");
     expect(copied).toMatch(/CREATE TABLE IF NOT EXISTS org_policy/);
@@ -218,7 +252,7 @@ describe("ab-enterprise CLI (built binary)", () => {
       return dir;
     }
 
-    it("appends a journal entry (and no snapshot, which migrate never reads)", () => {
+    it("appends a journal entry per migration, in order (and no snapshot, which migrate never reads)", () => {
       const dir = seedJournalDir("drizzle-journal");
 
       const result = runCli(["migrate", "--out", dir]);
@@ -228,7 +262,12 @@ describe("ab-enterprise CLI (built binary)", () => {
       const journal = JSON.parse(readFileSync(join(dir, "meta", "_journal.json"), "utf8")) as {
         entries: Array<Record<string, unknown>>;
       };
-      expect(journal.entries.length).toBe(2);
+      expect(journal.entries.length).toBe(4);
+      expect(journal.entries.slice(1).map((entry) => entry.tag)).toEqual([
+        "0001_enterprise",
+        "0002_enterprise_0002_scim_1_7",
+        "0003_enterprise_0003_require2fa",
+      ]);
       expect(journal.entries[1]).toMatchObject({
         idx: 1,
         version: "6",
@@ -237,7 +276,17 @@ describe("ab-enterprise CLI (built binary)", () => {
       });
       expect(typeof journal.entries[1]!.when).toBe("number");
       expect(Number(journal.entries[1]!.when)).toBeGreaterThan(1_700_000_000_000);
+      const whens = journal.entries.slice(1).map((entry) => Number(entry.when));
+      expect(whens).toEqual([...whens].sort((a, b) => a - b));
+      expect(new Set(whens).size).toBe(3);
       expect(existsSync(join(dir, "meta", "0001_snapshot.json"))).toBe(false);
+
+      // Run again: nothing to add, the journal is unchanged.
+      expect(runCli(["migrate", "--out", dir]).status).toBe(0);
+      const again = JSON.parse(readFileSync(join(dir, "meta", "_journal.json"), "utf8")) as {
+        entries: unknown[];
+      };
+      expect(again.entries.length).toBe(4);
     });
 
     it("the real drizzle migrator then applies it — ab-enterprise verify exits 0", async () => {
@@ -250,6 +299,10 @@ describe("ab-enterprise CLI (built binary)", () => {
       const dbPath = join(workDir, "drizzle-apply.db");
       const client = createClient({ url: `file:${dbPath}` });
       await runMigrations({ options: baseOptions() }, client);
+      // `org_policy` is this package's own table: in a product it comes from
+      // these migrations (0001 creates it, 0002 adds `id`), not from the
+      // better-auth schema derived above, which already carries `id`.
+      await client.execute(`DROP TABLE org_policy`);
       // The real drizzle migrator, reading the journal `migrate` just wrote.
       await migrate(drizzle(client), { migrationsFolder: dir });
       const columns = await client.execute(`PRAGMA table_info("user")`);

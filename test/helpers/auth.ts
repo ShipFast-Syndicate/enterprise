@@ -41,7 +41,14 @@ function sqlColumnType(type: string): string {
   return type === "number" || type === "boolean" || type === "date" ? "INTEGER" : "TEXT";
 }
 
-function buildDynamicSchema(authOptions: BetterAuthOptions) {
+export interface DynamicSchema {
+  // One distinctly-typed `sqliteTable` per model — see `buildDynamicSchema`.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  drizzleSchema: Record<string, any>;
+  ddl: string[];
+}
+
+function buildDynamicSchema(authOptions: BetterAuthOptions): DynamicSchema {
   const tables = getAuthTables(authOptions);
   // Each `sqliteTable(...)` call below returns a distinctly-shaped type (its
   // own column set), so the map that collects them across every model can't
@@ -195,6 +202,13 @@ export async function makeAuth(
     // plugin's own rule allows, the same way the sign-in special rule is
     // relaxed above. Custom rules always win for a matching path.
     rateLimitCustomRules?: NonNullable<BetterAuthOptions["rateLimit"]>["customRules"];
+    // Replaces tables of the derived schema before the database is built —
+    // for `./product-auth.ts`, which swaps in hand-maintained product tables
+    // (a `session` without any plugin-declared column, seconds timestamps)
+    // the way every product's Drizzle schema actually looks. Receives the
+    // drizzle table map (keyed by model name) and the upstream DDL list; the
+    // package's own `applyMigration` still runs afterwards.
+    tables?: (built: DynamicSchema) => DynamicSchema;
   } = {},
 ) {
   const entitled = new Set<Feature>([
@@ -210,6 +224,7 @@ export async function makeAuth(
     plugins: extraPlugins,
     trustedOrigins,
     rateLimitCustomRules,
+    tables,
     ...enterpriseOverrides
   } = overrides;
   const opts: EnterpriseOptions = {
@@ -236,7 +251,8 @@ export async function makeAuth(
     ...(trustedOrigins ? { trustedOrigins } : {}),
   };
 
-  const { drizzleSchema, ddl } = buildDynamicSchema(baseOptions);
+  const derived = buildDynamicSchema(baseOptions);
+  const { drizzleSchema, ddl } = tables ? tables(derived) : derived;
   // Interactive libsql transactions use separate connections; file-backed SQLite
   // keeps the same database visible after commit. Each test gets its own file.
   const directory = mkdtempSync(join(tmpdir(), "enterprise-auth-"));

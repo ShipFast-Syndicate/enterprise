@@ -13,7 +13,6 @@ import {
   buildSessionUpdateBeforeHook,
   classifySessionCreate,
   deriveSessionCreateMethod,
-  SESSION_AUTH_METHOD_FIELD,
 } from "../../src/server/policy/enforcement";
 import {
   buildScimRequiredUserCreateBeforeHook,
@@ -557,11 +556,10 @@ describe("gap 4 — unknown sign-in methods are not silently exempt", () => {
     ).rejects.toMatchObject({
       body: { code: "METHOD_NOT_ALLOWED", message: expect.stringContaining("email_otp") },
     });
-    // The built-ins the org kept still work (and record their method), and a
-    // continuation is untouched.
+    // The built-ins the org kept still work, and a continuation is untouched.
     await expect(
       hook({ userId } as never, { path: "/sign-in/email", context } as never),
-    ).resolves.toMatchObject({ data: { [SESSION_AUTH_METHOD_FIELD]: "password" } });
+    ).resolves.toBeUndefined();
     await expect(
       hook({ userId } as never, { path: "/two-factor/verify-totp", context } as never),
     ).resolves.toBeUndefined();
@@ -595,7 +593,7 @@ describe("gap 4 — unknown sign-in methods are not silently exempt", () => {
     const hook = buildSessionCreateBeforeHook(opts as never);
     await expect(
       hook({ userId } as never, { path: "/email-otp/verify-email", context } as never),
-    ).resolves.toMatchObject({ data: { [SESSION_AUTH_METHOD_FIELD]: "email_otp" } });
+    ).resolves.toBeUndefined();
     await expect(
       hook({ userId } as never, { path: "/sign-in/email", context } as never),
     ).rejects.toMatchObject({ body: { code: "METHOD_NOT_ALLOWED" } });

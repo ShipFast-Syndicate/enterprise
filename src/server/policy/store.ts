@@ -267,8 +267,8 @@ export async function getEffectivePolicy(
  * Whether **some** organization on the deployment requires two-factor
  * authentication at all — the cheap probe the enrolment gate
  * (`./enforcement.ts`) runs before it resolves a session or a policy, so a
- * deployment with no such organization pays one indexed read per request
- * and nothing else.
+ * deployment with no such organization pays one small `org_policy` read per
+ * request (the table holds one row per configured org) and nothing else.
  */
 export async function anyOrgRequiresTwoFactor(ctx: GenericEndpointContext): Promise<boolean> {
   const row = await ctx.context.adapter.findOne<{ orgId: string }>({
@@ -303,8 +303,8 @@ export interface TwoFactorEnrollmentState {
    * a second factor through upstream's `/two-factor/enable` — independent of
    * whether they already have. A user without one (SSO-, magic-link-,
    * social- or passkey-only) is `false`: they cannot enrol here, and their
-   * standing towards `require2fa` rests on the sign-in method their session
-   * carries, not on enrolment.
+   * standing towards `require2fa` rests on whether their session was judged
+   * under the requirement when it was created, not on enrolment.
    */
   canEnroll: boolean;
   /** `true` when the user holds a password and is not yet enrolled — the one state a `require2fa` org confines to the enrolment allow-list. */
@@ -329,6 +329,97 @@ export async function twoFactorEnrollmentState(
   if (twoFactorEnabled) return { twoFactorEnabled, canEnroll: false, enrollmentPending: false };
   const canEnroll = await canEnrollTwoFactor(ctx, userId);
   return { twoFactorEnabled, canEnroll, enrollmentPending: canEnroll };
+}
+
+// --- two-factor requirement onset ---------------------------------------------
+
+/**
+ * Epoch milliseconds from a stored timestamp, whatever unit and type the
+ * adapter hands back, or `null` when it cannot be read. Products keep these
+ * columns in different units — klar's and dispatch's `session.created_at` is
+ * Drizzle `mode: "timestamp"` (whole **seconds**, read back as a `Date`
+ * whose milliseconds are 0), their `member.createdAt` and `org_policy.
+ * updated_at` are milliseconds — so:
+ *
+ * - a `Date` is taken as is;
+ * - a number (or numeric string) below `1e11` is seconds (`1e11` s is the
+ *   year 5138; `1e11` ms is 1973), anything larger milliseconds;
+ * - any other string is parsed as a date.
+ */
+export function timestampMs(value: unknown): number | null {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  let numeric: number | null = null;
+  if (typeof value === "number") numeric = value;
+  else if (typeof value === "bigint") numeric = Number(value);
+  else if (typeof value === "string" && /^\s*\d+(\.\d+)?\s*$/.test(value)) numeric = Number(value);
+  if (numeric !== null) {
+    if (!Number.isFinite(numeric)) return null;
+    return Math.abs(numeric) < 1e11 ? numeric * 1000 : numeric;
+  }
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/**
+ * The latest instant a stored timestamp can stand for. A value that falls on a
+ * whole second may have been truncated from anywhere inside that second (a
+ * seconds column, or a `Date` read back from one), so it is widened to the
+ * second's last millisecond: when the *onset* of a requirement is compared
+ * against a session's creation, the doubt goes against the session.
+ */
+function latestInstantMs(ms: number): number {
+  return ms % 1000 === 0 ? ms + 999 : ms;
+}
+
+/**
+ * When `require2fa` came to apply to this user, as epoch milliseconds: the
+ * latest, over the given orgs (the effective policy's `sources.require2faBy`),
+ * of the org's `org_policy.updated_at` and — where the user is a member — the
+ * membership's `createdAt`. A session created strictly after this instant was
+ * judged under the requirement by the session-creation hook; one created at
+ * or before it was not (the policy was flipped on, or edited, after it; or the
+ * user joined the org after it) and is re-judged by the caller.
+ *
+ * Every stamp is widened to the latest instant it can stand for
+ * (`latestInstantMs`), and a stamp that cannot be read at all makes the onset
+ * `Infinity` — nothing predates an unknown onset's end, so no session is
+ * taken to have been judged (fail closed). An org that claims the user only
+ * through a verified e-mail domain, without a membership, contributes its
+ * `updated_at` alone: `ssoProvider` records no timestamp for when a domain was
+ * verified.
+ */
+export async function twoFactorRequirementOnsetMs(
+  ctx: GenericEndpointContext,
+  userId: string,
+  orgIds: readonly string[],
+): Promise<number> {
+  let onset = -Infinity;
+  for (const orgId of new Set(orgIds)) {
+    const row = await findPolicyRow(ctx, orgId);
+    const updatedAt = timestampMs(row?.updatedAt);
+    if (updatedAt === null) return Infinity;
+    onset = Math.max(onset, latestInstantMs(updatedAt));
+
+    const member = await ctx.context.adapter.findOne<{ createdAt?: unknown }>({
+      model: "member",
+      where: [
+        { field: "organizationId", value: orgId },
+        { field: "userId", value: userId },
+      ],
+    });
+    if (member) {
+      const joinedAt = timestampMs(member.createdAt);
+      if (joinedAt === null) return Infinity;
+      onset = Math.max(onset, latestInstantMs(joinedAt));
+    }
+  }
+  return onset;
 }
 
 // --- org membership/role helpers -----------------------------------------
