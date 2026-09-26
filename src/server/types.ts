@@ -197,7 +197,24 @@ export interface EnterpriseOptions {
    * never expire unless the caller asks) and `maxExpiresInDays` (default
    * 365) — the longest lifetime a caller may request.
    */
-  apiKeys?: { defaultExpiresInS?: number | null; maxExpiresInDays?: number };
+  apiKeys?: {
+    defaultExpiresInS?: number | null;
+    maxExpiresInDays?: number;
+    /**
+     * Let an `x-api-key` header authenticate as its owner (upstream's
+     * `enableSessionForAPIKeys` mock session) so a product's own API
+     * handlers can call `/get-session` and the owner's organization reads
+     * with the key. @default false
+     *
+     * This is the supported way to opt in: the preset builds the upstream
+     * plugin with the enterprise validator, header list and expiry bound
+     * already in place. A key never authenticates to the management
+     * surface, credential minting, account/credential, organization or SSO
+     * provider writes whichever way it is carried
+     * (`isApiKeyRefusedPath` in `./api-keys.ts`; see `docs/security.md`).
+     */
+    enableSessionForAPIKeys?: boolean;
+  };
   /**
    * SCIM Groups behavior — the static fallback used when an org's
    * `org_policy.group_role_map` is empty. @default groupRoleMap {}

@@ -22,6 +22,8 @@
 
 import { describe, expect, it } from "vitest";
 import { apiKey } from "@better-auth/api-key";
+import { sso } from "@better-auth/sso";
+import type { GenericEndpointContext } from "better-auth";
 import {
   API_KEY_HEADERS,
   assertNotApiKeyRequest,
@@ -29,6 +31,7 @@ import {
   isApiKeyRefusedPath,
   revokeUserApiKeys,
 } from "../../src/server/api-keys";
+import { GATED_PATHS } from "../../src/server/gate";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
 import {
   auditRows,
@@ -97,16 +100,73 @@ async function revokedRows(t: TestAuth, orgId: string) {
   return (await auditRows(t, orgId)).filter((r) => r.action === "api_key.revoked");
 }
 
-/** The integrator's documented opt-in recipe: mock sessions from `x-api-key`, still bound to the user. */
+/**
+ * The hand-composed opt-in recipe (a product replacing the preset's
+ * `api-key` plugin with its own `apiKey()`): mock sessions from `x-api-key`,
+ * still bound to the user, keys still expiring. `keyExpiration` mirrors the
+ * preset so these cases exercise expiring keys, not perpetual ones (verifier
+ * round 2 housekeeping); the supported opt-in is `presetOptIn` below.
+ */
 const optIn = (extra: Record<string, unknown> = {}) =>
   makeAuth({
     apiKeyPlugin: apiKey({
       enableSessionForAPIKeys: true,
       apiKeyHeaders: [...API_KEY_HEADERS],
       customAPIKeyValidator: enterpriseApiKeyValidator,
+      keyExpiration: { defaultExpiresIn: 90 * DAY_S, maxExpiresIn: 365 },
       ...extra,
     }),
   });
+
+/** The supported opt-in: the preset builds the plugin (`apiKeys.enableSessionForAPIKeys`). */
+const presetOptIn = () => makeAuth({ apiKeys: { enableSessionForAPIKeys: true } });
+
+/** An org-scoped, domain-verified SSO provider row (raw insert, like `test/server/policy.test.ts`). */
+async function insertProvider(t: TestAuth, orgId: string, userId: string, providerId = "okta") {
+  await t.client.execute({
+    sql: `INSERT INTO "ssoProvider" (id, issuer, domain, domainVerified, organizationId, providerId, userId) VALUES (?, ?, ?, 1, ?, ?, ?)`,
+    args: [`ssop_${providerId}`, "https://idp.test", "acme.test", orgId, providerId, userId],
+  });
+}
+
+async function providerRow(t: TestAuth, providerId = "okta") {
+  const res = await t.client.execute({
+    sql: `SELECT issuer, domain, domainVerified FROM "ssoProvider" WHERE providerId = ?`,
+    args: [providerId],
+  });
+  const row = res.rows[0];
+  return row
+    ? { issuer: row.issuer, domain: row.domain, domainVerified: row.domainVerified }
+    : null;
+}
+
+/** A second linked `account` row for `userId` (as an OAuth or SSO sign-in would leave). */
+async function insertAccount(t: TestAuth, userId: string, providerId: string) {
+  const id = `acc_${providerId}_${userId}`;
+  const now = Date.now();
+  await t.client.execute({
+    sql: `INSERT INTO account (id, accountId, providerId, userId, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [id, `${providerId}-sub-1`, providerId, userId, now, now],
+  });
+  return id;
+}
+
+async function accountRows(t: TestAuth, userId: string) {
+  const res = await t.client.execute({
+    sql: `SELECT providerId FROM account WHERE userId = ? ORDER BY providerId`,
+    args: [userId],
+  });
+  return res.rows.map((r) => String(r.providerId));
+}
+
+/** An `admin` member of `orgId` holding one key (upstream's `checkProviderAccess` = `isOrgAdmin`). */
+async function adminWithKey(t: TestAuth, orgId: string, email = "admin@acme.test") {
+  const { cookie, userId } = await signUpOwner(t, email);
+  await insertMemberRow(t, orgId, userId, "admin");
+  const { res, body } = await createKey(t, cookie, orgId);
+  expect(res.status).toBe(200);
+  return { cookie, userId, key: body!.key };
+}
 
 const errorCode = async (res: Response) => ((await res.json()) as { code?: string }).code;
 
@@ -663,6 +723,21 @@ describe("gap 1 — the management surface refuses any request carrying an API k
       "/delete-user",
       "/admin/list-users",
       "/admin/ban-user",
+      // SSO provider writes (verifier round 2, F1): the org's identity
+      // boundary — refused whether or not they sit in `GATED_PATHS`, and
+      // fail-closed for anything new under `/sso/`.
+      "/sso/register",
+      "/sso/update-provider",
+      "/sso/delete-provider",
+      "/sso/request-domain-verification",
+      "/sso/verify-domain",
+      "/sso/saml2/logout/:providerId",
+      "/sso/some-future-write",
+      // Account linking (F2, F3) and the OAuth-token reads (F4).
+      "/link-social",
+      "/unlink-account",
+      "/get-access-token",
+      "/refresh-token",
     ]) {
       expect(isApiKeyRefusedPath(path), path).toBe(true);
     }
@@ -693,11 +768,79 @@ describe("gap 1 — the management surface refuses any request carrying an API k
       "/sign-in/email",
       "/sign-out",
       "/list-sessions",
+      "/list-accounts",
+      "/account-info",
       "/enterprise",
       "/organizations/create",
+      // SSO sign-in, callbacks and the two sanitized provider reads.
+      "/sign-in/sso",
+      "/sso/callback",
+      "/sso/callback/:providerId",
+      "/sso/saml2/sp/acs/:providerId",
+      "/sso/saml2/sp/slo/:providerId",
+      "/sso/saml2/sp/metadata",
+      "/sso/providers",
+      "/sso/get-provider",
     ]) {
       expect(isApiKeyRefusedPath(path), path).toBe(false);
     }
+  });
+
+  it("route table: every upstream /sso/* endpoint is either an allow-listed sign-in/callback/read path or refused; GATED_PATHS is a subset of the refusal set", () => {
+    // Enumerated from the pinned `@better-auth/sso` plugin itself, so a
+    // route upstream adds later is refused by construction (fail-closed) and
+    // shows up here when it is reviewed. `ctx.path` in hooks is the
+    // endpoint's declared pattern (`/sso/callback/:providerId`), which is
+    // what the predicate is fed.
+    const table = Object.values(
+      sso({ domainVerification: { enabled: true } }).endpoints, // as the preset builds it
+    ).map((e) => (e as { path: string }).path);
+    const allowed = new Set([
+      "/sign-in/sso",
+      "/sso/callback",
+      "/sso/callback/:providerId",
+      "/sso/saml2/sp/acs/:providerId",
+      "/sso/saml2/sp/slo/:providerId",
+      "/sso/saml2/sp/metadata",
+      "/sso/providers",
+      "/sso/get-provider",
+    ]);
+    const refused = new Set([
+      "/sso/register",
+      "/sso/update-provider",
+      "/sso/delete-provider",
+      "/sso/request-domain-verification",
+      "/sso/verify-domain",
+      "/sso/saml2/logout/:providerId",
+    ]);
+    for (const path of allowed) expect(table, path).toContain(path);
+    for (const path of refused) expect(table, path).toContain(path);
+    expect(table).toHaveLength(allowed.size + refused.size); // the pinned route table, nothing unreviewed
+    for (const path of table) {
+      expect(isApiKeyRefusedPath(path), path).toBe(!allowed.has(path));
+    }
+    // The validator-level check (`enterpriseApiKeyValidator`) relies on the
+    // predicate alone, so the gate's own table must be a subset of it.
+    for (const path of Object.keys(GATED_PATHS)) {
+      expect(isApiKeyRefusedPath(path), path).toBe(true);
+    }
+  });
+
+  it("enterpriseApiKeyValidator refuses a refused path before any lookup, whatever the key; /api-key/verify's own path is never refused", async () => {
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const validate = (path: string, key = "not-a-key-".repeat(8)) =>
+      enterpriseApiKeyValidator({
+        ctx: { path, context } as unknown as GenericEndpointContext,
+        key,
+      });
+    for (const path of ["/sso/update-provider", "/organization/create", "/api-key/create"]) {
+      await expect(validate(path)).rejects.toMatchObject({
+        body: { code: "API_KEY_NOT_ALLOWED_HERE" },
+      });
+    }
+    expect(await validate("/api-key/verify")).toBe(true); // unknown key → upstream's INVALID_API_KEY
+    expect(await validate("/get-session")).toBe(true);
   });
 
   it("assertNotApiKeyRequest: throws API_KEY_NOT_ALLOWED_HERE for any configured header, passes otherwise", () => {
@@ -716,6 +859,279 @@ describe("gap 1 — the management surface refuses any request carrying an API k
         }),
       );
     }
+  });
+});
+
+describe("gap 1 — SSO provider writes are refused to a key (verifier round 2, F1)", () => {
+  it("an owner's or an admin member's key cannot update or delete the org's SSO provider (provider and linked account rows untouched); the header next to a cookie is refused too; the owner's cookie still can; provider reads via key still work", async () => {
+    // Verifier round 2, A1–A3/C2: under the mock session a leaked owner or
+    // admin key rewrote the tenant IdP (`/sso/update-provider` → 200, issuer
+    // and domain replaced) and deleted it (`/sso/delete-provider` → 200,
+    // which upstream follows by deleting every `account` row of that
+    // provider) — the identity boundary PR-3's domain binding hangs on, and
+    // neither path sits in `GATED_PATHS`. Both are session-authenticated
+    // (`checkProviderAccess` = `isOrgAdmin`), so the mock session was enough.
+    // Hand-composed recipe here (the preset opt-in has its own case below).
+    const t = await optIn();
+    const { cookie, userId: ownerId } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    await insertProvider(t, orgId, ownerId);
+    await insertAccount(t, ownerId, "okta");
+    const before = await providerRow(t);
+    expect(before).toEqual({ issuer: "https://idp.test", domain: "acme.test", domainVerified: 1 });
+    const { body } = await createKey(t, cookie, orgId);
+    const admin = await adminWithKey(t, orgId);
+
+    // Domain-only, as the verifiers proved it: upstream itself refuses an
+    // issuer change while linked accounts exist (409), a domain move it
+    // accepts (and resets `domainVerified`).
+    const rewrite = { providerId: "okta", domain: "evil.test" };
+    for (const [who, key] of [
+      ["owner", body!.key],
+      ["admin", admin.key],
+    ] as const) {
+      const headers = { "x-api-key": key };
+      // Sequential (not `Promise.all`): on an unfixed tree these all reach
+      // the mock-session hook's row updates at once and SQLite answers
+      // `SQLITE_BUSY` (500), which would blur the RED signal.
+      const attempts: Array<[string, () => Promise<Response>]> = [
+        ["/sso/update-provider", () => t.api.post("/sso/update-provider", rewrite, headers)],
+        [
+          "/sso/delete-provider",
+          () => t.api.post("/sso/delete-provider", { providerId: "okta" }, headers),
+        ],
+        [
+          "/sso/request-domain-verification",
+          () => t.api.post("/sso/request-domain-verification", { providerId: "okta" }, headers),
+        ],
+        [
+          "/sso/verify-domain",
+          () => t.api.post("/sso/verify-domain", { providerId: "okta" }, headers),
+        ],
+      ];
+      for (const [name, pending] of attempts) {
+        const res = await pending();
+        expect(res.status, `${who} ${name}`).toBe(403);
+        expect(await errorCode(res), `${who} ${name}`).toBe("API_KEY_NOT_ALLOWED_HERE");
+      }
+    }
+    expect(await providerRow(t)).toEqual(before);
+    expect(await accountRows(t, ownerId)).toEqual(["credential", "okta"]);
+
+    // Header-alone principle: the key next to the owner's valid cookie.
+    const both = await t.api.post("/sso/update-provider", rewrite, {
+      cookie,
+      "x-api-key": body!.key,
+    });
+    expect(both.status).toBe(403);
+    expect(await errorCode(both)).toBe("API_KEY_NOT_ALLOWED_HERE");
+    expect(await providerRow(t)).toEqual(before);
+
+    // The sanitized reads an integrator's handler may need stay reachable.
+    const get = await t.api.get("/sso/get-provider?providerId=okta", { "x-api-key": body!.key });
+    expect(get.status).toBe(200);
+    expect(JSON.stringify(await get.json())).not.toContain("clientSecret");
+    expect((await t.api.get("/sso/providers", { "x-api-key": body!.key })).status).toBe(200);
+
+    // Controls: the owner's browser session manages the provider as before.
+    const moved = await t.api.post(
+      "/sso/update-provider",
+      { providerId: "okta", domain: "acme-moved.test" },
+      { cookie },
+    );
+    expect(moved.status).toBe(200);
+    expect(await providerRow(t)).toEqual({
+      issuer: "https://idp.test",
+      domain: "acme-moved.test",
+      domainVerified: 0,
+    });
+    expect(
+      (await t.api.post("/sso/delete-provider", { providerId: "okta" }, { cookie })).status,
+    ).toBe(200);
+    expect(await providerRow(t)).toBeNull();
+  });
+
+  it("the header alone is refused on /sso/update-provider and /sso/delete-provider under the preset default too", async () => {
+    const t = await makeAuth();
+    const { cookie, userId: ownerId } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    await insertProvider(t, orgId, ownerId);
+    const before = await providerRow(t);
+    const both = { cookie, "x-api-key": "anything" };
+    for (const res of await Promise.all([
+      t.api.post("/sso/update-provider", { providerId: "okta", domain: "evil.test" }, both),
+      t.api.post("/sso/delete-provider", { providerId: "okta" }, both),
+    ])) {
+      expect(res.status).toBe(403);
+      expect(await errorCode(res)).toBe("API_KEY_NOT_ALLOWED_HERE");
+    }
+    expect(await providerRow(t)).toEqual(before);
+  });
+});
+
+describe("gap 1 — account linking and OAuth-token reads are refused to a key (verifier round 2, F2–F4)", () => {
+  it("/unlink-account, /link-social, /get-access-token and /refresh-token are refused before upstream's business logic; the owner's fresh session still unlinks", async () => {
+    // F2: `/unlink-account` deleted a second linked account row with only a
+    // key (upstream's `freshSessionMiddleware` is satisfied by the mock
+    // session, whose `createdAt` is "now"). F3: `/link-social` passed the
+    // session gate (404 `PROVIDER_NOT_FOUND` only because no social provider
+    // is configured here; with one, a key starts a link flow for its
+    // owner). F4: `/get-access-token` and `/refresh-token` reached their
+    // handler; with the provider configured they hand the key holder the
+    // owner's OAuth tokens — a stronger credential than the key.
+    const t = await optIn();
+    const { cookie, userId: ownerId } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const accountId = await insertAccount(t, ownerId, "google");
+    expect(await accountRows(t, ownerId)).toEqual(["credential", "google"]);
+    const { body } = await createKey(t, cookie, orgId);
+    const headers = { "x-api-key": body!.key };
+
+    const refused: Array<[string, () => Promise<Response>]> = [
+      ["/unlink-account", () => t.api.post("/unlink-account", { accountId }, headers)],
+      [
+        "/link-social",
+        () => t.api.post("/link-social", { provider: "google", callbackURL: "/" }, headers),
+      ],
+      ["/get-access-token", () => t.api.post("/get-access-token", { accountId }, headers)],
+      ["/refresh-token", () => t.api.post("/refresh-token", { accountId }, headers)],
+    ];
+    for (const [name, pending] of refused) {
+      const res = await pending(); // sequential: see the SSO case
+      expect(res.status, name).toBe(403);
+      expect(await errorCode(res), name).toBe("API_KEY_NOT_ALLOWED_HERE");
+    }
+    expect(await accountRows(t, ownerId)).toEqual(["credential", "google"]);
+
+    // Controls: anonymous is upstream's 401 (the endpoints exist); the
+    // owner's cookie reaches upstream's own logic (no social provider is
+    // configured, so the token read answers upstream's 400) and unlinks.
+    expect((await t.api.post("/link-social", { provider: "google" })).status).toBe(401);
+    const token = await t.api.post("/get-access-token", { accountId }, { cookie });
+    expect(token.status).toBe(400);
+    expect(await errorCode(token)).not.toBe("API_KEY_NOT_ALLOWED_HERE");
+    expect((await t.api.post("/unlink-account", { accountId }, { cookie })).status).toBe(200);
+    expect(await accountRows(t, ownerId)).toEqual(["credential"]);
+    // The metadata read stays reachable and exposes no token.
+    const list = await t.api.get("/list-accounts", headers);
+    expect(list.status).toBe(200);
+    expect(JSON.stringify(await list.json())).not.toMatch(/accessToken|refreshToken/);
+  });
+});
+
+describe("gap 1 — the refusal does not depend on how the key is carried (verifier round 2, E1/E2)", () => {
+  // E1/E2: a hand-composed `apiKey()` that reads the key from `authorization`
+  // or from a query parameter never presents an `x-api-key` header, so the
+  // gate's header check saw nothing and the whole refusal set was inert (a
+  // key minted a key, created an org, rewrote the profile). The validator
+  // is the one thing every recipe must pass, so the refusal lives there too.
+  const recipe = (extra: Record<string, unknown>) =>
+    makeAuth({
+      apiKeyPlugin: apiKey({
+        enableSessionForAPIKeys: true,
+        customAPIKeyValidator: enterpriseApiKeyValidator,
+        keyExpiration: { defaultExpiresIn: 90 * DAY_S, maxExpiresIn: 365 },
+        ...extra,
+      }),
+    });
+
+  async function attack(
+    t: TestAuth,
+    carry: (key: string) => { headers: Record<string, string>; qs: string },
+  ) {
+    const { cookie, userId: ownerId } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    await insertProvider(t, orgId, ownerId);
+    const { body } = await createKey(t, cookie, orgId);
+    const { headers, qs } = carry(body!.key);
+
+    // The recipe itself works: the key authenticates its owner.
+    const session = await t.api.get(`/get-session${qs}`, headers);
+    expect(session.status).toBe(200);
+    expect(((await session.json()) as { user: { id: string } }).user.id).toBe(ownerId);
+
+    const refused: Array<[string, () => Promise<Response>]> = [
+      [
+        "/organization/create",
+        () => t.api.post(`/organization/create${qs}`, { name: "viakey", slug: "viakey" }, headers),
+      ],
+      [
+        "/api-key/create",
+        () => t.api.post(`/api-key/create${qs}`, { name: "child", organizationId: orgId }, headers),
+      ],
+      ["/update-user", () => t.api.post(`/update-user${qs}`, { name: "pwned" }, headers)],
+      [
+        "/sso/update-provider",
+        () =>
+          t.api.post(
+            `/sso/update-provider${qs}`,
+            { providerId: "okta", domain: "evil.test" },
+            headers,
+          ),
+      ],
+    ];
+    for (const [name, pending] of refused) {
+      const res = await pending(); // sequential: see the SSO case
+      expect(res.status, name).toBe(403);
+      expect(await errorCode(res), name).toBe("API_KEY_NOT_ALLOWED_HERE");
+    }
+    expect((await t.client.execute(`SELECT id FROM organization`)).rows).toHaveLength(1);
+    expect((await t.client.execute(`SELECT id FROM apikey`)).rows).toHaveLength(1);
+    const owner = await t.client.execute({
+      sql: `SELECT name FROM user WHERE id = ?`,
+      args: [ownerId],
+    });
+    expect(owner.rows[0]!.name).not.toBe("pwned");
+    expect((await providerRow(t))!.domain).toBe("acme.test");
+  }
+
+  it("apiKeyHeaders: ['authorization'] — every write is still refused, reads work", async () => {
+    const t = await recipe({ apiKeyHeaders: ["authorization"] });
+    await attack(t, (key) => ({ headers: { authorization: key }, qs: "" }));
+  });
+
+  it("customAPIKeyGetter reading ?api_key= — every write is still refused, reads work", async () => {
+    const t = await recipe({
+      customAPIKeyGetter: (ctx: { request?: Request }) =>
+        ctx.request ? new URL(ctx.request.url).searchParams.get("api_key") : null,
+    });
+    await attack(t, (key) => ({ headers: {}, qs: `?api_key=${encodeURIComponent(key)}` }));
+  });
+});
+
+describe("gap 1 — apiKeys.enableSessionForAPIKeys is the supported opt-in (verifier round 2, F5b)", () => {
+  it("the preset builds the mock session with the validator, header list and expiry bound in place; off by default", async () => {
+    const off = await makeAuth();
+    const o = await signUpOwner(off);
+    const { orgId: offOrg } = await createOrg(off, o.cookie);
+    const offKey = await memberWithKey(off, offOrg);
+    // Preset default: upstream ignores the header, so the key authenticates nobody.
+    const anon = await off.api.get("/get-session", { "x-api-key": offKey.key });
+    expect(anon.status).toBe(200);
+    expect(await anon.json()).toBeNull();
+
+    const t = await presetOptIn();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { key, userId, expiresAt } = await memberWithKey(t, orgId);
+    const session = await t.api.get("/get-session", { "x-api-key": key });
+    expect(session.status).toBe(200);
+    expect(((await session.json()) as { user: { id: string } }).user.id).toBe(userId);
+    // Expiry bound kept (90 d), refusal set active, user binding active.
+    const days = (new Date(expiresAt!).getTime() - Date.now()) / 86_400_000;
+    expect(days).toBeGreaterThan(89.9);
+    expect(days).toBeLessThanOrEqual(90);
+    const mint = await t.api.post(
+      "/api-key/create",
+      { name: "child", organizationId: orgId },
+      { "x-api-key": key },
+    );
+    expect(mint.status).toBe(403);
+    expect(await errorCode(mint)).toBe("API_KEY_NOT_ALLOWED_HERE");
+    await t.client.execute({ sql: `UPDATE user SET banned = 1 WHERE id = ?`, args: [userId] });
+    const banned = await t.api.get("/get-session", { "x-api-key": key });
+    expect(banned.status).toBe(401);
+    expect(await errorCode(banned)).toBe("USER_BANNED");
   });
 });
 
