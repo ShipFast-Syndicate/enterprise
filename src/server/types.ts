@@ -203,17 +203,33 @@ export interface EnterpriseOptions {
     /**
      * Let an `x-api-key` header authenticate as its owner (upstream's
      * `enableSessionForAPIKeys` mock session) so a product's own API
-     * handlers can call `/get-session` and the owner's organization reads
-     * with the key. @default false
+     * handlers can resolve the key's owner through `/get-session` with the
+     * key. @default false
      *
      * This is the supported way to opt in: the preset builds the upstream
      * plugin with the enterprise validator, header list and expiry bound
-     * already in place. A key never authenticates to the management
-     * surface, credential minting, account/credential, organization or SSO
-     * provider writes whichever way it is carried
-     * (`isApiKeyRefusedPath` in `./api-keys.ts`; see `docs/security.md`).
+     * already in place. A key authenticates to `API_KEY_ALLOWED_PATHS` only
+     * (`/get-session` and `/api-key/verify`); every other endpoint —
+     * management, credential minting, every write, every other read and any
+     * endpoint of a plugin you add — answers `403 API_KEY_NOT_ALLOWED_HERE`
+     * whichever way the key is carried (`isApiKeyRefusedPath` in
+     * `./api-keys.ts`; see `docs/security.md`).
      */
     enableSessionForAPIKeys?: boolean;
+    /**
+     * Upstream's per-key rate limit (`apiKey({ rateLimit })`), forwarded
+     * as-is. Upstream's default is **10 requests per key per 24 h**
+     * (`enabled: true`, `maxRequests: 10`, `timeWindow: 86_400_000` ms) —
+     * sized for an occasional script, not for a product API driving the
+     * mock session above; set `maxRequests`/`timeWindow` to what your API
+     * needs, or `enabled: false` to rely on your own limiter.
+     * `maxRequests` and `timeWindow` are stamped on each key row at create
+     * (`rateLimitMax`, `rateLimitTimeWindow`), so changing them affects keys
+     * created afterwards; `enabled: false` applies to every key at use
+     * time. A refused request (`API_KEY_NOT_ALLOWED_HERE`) never counts.
+     * @default upstream's (10 per 24 h)
+     */
+    rateLimit?: { enabled?: boolean; timeWindow?: number; maxRequests?: number };
   };
   /**
    * SCIM Groups behavior — the static fallback used when an org's

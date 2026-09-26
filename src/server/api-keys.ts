@@ -16,11 +16,16 @@
 // This module binds every key use to the same identity checks a session
 // gets, revokes keys on every deprovisioning path (audited into every org the
 // user belonged to — captured *before* the rows go, see `revokeUserApiKeys`),
-// and keeps keys off the management/credential-minting surface — twice: in
-// the validator (`enterpriseApiKeyValidator`, whatever carries the key) and
-// on the `x-api-key` header alone (`assertNotApiKeyRequest`, via the gate).
-// Policy (`org_policy`) still governs sessions only: keys are bound to the
-// user at use time and bounded by expiry (`apiKeys.*` in `./types.ts`).
+// and confines a key to an explicit allow-list of endpoints
+// (`API_KEY_ALLOWED_PATHS`: the owner's own session lookup; plus the api-key
+// plugin's own server-only verify call, `isApiKeyVerifyCall`) — every other
+// better-auth endpoint, including those of plugins a product adds later,
+// answers `403 API_KEY_NOT_ALLOWED_HERE`.
+// Enforced twice: in the validator (`enterpriseApiKeyValidator`, whatever
+// carries the key) and on the `x-api-key` header alone
+// (`assertNotApiKeyRequest`, via the gate). Policy (`org_policy`) still
+// governs sessions only: keys are bound to the user at use time and bounded
+// by expiry (`apiKeys.*` in `./types.ts`).
 
 import type { AuthContext, BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import { APIError, createAuthMiddleware, getSessionFromCtx, isAPIError } from "better-auth/api";
@@ -35,14 +40,14 @@ export const API_KEY_ERROR = {
 } as const;
 
 const API_KEY_NOT_ALLOWED_HERE_MESSAGE =
-  "API keys cannot be used to manage the organization, its SSO providers, the account or its credentials, or to mint credentials.";
+  "API keys authenticate a product's own API only: they can reach /get-session (and be verified server-side), no other endpoint.";
 
 /**
  * Request headers that carry an API key. Passed to upstream `apiKey({
  * apiKeyHeaders })` by the preset (so the two agree by construction) and
  * checked by `assertNotApiKeyRequest`. A hand-composed `apiKey()` that reads
  * the key from elsewhere (`apiKeyHeaders: ["authorization"]`, a
- * `customAPIKeyGetter`) is still refused on every `isApiKeyRefusedPath` by
+ * `customAPIKeyGetter`) is still confined to `API_KEY_ALLOWED_PATHS` by
  * `enterpriseApiKeyValidator` — the header check is the second layer, not
  * the only one.
  */
@@ -88,14 +93,18 @@ function isBanned(user: UserRow): boolean {
  * Two checks, in order:
  *
  * 1. **Where** the key is being used. On the mock-session path `ctx.path` is
- *    the endpoint the key is trying to authenticate to; a refused path
- *    (`isApiKeyRefusedPath`) is `403 API_KEY_NOT_ALLOWED_HERE` before the
- *    key is even looked up. This is the layer that holds however the key is
- *    carried — a hand-composed `apiKey()` with `apiKeyHeaders:
- *    ["authorization"]` or a `customAPIKeyGetter` reading a query parameter
- *    never presents an `x-api-key` header to the gate's header check
+ *    the endpoint the key is trying to authenticate to; anything outside
+ *    `API_KEY_ALLOWED_PATHS` (`isApiKeyRefusedPath`) is `403
+ *    API_KEY_NOT_ALLOWED_HERE` before the key is even looked up — so a
+ *    refused request never consumes the key's rate limit either. This is
+ *    the layer that holds however the key is carried — a hand-composed
+ *    `apiKey()` with `apiKeyHeaders: ["authorization"]` or a
+ *    `customAPIKeyGetter` reading a query parameter never presents an
+ *    `x-api-key` header to the gate's header check
  *    (`assertNotApiKeyRequest`), but it cannot mint a session without
- *    running this validator. `/api-key/verify`'s own path is never refused.
+ *    running this validator. Upstream's own verify call (`auth.api.
+ *    verifyApiKey`, path-less) is let through by `isApiKeyVerifyCall`, so
+ *    the verify path is never refused by this check.
  * 2. **Who** the key belongs to: the user row is re-read on every use and a
  *    banned (`USER_BANNED`; an expired temporary ban is not a ban) or missing
  *    (`USER_NOT_FOUND`) user is refused.
@@ -113,7 +122,11 @@ export async function enterpriseApiKeyValidator({
   ctx: GenericEndpointContext;
   key: string;
 }): Promise<boolean> {
-  if (typeof ctx.path === "string" && isApiKeyRefusedPath(ctx.path)) {
+  if (
+    typeof ctx.path === "string" &&
+    isApiKeyRefusedPath(ctx.path) &&
+    !isApiKeyVerifyCall(ctx, key)
+  ) {
     throw new APIError("FORBIDDEN", {
       code: API_KEY_ERROR.API_KEY_NOT_ALLOWED_HERE,
       message: API_KEY_NOT_ALLOWED_HERE_MESSAGE,
@@ -349,133 +362,114 @@ export function apiKeyLifecycle(
   } satisfies BetterAuthPlugin;
 }
 
-// `/organization/*` is refused wholesale except these reads — the paths an
-// integrator's API handler legitimately resolves for a key's owner (which
-// orgs, which members, which role). Fail-closed on purpose: a write endpoint
-// upstream adds later is refused until it is reviewed here, a read one
-// merely needs adding to this list (upstream is pinned exactly, `README.md`).
-const API_KEY_ALLOWED_ORG_READS: ReadonlySet<string> = new Set([
-  "/organization/list",
-  "/organization/get-full-organization",
-  "/organization/get-organization",
-  "/organization/list-members",
-  "/organization/get-active-member",
-  "/organization/get-active-member-role",
-  "/organization/has-permission",
-  "/organization/check-slug",
-  "/organization/get-invitation",
-  "/organization/list-invitations",
-  "/organization/list-user-invitations",
-  "/organization/list-teams",
-  "/organization/list-user-teams",
-  "/organization/list-team-members",
-  "/organization/list-roles",
-  "/organization/get-role",
-]);
-
-// `/sso/*` is refused wholesale except the sign-in/callback paths (no
-// session — the browser and the IdP drive them) and the two provider reads
-// (upstream sanitizes them: `clientIdLastFour`, never a secret). Everything
-// else under `/sso/` is a provider write — `register`, `update-provider`,
-// `delete-provider` (which also deletes every `account` row of that
-// provider), `request-domain-verification`, `verify-domain` — i.e. the
-// org's identity boundary that the domain binding (`./sso-domain.ts`) hangs
-// on. `/sso/saml2/logout/:providerId` is deliberately *not* allow-listed: it
-// is a session-scoped write (it deletes the caller's session and sends the
-// IdP a LogoutRequest for the owner), not a sign-in or a read. Paths are
-// compared as upstream declares them (`ctx.path` is the endpoint's pattern,
-// e.g. `/sso/callback/:providerId`), so the parameterised ones match by
-// prefix. Fail-closed on purpose, like `/organization/*`: a new upstream
-// `/sso/*` endpoint is refused until it is reviewed here
-// (`test/security/gap1-api-keys.test.ts` enumerates upstream's route table).
-const API_KEY_ALLOWED_SSO_PATHS: ReadonlySet<string> = new Set([
-  "/sso/callback",
-  "/sso/saml2/sp/metadata",
-  "/sso/providers",
-  "/sso/get-provider",
-]);
-const API_KEY_ALLOWED_SSO_PREFIXES: readonly string[] = [
-  "/sso/callback/",
-  "/sso/saml2/sp/acs/",
-  "/sso/saml2/sp/slo/",
-];
-
-// Exact paths refused to a key-carrying request, on top of the prefix rules
-// below. `GATED_PATHS` (the gate's own table) is a subset of what this module
-// refuses — pinned by `test/security/gap1-api-keys.test.ts` — so the
-// validator-level check (`enterpriseApiKeyValidator`) needs nothing else.
-const API_KEY_REFUSED_PATHS: ReadonlySet<string> = new Set([
-  // Key writes: a key must never mint, extend, un-expire, re-enable or
-  // delete a key — including itself. `/api-key/verify`, `/api-key/get` and
-  // `/api-key/list` stay reachable (the verify path is what products call,
-  // often forwarding the incoming request's headers).
-  "/api-key/create",
-  "/api-key/update",
-  "/api-key/delete",
-  // Account and credential writes: a leaked key must not rewrite the
-  // profile, move the e-mail, set a password, register a new long-lived
-  // credential (passkey), link a social identity to its owner (a persistent
-  // credential — upstream's `freshSessionMiddleware` is satisfied by the
-  // mock session, whose `createdAt` is "now") or unlink one.
-  "/update-user",
-  "/change-email",
-  "/change-password",
-  "/set-password",
-  "/delete-user",
-  "/link-social",
-  "/unlink-account",
-  "/passkey/generate-register-options",
-  "/passkey/verify-registration",
-  "/passkey/update-passkey",
-  "/passkey/delete-passkey",
-  // Credential *reads*: these return (and refresh) the owner's stored OAuth
-  // provider tokens — a stronger credential than the key itself. Metadata
-  // reads (`/list-accounts`, `/account-info`) expose no token and stay
-  // reachable.
-  "/get-access-token",
-  "/refresh-token",
-]);
-
-// Whole surfaces refused to a key: the enterprise management API, the admin
-// plugin, and two-factor enrolment/verification (a key never satisfies or
-// disables a second factor).
-const API_KEY_REFUSED_PREFIXES: readonly string[] = ["/enterprise/", "/admin/", "/two-factor/"];
+/**
+ * The only better-auth endpoint a request carrying an API key may reach
+ * over HTTP — an allow-list, not a deny-list (verifier round 3, F6/F7: a
+ * deny-list is fail-open for every endpoint it does not know, and
+ * `/list-sessions` handed a key the owner's raw session tokens while a
+ * `jwt()` or `oneTimeToken()` plugin a product adds minted a fresh
+ * credential from a key). Built from what the fleet products actually do
+ * with a key (2026-09-26, read-only survey of the seven `enterprisePreset`
+ * integrators — evidence table in the fork PR and plan §6): every one of
+ * them calls `auth.api.getSession({ headers })` with the incoming request's
+ * headers (which is where an `x-api-key` header reaches this package) and
+ * none opts into the mock session. Nothing else: not the organization,
+ * provider, account or key *reads* rounds 2–3 allow-listed (no product
+ * reads them with a key; a key's owner resolves through `/get-session`),
+ * not sign-in flows (no key is ever sent to them), not any endpoint of a
+ * plugin added later. Widening this set is a reviewed change to this
+ * package, on evidence, never a per-product option — that is the point.
+ *
+ * The api-key plugin's own verify path (`auth.api.verifyApiKey`, the
+ * server-only call products use) is the one other place the validator runs;
+ * it has no HTTP route and no path (`ctx.path` is one of
+ * `SERVER_ONLY_PATHS`), so it is not in this set — see
+ * `isApiKeyVerifyCall`.
+ *
+ * Paths are matched exactly against the endpoint's declared path
+ * (`ctx.path`), never normalised: better-call answers 404 for a trailing
+ * slash or case mismatch, so there is nothing to normalise here.
+ */
+export const API_KEY_ALLOWED_PATHS: ReadonlySet<string> = new Set(["/get-session"]);
 
 /**
- * Whether a request carrying an API key is refused on `path` (`403
- * API_KEY_NOT_ALLOWED_HERE`) — the management surface, credential minting,
- * account/credential writes, credential-yielding reads, every organization
- * write and every SSO provider write. Enforced twice: by
- * `enterpriseApiKeyValidator` (whatever carries the key, before the key is
- * looked up) and by the gate's first hook on the `x-api-key` header alone
- * (`assertNotApiKeyRequest`, so it also holds under the preset default). The
- * gate ORs this with its own `GATED_PATHS` table, a subset. Reads, sign-in
- * flows and `/api-key/verify` are never refused: a key is for a product's
- * own API, and with the opt-in mock session the product's handler still
- * needs `/get-session` and the owner's org reads.
+ * The two `ctx.path` values an endpoint that declares no path — a
+ * `createAuthEndpoint.serverOnly({ method, body })` endpoint, which has no
+ * HTTP route and is reachable only from the product's own server code
+ * (`auth.api.*`) — shows to this module: `virtual:` inside the endpoint
+ * itself (better-call fills it in for a path-less endpoint,
+ * `node_modules/better-call/dist/context.mjs`) and `/` inside a plugin
+ * `hooks.before` handler (better-auth's dispatcher passes the endpoint's
+ * undefined path into the hook, `node_modules/better-auth/dist/api/
+ * dispatch.mjs`, so the `createAuthMiddleware` context falls back to the
+ * middleware's own `/`, `node_modules/better-call/dist/middleware.mjs`). An
+ * HTTP request never produces either: the router sets the matched route's
+ * path, and no route is declared as `/`.
  */
-export function isApiKeyRefusedPath(path: string): boolean {
-  if (API_KEY_REFUSED_PATHS.has(path)) return true;
-  if (API_KEY_REFUSED_PREFIXES.some((prefix) => path.startsWith(prefix))) return true;
-  if (path.startsWith("/organization/")) return !API_KEY_ALLOWED_ORG_READS.has(path);
-  if (path.startsWith("/sso/")) {
-    return (
-      !API_KEY_ALLOWED_SSO_PATHS.has(path) &&
-      !API_KEY_ALLOWED_SSO_PREFIXES.some((prefix) => path.startsWith(prefix))
-    );
-  }
-  return false;
+export const SERVER_ONLY_PATHS: ReadonlySet<string> = new Set(["virtual:", "/"]);
+
+/** Whether `path` is one of `SERVER_ONLY_PATHS`. */
+export function isServerOnlyPath(path: string): boolean {
+  return SERVER_ONLY_PATHS.has(path);
+}
+
+/** Whether `path` is one of `API_KEY_ALLOWED_PATHS` (exact match). */
+export function isApiKeyAllowedPath(path: string): boolean {
+  return API_KEY_ALLOWED_PATHS.has(path);
 }
 
 /**
- * Gate helper: refuses a request that carries an API key on the management
- * surface (`/enterprise/*`), a credential-minting path (`GATED_PATHS`,
- * incl. `/api-key/create`) and every path `isApiKeyRefusedPath` names (key,
- * account, credential, organization and SSO-provider writes). Keys are for a
- * product's own API; with the opt-in mock session on they would otherwise
- * authenticate the key's owner to everything that owner can do, including
- * minting further keys, re-issuing their own lifetime, reconfiguring the org
- * or rewriting its IdP — a leaked key must never be able to do any of that.
+ * Whether a request carrying an API key is refused on `path` (`403
+ * API_KEY_NOT_ALLOWED_HERE`): every better-auth endpoint that is not in
+ * `API_KEY_ALLOWED_PATHS` — the management surface, credential minting,
+ * every write, every read other than the owner's own session, every
+ * path-less server-only endpoint and every endpoint of a plugin this
+ * package does not know (fail-closed by construction). Enforced twice: by
+ * `enterpriseApiKeyValidator` (whatever carries the key, before the key is
+ * looked up; it additionally lets upstream's own verify call through, see
+ * `isApiKeyVerifyCall`) and by the gate's first hook on the `x-api-key`
+ * header alone (`assertNotApiKeyRequest`, on every HTTP-routable path, so
+ * it also holds under the preset default). `GATED_PATHS` is a subset by
+ * construction (pinned by `test/security/gap1-api-keys.test.ts`).
+ */
+export function isApiKeyRefusedPath(path: string): boolean {
+  return !isApiKeyAllowedPath(path);
+}
+
+/**
+ * Whether the validator is being run for upstream's own `verifyApiKey`
+ * endpoint (`auth.api.verifyApiKey({ body: { key } })`): a path-less
+ * server-only call (`SERVER_ONLY_PATHS` — the validator runs twice for it
+ * when a product forwards headers that carry the key: from the mock-session
+ * hook, path `/`, and from the endpoint's own `validateApiKey`, path
+ * `virtual:`) whose body carries the very key being validated — which is
+ * how that endpoint hands the key to `validateApiKey` and on to the
+ * validator. Recognised structurally rather than by path because the
+ * endpoint declares none, and deliberately *not* as "any server-only call":
+ * the other path-less endpoints upstream mounts (`viewBackupCodes`,
+ * `generateTOTP`, SCIM token minting, JWT signing, …) stay refused for a
+ * key even when a product forwards the request headers into them. Over HTTP
+ * `ctx.path` is always the route's path, so this never matches an HTTP
+ * request.
+ */
+export function isApiKeyVerifyCall(ctx: { path?: string; body?: unknown }, key: string): boolean {
+  if (typeof ctx.path !== "string" || !isServerOnlyPath(ctx.path)) return false;
+  const body = ctx.body as { key?: unknown } | null | undefined;
+  return typeof body?.key === "string" && body.key === key;
+}
+
+/**
+ * Gate helper: refuses a request that carries an API key on every path
+ * outside `API_KEY_ALLOWED_PATHS` (the gate's first hook matches on
+ * `isApiKeyRefusedPath`) — the management surface (`/enterprise/*`), every
+ * credential-minting path (`GATED_PATHS`, incl. `/api-key/create`), every
+ * key, account, credential, organization and SSO-provider write, every read
+ * other than the owner's own session, and every endpoint of a plugin this
+ * package does not know. Keys are for a product's own API; with the opt-in
+ * mock session on they would otherwise authenticate the key's owner to
+ * everything that owner can do, including minting further keys or another
+ * credential, re-issuing their own lifetime, reconfiguring the org or
+ * rewriting its IdP — a leaked key must never be able to do any of that.
  * Judged on the header alone (so it also holds under the preset default,
  * where upstream ignores the header): a browser session never sends one.
  * The validator-level refusal in `enterpriseApiKeyValidator` is the layer

@@ -86,7 +86,9 @@ export function takeDomainBindingOffUnlistedWarning(opts: EnterpriseOptions): st
  *   ending in `/*`) and every value a `[a-z_][a-z0-9_]*` method name.
  * - `policy.twoFactor.satisfiedBy` — method names; `enrollmentPaths` — paths.
  * - `apiKeys.defaultExpiresInS` — finite `> 0` or `null` (never expire);
- *   `apiKeys.maxExpiresInDays` — finite `> 0`.
+ *   `apiKeys.maxExpiresInDays` — finite `> 0`; `apiKeys.rateLimit` — an
+ *   object whose `enabled` is a boolean and whose `timeWindow` /
+ *   `maxRequests` are finite `> 0` when present.
  */
 export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
   assertSecretsKey(opts.secretsKey);
@@ -238,5 +240,20 @@ export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
   const maxExpiresInDays = opts.apiKeys?.maxExpiresInDays;
   if (maxExpiresInDays !== undefined) {
     assertPositiveFinite("apiKeys.maxExpiresInDays", maxExpiresInDays);
+  }
+  const rateLimit = opts.apiKeys?.rateLimit;
+  if (rateLimit !== undefined) {
+    if (typeof rateLimit !== "object" || rateLimit === null) {
+      fail(`"apiKeys.rateLimit" must be an object (got ${String(rateLimit)}).`);
+    }
+    if (rateLimit.enabled !== undefined && typeof rateLimit.enabled !== "boolean") {
+      fail(`"apiKeys.rateLimit.enabled" must be a boolean (got ${String(rateLimit.enabled)}).`);
+    }
+    if (rateLimit.timeWindow !== undefined) {
+      assertPositiveFinite("apiKeys.rateLimit.timeWindow", rateLimit.timeWindow);
+    }
+    if (rateLimit.maxRequests !== undefined) {
+      assertPositiveFinite("apiKeys.rateLimit.maxRequests", rateLimit.maxRequests);
+    }
   }
 }

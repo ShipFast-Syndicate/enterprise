@@ -10,8 +10,9 @@ custom Groups bearer parser are no longer mounted or exported.
 
 The portal authorizes every catalog request against the explicit organization.
 Only owners mint, rotate or decommission tokens; owners and admins may list. A
-decommission never bans or strips API keys from a user who holds an `owner`
-membership anywhere (SCIM cannot produce one, so it is always a manual grant).
+decommission never bans a user who holds an `owner` membership anywhere (SCIM cannot
+produce one, so it is always a manual grant) — the skipped ban is audited and their API
+keys are still revoked like everyone else's (see "API keys" below).
 Native bearer authentication binds a credential to one connection and provisioning
 domain. Users and Groups enforce the same `scim` entitlement before mutation.
 
@@ -153,36 +154,45 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   `/api-key/update { expiresIn: null }` (which upstream accepts and writes as "never") is refused
   with `400 API_KEY_EXPIRY_REQUIRED` unless the operator chose `apiKeys.defaultExpiresInS: null`;
   a finite lifetime still goes through upstream's ceiling check. Finally, a request that carries
-  an API key is refused with `403 API_KEY_NOT_ALLOWED_HERE`, before any session or org
-  resolution and whether or not the mock session is on, on: `/enterprise/*`, every gated path
-  (`GATED_PATHS`), every key write (`/api-key/create|update|delete` — a key never mints another
-  key nor re-issues its own lifetime), every `/organization/*` write (reads such as
-  `/organization/list`, `/organization/get-full-organization` or `/organization/list-members`
-  stay reachable, as an integrator's API handler needs them for the key's owner), every SSO
-  provider write (`/sso/register`, `/sso/update-provider`, `/sso/delete-provider` — which also
-  drops every linked `account` row — `/sso/request-domain-verification`, `/sso/verify-domain`,
-  `/sso/saml2/logout/:providerId`, and anything upstream adds under `/sso/` later: only
-  `/sign-in/sso`, the callbacks `/sso/callback[/:providerId]`, `/sso/saml2/sp/acs|slo/:providerId`,
-  `/sso/saml2/sp/metadata` and the sanitized reads `/sso/providers`, `/sso/get-provider` are
-  allow-listed), the account and credential writes (`/update-user`, `/change-email`,
-  `/change-password`, `/set-password`, `/delete-user`, `/link-social`, `/unlink-account`, passkey
-  registration/update/delete, `/two-factor/*`), the credential-yielding reads `/get-access-token`
-  and `/refresh-token` (they return the owner's OAuth provider tokens; `/list-accounts` and
-  `/account-info` expose none and stay reachable) and `/admin/*` (`isApiKeyRefusedPath` in
-  `src/server/api-keys.ts`). `/get-session`, `/api-key/verify`, `/api-key/list` and `/api-key/get`
-  are never refused. The refusal is enforced twice: inside `enterpriseApiKeyValidator` — before
-  the key is even looked up, so it holds however the key is carried — and by the gate on the
-  `x-api-key` header alone, so it also holds under the preset default (where upstream ignores
-  the header) and next to a valid session cookie.
+  an API key reaches an **allow-list** of endpoints and nothing else: over HTTP, `/get-session`
+  only (`API_KEY_ALLOWED_PATHS` in `src/server/api-keys.ts`); server-side, upstream's own
+  `auth.api.verifyApiKey` call (it has no HTTP route; the validator recognises it by the key it
+  hands over in its body, `isApiKeyVerifyCall`). Every other better-auth endpoint answers
+  `403 API_KEY_NOT_ALLOWED_HERE`, before any session or org resolution and whether or not the
+  mock session is on — the management surface (`/enterprise/*`), every gated path
+  (`GATED_PATHS`), every key, organization, SSO-provider, account and credential write, every
+  other read (`/list-sessions`, which returns raw session tokens; `/list-accounts`,
+  `/organization/*`, `/api-key/list|get`, `/sso/providers`, …), every sign-in flow, `/admin/*`,
+  `/two-factor/*`, the other path-less server-only calls (`viewBackupCodes`, SCIM token minting,
+  JWT signing, …) and every endpoint of a plugin you add that this package has never heard of
+  (`jwt()`'s `/token`, `oneTimeToken()`'s `/one-time-token/generate`, your own). The list is an
+  allow-list rather than a deny-list because a deny-list is fail-open for every endpoint it does
+  not know; it was built from what the fleet products do with a key — each resolves the key's
+  owner through `auth.api.getSession({ headers })` and nothing else — and widening it is a
+  reviewed change to this package on evidence, not a per-product option. The refusal is enforced
+  twice: inside `enterpriseApiKeyValidator` — before the key is even looked up, so it holds
+  however the key is carried and a refused request never counts against the key's rate limit —
+  and by the gate on the `x-api-key` header alone on every HTTP-routable path, so it also holds
+  under the preset default (where upstream ignores the header) and next to a valid session
+  cookie. `/get-session` with a stray `x-api-key` header next to a session cookie still answers
+  the cookie's session under the default, so products that forward the whole incoming request
+  into `getSession` are unaffected.
 - **Opting into the mock session.** Set `apiKeys.enableSessionForAPIKeys: true` on the preset:
   it builds upstream's `apiKey()` with the validator, the header list and the expiry bound
-  already in place, and that is the supported recipe. A product that instead replaces the
+  already in place, and that is the supported recipe. With it on, a key authenticates its owner
+  to `/get-session` — the one thing a product's own API handler needs — and to nothing else (the
+  allow-list above); with `bearer()` mounted the key is still not a session token. Upstream's
+  per-key rate limit stays at its default of **10 requests per key per 24 h** unless you set
+  `apiKeys.rateLimit` (`{ enabled, maxRequests, timeWindow }` in ms, forwarded as-is; validated
+  at preset build): size it for your API or set `enabled: false` and rate-limit in your own
+  layer — `maxRequests`/`timeWindow` are stamped on each key at create, `enabled: false` applies
+  to every key at use, and a refused request never counts. A product that instead replaces the
   preset's `api-key` plugin with its own `apiKey({ enableSessionForAPIKeys: true, ... })` must
   keep `customAPIKeyValidator: enterpriseApiKeyValidator` (the one layer every carrier passes
   through), `apiKeyHeaders: [...API_KEY_HEADERS]` (so the gate's header-alone layer still sees
   the key) and a `keyExpiration` matching the preset (`defaultExpiresIn` in **seconds**,
   `maxExpiresIn` in days) — omitting it restores perpetual keys at create. A
-  `customAPIKeyGetter` or another header name is still refused on every path above by the
+  `customAPIKeyGetter` or another header name is still confined to the allow-list by the
   validator, but forfeits the header-alone layer.
 
 ## Upgrading from 1.0.x

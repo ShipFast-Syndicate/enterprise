@@ -16,20 +16,41 @@
 // every key use is bound to the live user row (`USER_BANNED` /
 // `USER_NOT_FOUND`), keys expire (90 days by default, never longer than
 // `apiKeys.maxExpiresInDays`), every deprovisioning path revokes them and
-// audits `api_key.revoked` into every org the user belonged to, and the
-// management surface refuses any request carrying an API key
-// (`API_KEY_NOT_ALLOWED_HERE`).
+// audits `api_key.revoked` into every org the user belonged to, and a request
+// carrying an API key reaches an explicit allow-list of endpoints only
+// (`API_KEY_ALLOWED_PATHS`: `/get-session`; plus upstream's own server-only
+// verify call, recognised by `isApiKeyVerifyCall`) — everything else answers
+// `API_KEY_NOT_ALLOWED_HERE`.
+//
+// Round 4 (security verifier round 3, F6/F7; lead decision): rounds 2–3 kept
+// a deny-list, which is fail-open for every endpoint it does not know —
+// `/list-sessions` handed a key the owner's raw session tokens (with the
+// first-party `bearer()` plugin mounted, that token then drove the entire
+// refused surface), and a `jwt()` or `oneTimeToken()` plugin a product adds
+// minted a fresh credential from a key. The list is now an allow-list built
+// from what the seven fleet products do with a key (all of them:
+// `auth.api.getSession({ headers })`; none opts into the mock session), so
+// the reads rounds 2–3 allow-listed (`/organization/*` reads, `/api-key/list`,
+// `/sso/providers`, `/list-accounts`, …) are refused too — the inversions are
+// listed in plan §5.4.
 
 import { describe, expect, it } from "vitest";
 import { apiKey } from "@better-auth/api-key";
 import { sso } from "@better-auth/sso";
-import type { GenericEndpointContext } from "better-auth";
+import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
+import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
+import { bearer, jwt, oneTimeToken } from "better-auth/plugins";
 import {
+  API_KEY_ALLOWED_PATHS,
   API_KEY_HEADERS,
   assertNotApiKeyRequest,
   enterpriseApiKeyValidator,
+  isApiKeyAllowedPath,
   isApiKeyRefusedPath,
+  isApiKeyVerifyCall,
+  isServerOnlyPath,
   revokeUserApiKeys,
+  SERVER_ONLY_PATHS,
 } from "../../src/server/api-keys";
 import { GATED_PATHS } from "../../src/server/gate";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
@@ -525,7 +546,7 @@ describe("gap 1 — opt-in mock session (enableSessionForAPIKeys) stays bound to
     ).toBe(200);
   });
 
-  it("a key cannot reconfigure the organization, the account or its credentials; reads and the product's own session lookup still work", async () => {
+  it("a key cannot reconfigure the organization, the account or its credentials; only the product's own session lookup still works", async () => {
     // Verifier B2: with the mock session on, a leaked owner key reached
     // `/organization/create` (attacker = owner of a fresh org),
     // `/organization/invite-member` (pending admin invitation),
@@ -628,16 +649,32 @@ describe("gap 1 — opt-in mock session (enableSessionForAPIKeys) stays bound to
     });
     expect(Boolean(v.rows[0]!.banned)).toBe(false);
 
-    // Reads — what an integrator's API handler legitimately needs from the
-    // key's owner — are untouched.
-    const allowed = [
-      t.api.get("/get-session", headers),
-      t.api.get("/organization/list", headers),
-      t.api.get(`/organization/get-full-organization?organizationId=${orgId}`, headers),
-      t.api.get("/api-key/list", headers),
-      t.api.get("/passkey/list-user-passkeys", headers),
+    // The one read a product needs from a key — its owner — still works;
+    // the reads rounds 2–3 allow-listed are refused since round 4 (no
+    // product reads them with a key; the owner resolves through
+    // `/get-session` — plan §5.4).
+    expect((await t.api.get("/get-session", headers)).status).toBe(200);
+    const formerlyAllowed: Array<[string, () => Promise<Response>]> = [
+      ["/organization/list", () => t.api.get("/organization/list", headers)],
+      [
+        "/organization/get-full-organization",
+        () => t.api.get(`/organization/get-full-organization?organizationId=${orgId}`, headers),
+      ],
+      ["/api-key/list", () => t.api.get("/api-key/list", headers)],
+      ["/passkey/list-user-passkeys", () => t.api.get("/passkey/list-user-passkeys", headers)],
     ];
-    for (const res of await Promise.all(allowed)) expect(res.status).toBe(200);
+    for (const [name, pending] of formerlyAllowed) {
+      const res = await pending();
+      expect(res.status, name).toBe(403);
+      expect(await errorCode(res), name).toBe("API_KEY_NOT_ALLOWED_HERE");
+    }
+    // The owner's cookie still reads them (controls).
+    for (const res of await Promise.all([
+      t.api.get("/organization/list", { cookie }),
+      t.api.get("/api-key/list", { cookie }),
+    ])) {
+      expect(res.status).toBe(200);
+    }
   });
 });
 
@@ -691,10 +728,23 @@ describe("gap 1 — the management surface refuses any request carrying an API k
     expect((await t.api.post("/update-user", { name: "x" }, { cookie })).status).toBe(200);
   });
 
-  it("isApiKeyRefusedPath: management, credential-minting, account and organization writes are refused; reads, sign-in and /api-key/verify are not", () => {
-    // `GATED_PATHS` (e.g. `/sso/register`) is the gate's own table, ORed in
-    // by its matcher — pinned over HTTP above, not by this predicate.
+  it("isApiKeyRefusedPath: an allow-list of exactly /get-session; every other path — writes, reads, sign-in flows, other plugins' endpoints, path-less server-only calls, near-misses — is refused", () => {
+    // Round 4: the predicate is `!API_KEY_ALLOWED_PATHS.has(path)`. Pinned
+    // both ways so widening the set is a visible, reviewed change.
+    expect([...API_KEY_ALLOWED_PATHS]).toEqual(["/get-session"]);
+    // better-call's markers: `virtual:` inside a path-less endpoint
+    // (`dist/context.mjs`), `/` inside a before-hook on one (`dist/middleware.mjs`).
+    expect([...SERVER_ONLY_PATHS].sort()).toEqual(["/", "virtual:"]);
+    for (const path of SERVER_ONLY_PATHS) expect(isServerOnlyPath(path), path).toBe(true);
+    expect(isServerOnlyPath("/get-session")).toBe(false);
+    expect(isServerOnlyPath("/virtual:")).toBe(false);
+    for (const path of API_KEY_ALLOWED_PATHS) {
+      expect(isApiKeyAllowedPath(path), path).toBe(true);
+      expect(isApiKeyRefusedPath(path), path).toBe(false);
+    }
     for (const path of [
+      // Management, credential minting, key/org/account/credential writes
+      // (rounds 1–3).
       "/enterprise/policy",
       "/enterprise/scim/tokens/create",
       "/organization/create-team",
@@ -723,9 +773,6 @@ describe("gap 1 — the management surface refuses any request carrying an API k
       "/delete-user",
       "/admin/list-users",
       "/admin/ban-user",
-      // SSO provider writes (verifier round 2, F1): the org's identity
-      // boundary — refused whether or not they sit in `GATED_PATHS`, and
-      // fail-closed for anything new under `/sso/`.
       "/sso/register",
       "/sso/update-provider",
       "/sso/delete-provider",
@@ -733,17 +780,32 @@ describe("gap 1 — the management surface refuses any request carrying an API k
       "/sso/verify-domain",
       "/sso/saml2/logout/:providerId",
       "/sso/some-future-write",
-      // Account linking (F2, F3) and the OAuth-token reads (F4).
       "/link-social",
       "/unlink-account",
       "/get-access-token",
       "/refresh-token",
-    ]) {
-      expect(isApiKeyRefusedPath(path), path).toBe(true);
-    }
-    for (const path of [
-      "/get-session",
+      // Credential-yielding read (round 3 verifier, F6) and the other
+      // first-party plugins' credential mints (F7) — refused without being
+      // named anywhere: they are simply not allow-listed.
+      "/list-sessions",
+      "/token",
+      "/one-time-token/generate",
+      "/one-time-token/verify",
+      "/device/approve",
+      "/device/deny",
+      "/multi-session/set-active",
+      "/multi-session/revoke",
+      "/email-otp/change-email",
+      "/delete-anonymous-user",
+      // A product's own plugin endpoint this package has never heard of.
+      "/zz-product/whoami",
+      // Path-less server-only calls (`auth.api.*` only, no HTTP route) —
+      // refused by path; upstream's own verify call is let through by
+      // `isApiKeyVerifyCall` on its shape, not by this predicate.
+      ...SERVER_ONLY_PATHS,
       "/api-key/verify",
+      // The reads rounds 2–3 allow-listed (plan §5.4): no product reads
+      // them with a key.
       "/api-key/list",
       "/api-key/get",
       "/organization/list",
@@ -765,37 +827,50 @@ describe("gap 1 — the management surface refuses any request carrying an API k
       "/passkey/list-user-passkeys",
       "/passkey/generate-authenticate-options",
       "/passkey/verify-authentication",
-      "/sign-in/email",
-      "/sign-out",
-      "/list-sessions",
       "/list-accounts",
       "/account-info",
-      "/enterprise",
-      "/organizations/create",
-      // SSO sign-in, callbacks and the two sanitized provider reads.
+      "/sso/providers",
+      "/sso/get-provider",
+      // Sign-in flows: no key is ever sent to them.
+      "/sign-in/email",
+      "/sign-up/email",
+      "/sign-out",
       "/sign-in/sso",
       "/sso/callback",
       "/sso/callback/:providerId",
       "/sso/saml2/sp/acs/:providerId",
       "/sso/saml2/sp/slo/:providerId",
       "/sso/saml2/sp/metadata",
-      "/sso/providers",
-      "/sso/get-provider",
+      "/enterprise",
+      "/enterprise/home-realm",
+      "/organizations/create",
+      // Near-misses of the allow-listed paths: exact match only.
+      "/get-session/",
+      "/GET-SESSION",
+      "/get-session/x",
+      "/api-key/verify/",
+      "/api-key/verify/x",
+      "",
+      "/",
     ]) {
-      expect(isApiKeyRefusedPath(path), path).toBe(false);
+      expect(isApiKeyRefusedPath(path), path).toBe(true);
+      expect(isApiKeyAllowedPath(path), path).toBe(false);
     }
   });
 
-  it("route table: every upstream /sso/* endpoint is either an allow-listed sign-in/callback/read path or refused; GATED_PATHS is a subset of the refusal set", () => {
-    // Enumerated from the pinned `@better-auth/sso` plugin itself, so a
-    // route upstream adds later is refused by construction (fail-closed) and
-    // shows up here when it is reviewed. `ctx.path` in hooks is the
+  it("route table: every upstream /sso/* endpoint (sign-in, callbacks, reads and writes alike) is refused to a key; GATED_PATHS is a subset of the refusal set", () => {
+    // Enumerated from the pinned `@better-auth/sso` plugin itself. Rounds 2–3
+    // allow-listed the sign-in/callback/read half; since round 4 nothing
+    // under `/sso/` is reachable with a key (no key is ever sent to a
+    // sign-in flow, and no product reads a provider with one — plan §5.4),
+    // so a route upstream adds later is refused by construction and this pin
+    // only says when the table changed. `ctx.path` in hooks is the
     // endpoint's declared pattern (`/sso/callback/:providerId`), which is
     // what the predicate is fed.
     const table = Object.values(
       sso({ domainVerification: { enabled: true } }).endpoints, // as the preset builds it
     ).map((e) => (e as { path: string }).path);
-    const allowed = new Set([
+    const pinned = [
       "/sign-in/sso",
       "/sso/callback",
       "/sso/callback/:providerId",
@@ -804,21 +879,16 @@ describe("gap 1 — the management surface refuses any request carrying an API k
       "/sso/saml2/sp/metadata",
       "/sso/providers",
       "/sso/get-provider",
-    ]);
-    const refused = new Set([
       "/sso/register",
       "/sso/update-provider",
       "/sso/delete-provider",
       "/sso/request-domain-verification",
       "/sso/verify-domain",
       "/sso/saml2/logout/:providerId",
-    ]);
-    for (const path of allowed) expect(table, path).toContain(path);
-    for (const path of refused) expect(table, path).toContain(path);
-    expect(table).toHaveLength(allowed.size + refused.size); // the pinned route table, nothing unreviewed
-    for (const path of table) {
-      expect(isApiKeyRefusedPath(path), path).toBe(!allowed.has(path));
-    }
+    ];
+    for (const path of pinned) expect(table, path).toContain(path);
+    expect(table).toHaveLength(pinned.length); // the pinned route table, nothing unreviewed
+    for (const path of table) expect(isApiKeyRefusedPath(path), path).toBe(true);
     // The validator-level check (`enterpriseApiKeyValidator`) relies on the
     // predicate alone, so the gate's own table must be a subset of it.
     for (const path of Object.keys(GATED_PATHS)) {
@@ -826,20 +896,54 @@ describe("gap 1 — the management surface refuses any request carrying an API k
     }
   });
 
-  it("enterpriseApiKeyValidator refuses a refused path before any lookup, whatever the key; /api-key/verify's own path is never refused", async () => {
+  it("enterpriseApiKeyValidator refuses a refused path before any lookup, whatever the key; upstream's own verify call (path-less, key in the body) is never refused, any other path-less call is", async () => {
     const t = await makeAuth();
     const context = await t.auth.$context;
-    const validate = (path: string, key = "not-a-key-".repeat(8)) =>
+    const unknownKey = "not-a-key-".repeat(8);
+    const validate = (path: string, key = unknownKey, body?: unknown) =>
       enterpriseApiKeyValidator({
-        ctx: { path, context } as unknown as GenericEndpointContext,
+        ctx: { path, body, context } as unknown as GenericEndpointContext,
         key,
       });
-    for (const path of ["/sso/update-provider", "/organization/create", "/api-key/create"]) {
+    // The verify call: `auth.api.verifyApiKey({ body: { key } })` runs the
+    // validator with the key in the body and `ctx.path === "virtual:"`
+    // (from the endpoint) or `"/"` (from the mock-session hook, when a
+    // product forwards headers carrying the key).
+    for (const path of SERVER_ONLY_PATHS) {
+      expect(isApiKeyVerifyCall({ path, body: { key: "k" } }, "k"), path).toBe(true);
+      expect(isApiKeyVerifyCall({ path, body: { key: "other" } }, "k"), path).toBe(false);
+      expect(isApiKeyVerifyCall({ path, body: {} }, "k"), path).toBe(false);
+      expect(isApiKeyVerifyCall({ path, body: null }, "k"), path).toBe(false);
+      expect(isApiKeyVerifyCall({ path }, "k"), path).toBe(false);
+      expect(await validate(path, unknownKey, { key: unknownKey }), path).toBe(true); // unknown key → upstream's INVALID_API_KEY
+      await expect(validate(path, unknownKey, { userId: "u" }), path).rejects.toMatchObject({
+        body: { code: "API_KEY_NOT_ALLOWED_HERE" },
+      });
+      await expect(validate(path, unknownKey, { key: "another" }), path).rejects.toMatchObject({
+        body: { code: "API_KEY_NOT_ALLOWED_HERE" },
+      });
+    }
+    expect(isApiKeyVerifyCall({ path: "/get-session", body: { key: "k" } }, "k")).toBe(false);
+    expect(isApiKeyVerifyCall({ path: "/api-key/verify", body: { key: "k" } }, "k")).toBe(false);
+    expect(isApiKeyVerifyCall({}, "k")).toBe(false);
+    for (const path of [
+      "/sso/update-provider",
+      "/organization/create",
+      "/api-key/create",
+      "/list-sessions",
+      "/token",
+      "/organization/list",
+      "/zz-product/whoami",
+    ]) {
       await expect(validate(path)).rejects.toMatchObject({
         body: { code: "API_KEY_NOT_ALLOWED_HERE" },
       });
     }
-    expect(await validate("/api-key/verify")).toBe(true); // unknown key → upstream's INVALID_API_KEY
+    // `/api-key/verify` as a *path* is not a thing (the endpoint declares
+    // none), so a request that names it is refused like any other path.
+    await expect(
+      validate("/api-key/verify", unknownKey, { key: unknownKey }),
+    ).rejects.toMatchObject({ body: { code: "API_KEY_NOT_ALLOWED_HERE" } });
     expect(await validate("/get-session")).toBe(true);
   });
 
@@ -927,11 +1031,17 @@ describe("gap 1 — SSO provider writes are refused to a key (verifier round 2, 
     expect(await errorCode(both)).toBe("API_KEY_NOT_ALLOWED_HERE");
     expect(await providerRow(t)).toEqual(before);
 
-    // The sanitized reads an integrator's handler may need stay reachable.
-    const get = await t.api.get("/sso/get-provider?providerId=okta", { "x-api-key": body!.key });
+    // The sanitized provider reads are refused to a key too since round 4
+    // (no product reads a provider with a key — plan §5.4); the owner's
+    // cookie still reads them, sanitized (control).
+    for (const path of ["/sso/get-provider?providerId=okta", "/sso/providers"]) {
+      const viaKey = await t.api.get(path, { "x-api-key": body!.key });
+      expect(viaKey.status, path).toBe(403);
+      expect(await errorCode(viaKey), path).toBe("API_KEY_NOT_ALLOWED_HERE");
+    }
+    const get = await t.api.get("/sso/get-provider?providerId=okta", { cookie });
     expect(get.status).toBe(200);
     expect(JSON.stringify(await get.json())).not.toContain("clientSecret");
-    expect((await t.api.get("/sso/providers", { "x-api-key": body!.key })).status).toBe(200);
 
     // Controls: the owner's browser session manages the provider as before.
     const moved = await t.api.post(
@@ -1012,8 +1122,13 @@ describe("gap 1 — account linking and OAuth-token reads are refused to a key (
     expect(await errorCode(token)).not.toBe("API_KEY_NOT_ALLOWED_HERE");
     expect((await t.api.post("/unlink-account", { accountId }, { cookie })).status).toBe(200);
     expect(await accountRows(t, ownerId)).toEqual(["credential"]);
-    // The metadata read stays reachable and exposes no token.
-    const list = await t.api.get("/list-accounts", headers);
+    // The metadata read is refused to a key too since round 4 (no product
+    // reads it with a key — plan §5.4); the owner's cookie still lists
+    // accounts, and that list exposes no token (control).
+    const viaKey = await t.api.get("/list-accounts", headers);
+    expect(viaKey.status).toBe(403);
+    expect(await errorCode(viaKey)).toBe("API_KEY_NOT_ALLOWED_HERE");
+    const list = await t.api.get("/list-accounts", { cookie });
     expect(list.status).toBe(200);
     expect(JSON.stringify(await list.json())).not.toMatch(/accessToken|refreshToken/);
   });
@@ -1132,6 +1247,303 @@ describe("gap 1 — apiKeys.enableSessionForAPIKeys is the supported opt-in (ver
     const banned = await t.api.get("/get-session", { "x-api-key": key });
     expect(banned.status).toBe(401);
     expect(await errorCode(banned)).toBe("USER_BANNED");
+  });
+});
+
+/** A product's own plugin: one session-bound endpoint, one anonymous one — neither known to this package. */
+const productPlugin = (): BetterAuthPlugin => ({
+  id: "zz-product",
+  endpoints: {
+    whoami: createAuthEndpoint(
+      "/zz-product/whoami",
+      { method: "GET", use: [sessionMiddleware] },
+      async (ctx) => ctx.json({ userId: ctx.context.session.user.id }),
+    ),
+    ping: createAuthEndpoint("/zz-product/ping", { method: "GET" }, async (ctx) =>
+      ctx.json({ ok: true }),
+    ),
+  },
+});
+
+async function storedSessionTokens(t: TestAuth, userId: string) {
+  const res = await t.client.execute({
+    sql: `SELECT token FROM session WHERE userId = ?`,
+    args: [userId],
+  });
+  return res.rows.map((r) => String(r.token));
+}
+
+async function keyRateLimitRow(t: TestAuth, keyId: string) {
+  const res = await t.client.execute({
+    sql: `SELECT rateLimitMax, rateLimitTimeWindow, rateLimitEnabled FROM apikey WHERE id = ?`,
+    args: [keyId],
+  });
+  const row = res.rows[0]!;
+  return {
+    max: Number(row.rateLimitMax),
+    window: Number(row.rateLimitTimeWindow),
+    enabled: Boolean(row.rateLimitEnabled),
+  };
+}
+
+describe("gap 1 — a key reaches an allow-list only (verifier round 3, F6/F7; lead round 4)", () => {
+  it("F6: /list-sessions is refused to a key, so no stored session token ever leaves via a key; with bearer() mounted the chain is dead; /get-session via key reports the key itself, never a stored token", async () => {
+    // Round 3 verifier: `/list-sessions` (upstream `freshSessionMiddleware`,
+    // satisfied by the mock session) answered a key with the owner's raw
+    // session tokens; with the first-party `bearer()` plugin mounted —
+    // which signs an unsigned token with the server secret by default —
+    // that token then drove `/api-key/create`, `/sso/register`,
+    // `/enterprise/policy/set` and `/organization/create`: the entire
+    // refused surface. The path is simply not allow-listed now.
+    const t = await makeAuth({ apiKeys: { enableSessionForAPIKeys: true }, plugins: [bearer()] });
+    const { cookie, userId } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { body } = await createKey(t, cookie, orgId);
+    const key = body!.key;
+    const stored = await storedSessionTokens(t, userId);
+    expect(stored.length).toBeGreaterThan(0);
+
+    // Control: the owner's own (fresh) session lists them, tokens included —
+    // upstream's behaviour for a browser session, untouched.
+    const viaCookie = await t.api.get("/list-sessions", { cookie });
+    expect(viaCookie.status).toBe(200);
+    const listed = (await viaCookie.json()) as { token: string }[];
+    expect(listed.map((s) => s.token)).toEqual(expect.arrayContaining(stored));
+
+    const viaKey = await t.api.get("/list-sessions", { "x-api-key": key });
+    expect(viaKey.status).toBe(403);
+    expect(await errorCode(viaKey)).toBe("API_KEY_NOT_ALLOWED_HERE");
+
+    // The one session a key can see is its own mock one: `session.token` is
+    // the key, not any stored session token.
+    const gs = await t.api.get("/get-session", { "x-api-key": key });
+    expect(gs.status).toBe(200);
+    const session = (await gs.json()) as { user: { id: string }; session: { token: string } };
+    expect(session.user.id).toBe(userId);
+    expect(session.session.token).toBe(key);
+    expect(stored).not.toContain(session.session.token);
+
+    // The key presented as a bearer token is not a session either.
+    const asBearer = await t.api.get("/list-sessions", { authorization: `Bearer ${key}` });
+    expect(asBearer.status).toBe(401);
+    expect((await t.client.execute(`SELECT id FROM apikey`)).rows).toHaveLength(1);
+    expect((await t.client.execute(`SELECT id FROM organization`)).rows).toHaveLength(1);
+  });
+
+  it("F7: jwt()'s /token is refused to a key (a key never mints a JWT); the owner's cookie still gets one; anonymous is 401", async () => {
+    const t = await makeAuth({ apiKeys: { enableSessionForAPIKeys: true }, plugins: [jwt()] });
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { body } = await createKey(t, cookie, orgId);
+
+    const viaKey = await t.api.get("/token", { "x-api-key": body!.key });
+    expect(viaKey.status).toBe(403);
+    expect(await errorCode(viaKey)).toBe("API_KEY_NOT_ALLOWED_HERE");
+
+    const viaCookie = await t.api.get("/token", { cookie });
+    expect(viaCookie.status).toBe(200);
+    expect(((await viaCookie.json()) as { token: string }).token.split(".")).toHaveLength(3);
+    expect((await t.api.get("/token")).status).toBe(401);
+  });
+
+  it("F7: oneTimeToken()'s /one-time-token/generate is refused to a key; the owner's cookie still gets one", async () => {
+    const t = await makeAuth({
+      apiKeys: { enableSessionForAPIKeys: true },
+      plugins: [oneTimeToken()],
+    });
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { body } = await createKey(t, cookie, orgId);
+
+    const viaKey = await t.api.get("/one-time-token/generate", { "x-api-key": body!.key });
+    expect(viaKey.status).toBe(403);
+    expect(await errorCode(viaKey)).toBe("API_KEY_NOT_ALLOWED_HERE");
+
+    const viaCookie = await t.api.get("/one-time-token/generate", { cookie });
+    expect(viaCookie.status).toBe(200);
+    expect(typeof ((await viaCookie.json()) as { token: string }).token).toBe("string");
+  });
+
+  it("F7: an endpoint of a product's own plugin — unknown to this package — is refused to a key and reachable with a cookie (or anonymously, where it allows that)", async () => {
+    // Fail-closed by construction: the predicate never heard of
+    // `/zz-product/*`, and that is exactly why it is refused.
+    const t = await makeAuth({
+      apiKeys: { enableSessionForAPIKeys: true },
+      plugins: [productPlugin()],
+    });
+    const { cookie, userId } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const { body } = await createKey(t, cookie, orgId);
+    const headers = { "x-api-key": body!.key };
+
+    for (const path of ["/zz-product/whoami", "/zz-product/ping"]) {
+      const res = await t.api.get(path, headers); // sequential: see the SSO case
+      expect(res.status, path).toBe(403);
+      expect(await errorCode(res), path).toBe("API_KEY_NOT_ALLOWED_HERE");
+    }
+    const whoami = await t.api.get("/zz-product/whoami", { cookie });
+    expect(whoami.status).toBe(200);
+    expect(await whoami.json()).toEqual({ userId });
+    expect((await t.api.get("/zz-product/whoami")).status).toBe(401);
+    expect((await t.api.get("/zz-product/ping")).status).toBe(200);
+  });
+
+  it("preset default: the header alone is refused on /list-sessions, /organization/list and a product's own endpoint next to a valid cookie; /get-session with a stray header still answers the cookie's session", async () => {
+    // Products forward the whole incoming request into
+    // `auth.api.getSession({ headers })` (rendra's legacy `X-API-Key`
+    // callers included), so `/get-session` must stay reachable with a
+    // stray header — it is allow-listed. Everything else is not.
+    const t = await makeAuth({ plugins: [productPlugin()] });
+    const { cookie, userId } = await signUpOwner(t);
+    const both = { cookie, "x-api-key": "rendra_legacy_or_anything" };
+    for (const path of ["/list-sessions", "/organization/list", "/zz-product/whoami"]) {
+      const res = await t.api.get(path, both);
+      expect(res.status, path).toBe(403);
+      expect(await errorCode(res), path).toBe("API_KEY_NOT_ALLOWED_HERE");
+      expect((await t.api.get(path, { cookie })).status, path).toBe(200);
+    }
+    const gs = await t.api.get("/get-session", both);
+    expect(gs.status).toBe(200);
+    expect(((await gs.json()) as { user: { id: string } }).user.id).toBe(userId);
+  });
+
+  it("auth.api.verifyApiKey keeps working when a product forwards the incoming request's headers (x-api-key included), under the preset default and the opt-in; a path-less server-only call is refused for a key; there is no /api-key/verify HTTP route", async () => {
+    // The verify path is the api-key plugin's own use path: recognised by
+    // shape (`isApiKeyVerifyCall`), not by an HTTP path it does not have.
+    for (const [mode, t] of [
+      ["default", await makeAuth()],
+      ["opt-in", await presetOptIn()],
+    ] as const) {
+      const { cookie, userId } = await signUpOwner(t);
+      const { orgId } = await createOrg(t, cookie);
+      const { body } = await createKey(t, cookie, orgId);
+      const key = body!.key;
+      const api = t.auth.api as unknown as {
+        verifyApiKey: (input: {
+          body: { key: string };
+          headers?: Headers;
+        }) => Promise<{ valid: boolean; error: { code?: string } | null }>;
+        listUserAccounts: (input: { headers: Headers }) => Promise<unknown>;
+        viewBackupCodes: (input: {
+          body: { userId: string };
+          headers: Headers;
+        }) => Promise<unknown>;
+      };
+      const forwarded = new Headers({ "x-api-key": key, cookie });
+      const bare = await api.verifyApiKey({ body: { key } });
+      expect(bare.valid, mode).toBe(true);
+      const withHeaders = await api.verifyApiKey({ body: { key }, headers: forwarded });
+      expect(withHeaders.valid, mode).toBe(true);
+      expect(
+        (await api.verifyApiKey({ body: { key }, headers: new Headers({ "x-api-key": key }) }))
+          .valid,
+        mode,
+      ).toBe(true);
+      // A path-less server-only endpoint that is not the verify call
+      // (`viewBackupCodes`, a credential-yielding read): with the mock
+      // session on, the key does not authenticate it (403 before anything
+      // runs); under the default the header is inert and upstream answers
+      // on its own terms (here: the user has no 2FA enrolled).
+      const view = () =>
+        api.viewBackupCodes({ body: { userId }, headers: new Headers({ "x-api-key": key }) });
+      if (mode === "opt-in") {
+        await expect(view()).rejects.toMatchObject({ body: { code: "API_KEY_NOT_ALLOWED_HERE" } });
+      } else {
+        const outcome = await view().then(
+          () => "ok",
+          (e: { body?: { code?: string } }) => e.body?.code ?? "error",
+        );
+        expect(outcome, mode).not.toBe("API_KEY_NOT_ALLOWED_HERE");
+      }
+      // An HTTP-routable read with forwarded headers: the header alone is
+      // refused (both modes) — the cookie next to it does not help.
+      await expect(api.listUserAccounts({ headers: forwarded })).rejects.toMatchObject({
+        body: { code: "API_KEY_NOT_ALLOWED_HERE" },
+      });
+      // Over HTTP there is no verify route at all, and nothing routes to
+      // the server-only markers either (`/` is not a route).
+      expect(
+        (await t.api.post("/api-key/verify", { key }, { "x-api-key": key })).status,
+        mode,
+      ).toBe(404);
+      expect((await t.api.post("/api-key/verify", { key }, { cookie })).status, mode).toBe(404);
+      expect((await t.api.post("/", { key }, { "x-api-key": key })).status, mode).toBe(404);
+      expect((await t.api.get("/", { "x-api-key": key })).status, mode).toBe(404);
+      expect((await t.api.get("/virtual:", { "x-api-key": key })).status, mode).toBe(404);
+      // And `/get-session` with the forwarded headers answers the owner in
+      // both modes (the cookie under the default, the key under the opt-in).
+      const gs = await t.api.get("/get-session", { "x-api-key": key, cookie });
+      expect(gs.status, mode).toBe(200);
+      expect(((await gs.json()) as { user: { id: string } }).user.id, mode).toBe(userId);
+    }
+  });
+
+  it("apiKeys.rateLimit is forwarded to upstream: maxRequests/timeWindow are stamped on new keys and bound their uses (429 RATE_LIMITED); enabled:false lifts the bound; the default stays upstream's 10 per 24 h", async () => {
+    // Round 3 verifier observation: under the preset opt-in the per-key
+    // limit was upstream's default and unusable for a real product API.
+    const bounded = await makeAuth({
+      apiKeys: { enableSessionForAPIKeys: true, rateLimit: { maxRequests: 2, timeWindow: 60_000 } },
+    });
+    const b = await signUpOwner(bounded);
+    const { orgId: bOrg } = await createOrg(bounded, b.cookie);
+    const bk = await createKey(bounded, b.cookie, bOrg);
+    expect(await keyRateLimitRow(bounded, bk.body!.id)).toEqual({
+      max: 2,
+      window: 60_000,
+      enabled: true,
+    });
+    const headers = { "x-api-key": bk.body!.key };
+    expect((await bounded.api.get("/get-session", headers)).status).toBe(200);
+    expect((await bounded.api.get("/get-session", headers)).status).toBe(200);
+    const third = await bounded.api.get("/get-session", headers);
+    expect(third.status).toBe(429);
+    expect(await errorCode(third)).toBe("RATE_LIMITED");
+    // A refused request never counted: the bound was hit on the third
+    // allow-listed use, not earlier, even though a refusal sits in between.
+    const refused = await bounded.api.get("/organization/list", headers);
+    expect(refused.status).toBe(403);
+    expect(await errorCode(refused)).toBe("API_KEY_NOT_ALLOWED_HERE");
+
+    const unbounded = await makeAuth({
+      apiKeys: { enableSessionForAPIKeys: true, rateLimit: { enabled: false } },
+    });
+    const u = await signUpOwner(unbounded);
+    const { orgId: uOrg } = await createOrg(unbounded, u.cookie);
+    const uk = await createKey(unbounded, u.cookie, uOrg);
+    expect((await keyRateLimitRow(unbounded, uk.body!.id)).enabled).toBe(false);
+    for (let i = 0; i < 12; i++) {
+      expect(
+        (await unbounded.api.get("/get-session", { "x-api-key": uk.body!.key })).status,
+        `use ${i + 1}`,
+      ).toBe(200);
+    }
+
+    // Left out, upstream's own default applies — pinned so the docs' "10
+    // per 24 h" tracks reality.
+    const dflt = await presetOptIn();
+    const d = await signUpOwner(dflt);
+    const { orgId: dOrg } = await createOrg(dflt, d.cookie);
+    const dk = await createKey(dflt, d.cookie, dOrg);
+    expect(await keyRateLimitRow(dflt, dk.body!.id)).toEqual({
+      max: 10,
+      window: 24 * 60 * 60 * 1000,
+      enabled: true,
+    });
+  });
+
+  it("apiKeys.rateLimit is validated with the other options at preset build time", async () => {
+    await expect(makeAuth({ apiKeys: { rateLimit: { maxRequests: 0 } } })).rejects.toThrow(
+      /apiKeys\.rateLimit\.maxRequests/,
+    );
+    await expect(makeAuth({ apiKeys: { rateLimit: { timeWindow: -1 } } })).rejects.toThrow(
+      /apiKeys\.rateLimit\.timeWindow/,
+    );
+    await expect(
+      makeAuth({ apiKeys: { rateLimit: { enabled: "yes" as unknown as boolean } } }),
+    ).rejects.toThrow(/apiKeys\.rateLimit\.enabled/);
+    await expect(
+      makeAuth({ apiKeys: { rateLimit: null as unknown as { enabled?: boolean } } }),
+    ).rejects.toThrow(/apiKeys\.rateLimit/);
   });
 });
 

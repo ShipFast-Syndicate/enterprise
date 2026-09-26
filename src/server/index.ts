@@ -5,13 +5,18 @@ export { FeatureNotEntitledError, requireFeature } from "./entitlements";
 export { enterpriseGate, GATED_PATHS } from "./gate";
 export { enterprisePreset } from "./preset";
 export {
+  API_KEY_ALLOWED_PATHS,
   API_KEY_ERROR,
   API_KEY_HEADERS,
   API_KEY_LIFECYCLE_PLUGIN_ID,
   apiKeyLifecycle,
   assertNotApiKeyRequest,
   enterpriseApiKeyValidator,
+  isApiKeyAllowedPath,
   isApiKeyRefusedPath,
+  isApiKeyVerifyCall,
+  isServerOnlyPath,
+  SERVER_ONLY_PATHS,
   revokeUserApiKeys,
   type ApiKeyRevocationActor,
   type ApiKeyRevocationContext,

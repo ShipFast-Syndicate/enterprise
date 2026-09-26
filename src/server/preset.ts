@@ -52,13 +52,17 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
       // The header list is shared with `assertNotApiKeyRequest` (`./api-keys.ts`).
       apiKeyHeaders: [...API_KEY_HEADERS],
       // Every key use is bound to the live user row (banned / removed) and
-      // refused on every `isApiKeyRefusedPath`, on both upstream paths
-      // (`/api-key/verify` and the opt-in mock session below).
+      // confined to `API_KEY_ALLOWED_PATHS` (`isApiKeyRefusedPath`), on both
+      // upstream paths (`/api-key/verify` and the opt-in mock session below).
       customAPIKeyValidator: enterpriseApiKeyValidator,
       // The documented opt-in (`apiKeys.enableSessionForAPIKeys`): built
       // here rather than by hand so the validator, header list and expiry
       // bound cannot be left out of the recipe.
       enableSessionForAPIKeys: opts.apiKeys?.enableSessionForAPIKeys ?? false,
+      // Upstream's per-key rate limit, forwarded as-is (validated in
+      // `./options.ts`); left out, upstream keeps its own default of 10
+      // requests per key per 24 h — see `EnterpriseOptions.apiKeys.rateLimit`.
+      ...(opts.apiKeys?.rateLimit ? { rateLimit: opts.apiKeys.rateLimit } : {}),
       // Bounded by expiry (gap 1): 90 days unless the product says otherwise,
       // never longer than `maxExpiresInDays`. `defaultExpiresIn` is in
       // **seconds** — upstream's `.d.mts` says milliseconds, but `create`

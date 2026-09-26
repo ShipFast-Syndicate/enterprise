@@ -204,19 +204,21 @@ deactivation, `/admin/ban-user`, `/admin/remove-user` — revokes all of that us
 the ones they used for this org, audited as `api_key.revoked` into every org the user belonged
 to. (A user who holds an `owner` membership anywhere is never _banned_ by a SCIM feed, but their
 keys are revoked like everyone else's; they can sign in and mint new ones.) A request carrying an
-API key is refused (`403 API_KEY_NOT_ALLOWED_HERE`) on `/enterprise/*`, on every credential-minting
-path, on every key write (`/api-key/create|update|delete` — a key never mints another key nor
-extends itself), on every organization write, on every SSO provider write (`/sso/register`,
-`/sso/update-provider`, `/sso/delete-provider`, domain verification — `/sso/*` is fail-closed, only
-sign-in, callbacks and the two sanitized provider reads are allow-listed), on every account and
-credential write (`/update-user`, `/change-email`, `/change-password`, `/link-social`,
-`/unlink-account`, passkey registration, `/two-factor/*`), on the OAuth-token reads
-(`/get-access-token`, `/refresh-token`) and on `/admin/*`; reads (`/get-session`,
-`/organization/list`, `/api-key/list`, `/sso/get-provider`, `/list-accounts`, ...) stay reachable.
-The refusal is enforced in the key validator itself (so it holds however a key is carried) and on
-the `x-api-key` header alone (so it holds under the preset default and next to a valid cookie).
-To let a key authenticate as its owner on your own routes, set
-`apiKeys.enableSessionForAPIKeys: true` on the preset rather than hand-composing `apiKey()` — see
+API key reaches an **allow-list** and nothing else: `/get-session` over HTTP, plus upstream's own
+server-side `auth.api.verifyApiKey` call. Every other better-auth endpoint — `/enterprise/*`, every
+credential-minting path, every key, organization, SSO-provider, account and credential write, every
+other read (`/list-sessions`, `/organization/list`, `/api-key/list`, `/sso/get-provider`,
+`/list-accounts`, …), every sign-in flow, `/admin/*`, `/two-factor/*`, and every endpoint of a
+plugin you add that this package has never heard of (`jwt()`'s `/token`, `oneTimeToken()`'s
+`/one-time-token/generate`, your own) — answers `403 API_KEY_NOT_ALLOWED_HERE`. An allow-list,
+because a deny-list is fail-open for what it does not know; built from what the fleet products do
+with a key (resolve its owner through `auth.api.getSession({ headers })`, nothing else) and widened
+only by a reviewed change to this package. The refusal is enforced in the key validator itself (so
+it holds however a key is carried) and on the `x-api-key` header alone (so it holds under the
+preset default and next to a valid cookie; `/get-session` with a stray header still answers the
+cookie's session). To let a key authenticate as its owner on your own routes, set
+`apiKeys.enableSessionForAPIKeys: true` on the preset rather than hand-composing `apiKey()` — and
+size `apiKeys.rateLimit` (upstream's default is 10 requests per key per 24 h) — see
 [`docs/security.md`](./docs/security.md) for the must-keep settings if you do. An expiry can never
 be removed from a key (`/api-key/update { expiresIn: null }` → `400 API_KEY_EXPIRY_REQUIRED`) unless
 the operator set `apiKeys.defaultExpiresInS: null`. Per-org key scoping remains a follow-up.

@@ -17,7 +17,7 @@ import { getMemberRoles } from "./policy/store";
 import { withSecretEncryption } from "./secrets";
 import { buildSsoDomainGuardHook } from "./sso-domain";
 import { assertEnterpriseOptions, takeDomainBindingOffUnlistedWarning } from "./options";
-import { assertNotApiKeyRequest, isApiKeyRefusedPath } from "./api-keys";
+import { assertNotApiKeyRequest, isApiKeyRefusedPath, isServerOnlyPath } from "./api-keys";
 
 export const GATED_PATHS: Record<string, Feature> = {
   "/sso/register": "sso",
@@ -133,14 +133,20 @@ export function enterpriseGate(opts: EnterpriseOptions) {
     hooks: {
       before: [
         {
-          // First, before any session/org resolution: the management surface,
-          // credential minting, key/account/credential writes and every
-          // organization write are never key-authenticated (gap 1 —
-          // `./api-keys.ts`, `isApiKeyRefusedPath` covers `/enterprise/*`).
-          // `403 API_KEY_NOT_ALLOWED_HERE` on the header alone, whatever
-          // else the request carries.
+          // First, before any session/org resolution: a request carrying an
+          // API key reaches only `API_KEY_ALLOWED_PATHS` (gap 1 —
+          // `./api-keys.ts`; `GATED_PATHS` and `/enterprise/*` are outside
+          // that allow-list by construction, pinned by
+          // `test/security/gap1-api-keys.test.ts`). `403
+          // API_KEY_NOT_ALLOWED_HERE` on the header alone, whatever else the
+          // request carries. Every HTTP-routable path; a path-less
+          // server-only call (`SERVER_ONLY_PATHS`, e.g. `auth.api.
+          // verifyApiKey({ headers })` — its hook context has no path at
+          // all) has no HTTP route, and with the mock session on it is the
+          // validator layer that decides (`isApiKeyVerifyCall`) — without
+          // it the header is inert there.
           matcher: (ctx) =>
-            !!ctx.path && (ctx.path in GATED_PATHS || isApiKeyRefusedPath(ctx.path)),
+            !!ctx.path && !isServerOnlyPath(ctx.path) && isApiKeyRefusedPath(ctx.path),
           handler: createAuthMiddleware(async (ctx) => {
             assertNotApiKeyRequest(ctx);
           }),
