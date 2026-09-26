@@ -92,12 +92,43 @@ their SSRF validation boundary, and every origin on it is also a permitted
 redirect target — but do not rely on it to restrict _which_ IdPs tenants may
 use.
 
-To restrict issuers, set `sso.allowedIssuers` on `EnterpriseOptions`: an
-array of exact strings and/or `RegExp`s, or a predicate
-`(issuer, { organizationId }) => boolean | Promise<boolean>`. It is checked
-on `/sso/register` and on `/sso/update-provider` when the issuer is sent;
-a refusal is `403 SSO_ISSUER_NOT_ALLOWED` and nothing is stored. Absent, any
-issuer is accepted (upstream behaviour).
+To restrict which identity providers tenants may register, set
+`sso.allowedIssuers` on `EnterpriseOptions`: an array of exact strings
+and/or `RegExp`s, or a predicate
+`(issuer, { organizationId, endpoints }) => boolean | Promise<boolean>`.
+
+The list binds the **IdP**, not merely the `issuer` string. Upstream
+verifies an OIDC id_token's `iss` against the stored issuer but fetches the
+signing keys from the tenant-supplied `jwksEndpoint`, and checks a SAML
+assertion against the tenant-supplied certificate and `entryPoint` — so a
+tenant allowed to write `issuer: "https://idp.allowed.example"` could point
+every endpoint (`skipDiscovery`) or the SAML cert at an IdP of their own and
+sign in through it under the "allowed" string. The allow-list is therefore
+applied to the issuer **and** to every IdP-defining value of the
+configuration: OIDC `discoveryEndpoint`, `authorizationEndpoint`,
+`tokenEndpoint`, `jwksEndpoint`, `userInfoEndpoint`; SAML `entryPoint`,
+`idpMetadata.entityID`, the `singleSignOnService`/`singleLogoutService`
+locations and the `entityID`/service locations inside an
+`idpMetadata.metadata` document.
+
+- **Array form.** The issuer must match an entry (exact string, or a
+  `RegExp` test). Each endpoint must then be the issuer itself, sit on the
+  issuer's origin, or match an entry — by its full value or by its origin.
+  An IdP that serves endpoints from several origins needs those origins
+  listed (Google, for instance, issues from `https://accounts.google.com`
+  but exchanges tokens at `https://oauth2.googleapis.com`). For SAML,
+  upstream treats `issuer` as the _service provider's_ id; list the IdP's
+  `entityID` and entry-point origin.
+- **Predicate form.** Called once with the issuer and
+  `{ organizationId, endpoints }` and decides alone; a throw or a
+  non-`true` verdict refuses.
+
+It is checked on `/sso/register`, and on `/sso/update-provider` whenever
+`issuer`, `oidcConfig` or `samlConfig` is sent — against the provider as it
+would be stored after the update, so an endpoint swap with the issuer
+untouched, or an issuer change over endpoints the list no longer covers, is
+refused. A refusal is `403 SSO_ISSUER_NOT_ALLOWED` and nothing is stored.
+Absent, anything is accepted (upstream behaviour).
 
 ```ts
 enterprisePreset({
@@ -106,6 +137,12 @@ enterprisePreset({
     allowedIssuers: [
       /^https:\/\/[a-z0-9-]+\.okta\.com$/,
       "https://login.microsoftonline.com/common/v2.0",
+      // Google issues from accounts.google.com but serves its endpoints
+      // from other origins — list them.
+      "https://accounts.google.com",
+      "https://oauth2.googleapis.com",
+      "https://www.googleapis.com",
+      "https://openidconnect.googleapis.com",
     ],
   },
 });
@@ -127,7 +164,10 @@ entry).
 `/sso/update-provider` (when the domain changes) and `/sso/verify-domain`
 answer `409 SSO_DOMAIN_TAKEN` when the domain list overlaps — equal, or a
 subdomain in either direction — a domain **another** organization has
-already verified. An org may register several providers for its own domains.
+already verified. The refusal names only the caller's own colliding entries,
+never the other organization's verified list (a tenant who registers one
+domain it happens to know must not learn every domain the victim org has
+verified). An org may register several providers for its own domains.
 The check is at verification time too, so a provider registered _before_
 another org verified the same domain cannot be verified afterwards. Upstream
 never checked this: any tenant could register a second, unverified provider

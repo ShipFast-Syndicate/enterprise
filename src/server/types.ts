@@ -76,18 +76,35 @@ export interface EnterpriseOptions {
    * e-mail round-trip would prove. `false` leaves upstream's own claim
    * handling in charge.
    *
-   * `allowedIssuers`: an allow-list for the `issuer` an org admin may
-   * register or update a provider to — exact strings, `RegExp`s, or a
-   * predicate receiving the issuer and the target org. Absent = any issuer
-   * (upstream behaviour). `trustedOrigins` is **not** an issuer allow-list;
-   * this is.
+   * `allowedIssuers`: an allow-list for the identity providers an org admin
+   * may register or update a provider to. It is applied to the `issuer`
+   * string **and** to every IdP-defining value of the configuration — OIDC
+   * `discoveryEndpoint`/`authorizationEndpoint`/`tokenEndpoint`/
+   * `jwksEndpoint`/`userInfoEndpoint`, SAML `entryPoint`,
+   * `idpMetadata.entityID`, the `singleSignOnService`/`singleLogoutService`
+   * locations and the `entityID`/locations inside `idpMetadata.metadata` —
+   * because upstream fetches an OIDC provider's signing keys from the
+   * tenant-supplied `jwksEndpoint` and checks a SAML assertion against the
+   * tenant-supplied certificate, so the issuer string alone binds nothing.
+   * Array form: the issuer must match an entry (exact string or `RegExp`),
+   * and each endpoint must be the issuer, sit on the issuer's origin, or
+   * match an entry itself or by origin — an IdP that serves endpoints from
+   * several origins needs those origins listed. Predicate form: called once
+   * with the issuer and `{ organizationId, endpoints }` and decides alone.
+   * Checked on `/sso/register`, and on `/sso/update-provider` whenever
+   * `issuer`, `oidcConfig` or `samlConfig` is sent (against the merged
+   * result). Absent = anything (upstream behaviour). `trustedOrigins` is
+   * **not** an issuer allow-list; this is.
    */
   sso?: {
     domainBinding?: "verified-domain" | "off";
     trustVerifiedDomainEmail?: boolean;
     allowedIssuers?:
       | Array<string | RegExp>
-      | ((issuer: string, ctx: { organizationId: string | null }) => boolean | Promise<boolean>);
+      | ((
+          issuer: string,
+          ctx: { organizationId: string | null; endpoints: string[] },
+        ) => boolean | Promise<boolean>);
   };
   /**
    * Forwarded to the upstream `organization()` plugin by the preset.

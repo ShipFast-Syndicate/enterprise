@@ -89,6 +89,55 @@ describe("F-30 — a verified domain belongs to one organization", () => {
     expect(ok.status).toBe(200);
   });
 
+  it("SSO_DOMAIN_TAKEN names only the caller's own colliding entries — never the other org's verified list (no cross-tenant disclosure oracle)", async () => {
+    const t = await makeAuth();
+    const { evilOwner, evilOrg } = await acmeAndEvil(t, "acme.test,acme-secret-subsidiary.test");
+    const probe = await register(t, evilOwner.cookie, {
+      providerId: "probe",
+      domain: "acme.test",
+      organizationId: evilOrg,
+    });
+    expect(probe.status).toBe(409);
+    expect(await code(probe)).toBe("SSO_DOMAIN_TAKEN");
+    const body = await probe.text();
+    expect(body).not.toContain("acme-secret-subsidiary");
+    expect(body).toContain("acme.test");
+
+    // A list: only the colliding entries of *mine* are named, not the free
+    // one, and the victim's exact list is still not echoed (a subdomain
+    // probe learns nothing beyond what it sent).
+    const list = await register(t, evilOwner.cookie, {
+      providerId: "probe-list",
+      domain: "free.test, EU.acme-secret-subsidiary.test.",
+      organizationId: evilOrg,
+    });
+    expect(list.status).toBe(409);
+    const listBody = await list.text();
+    expect(listBody).toContain("eu.acme-secret-subsidiary.test");
+    expect(listBody).not.toContain("free.test");
+    expect(listBody).not.toMatch(/[^.]acme-secret-subsidiary\.test/); // not the victim's own entry
+    expect(listBody).not.toMatch(/[^-]acme\.test/); // nor the victim's other entry
+
+    // Same on update-provider.
+    expect(
+      (
+        await register(t, evilOwner.cookie, {
+          providerId: "evil-oidc",
+          domain: "evil.test",
+          organizationId: evilOrg,
+        })
+      ).status,
+    ).toBe(200);
+    const moved = await t.api.post(
+      "/sso/update-provider",
+      { providerId: "evil-oidc", domain: "eu.acme.test" },
+      { cookie: evilOwner.cookie },
+    );
+    expect(moved.status).toBe(409);
+    expect(await moved.text()).not.toContain("acme-secret-subsidiary");
+    expect(await storedDomain(t, "evil-oidc")).toBe("evil.test");
+  });
+
   it("/sso/register: a parent domain is taken when another org verified one of its subdomains (a parent provider would match that org's mail)", async () => {
     const t = await makeAuth();
     const { evilOwner, evilOrg } = await acmeAndEvil(t, "eu.acme.test");

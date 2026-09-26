@@ -8,8 +8,11 @@
 //   stores it verbatim while every match is normalised, F-04/R15), refused
 //   when it cannot be normalised (`SSO_DOMAIN_INVALID`), refused when it
 //   overlaps a domain **another** org has already verified
-//   (`SSO_DOMAIN_TAKEN`, 409), and the issuer must pass `sso.allowedIssuers`
-//   when the operator set one (`SSO_ISSUER_NOT_ALLOWED`). Upstream never
+//   (`SSO_DOMAIN_TAKEN`, 409 — naming only the caller's own colliding
+//   entries, never the other org's list), and the issuer **and the IdP
+//   endpoints the configuration points at** must pass `sso.allowedIssuers`
+//   when the operator set one (`SSO_ISSUER_NOT_ALLOWED`; on update whenever
+//   `issuer`, `oidcConfig` or `samlConfig` is sent). Upstream never
 //   checked uniqueness at all: any tenant could register a second provider
 //   for a domain some other org had verified, and — because upstream's
 //   e-mail `/sign-in/sso` resolves the provider with an exact `findOne({
@@ -80,28 +83,146 @@ export async function findVerifiedProvidersOverlapping(
 }
 
 /**
- * Whether `issuer` passes `sso.allowedIssuers` for a provider bound to
- * `organizationId`: no allow-list → any issuer (upstream behaviour); an
- * array → an exact string match or a `RegExp` test; a predicate → its
- * verdict (`false` on a throw — fail closed).
+ * The IdP-defining values of a provider configuration — the URLs and
+ * entity ids that decide *whose* keys and endpoints a sign-in through the
+ * provider will trust. The `issuer` string alone binds nothing: upstream
+ * verifies an OIDC id_token's `iss` against the stored `issuer` but fetches
+ * the signing keys from the tenant-supplied `jwksEndpoint`, and a SAML
+ * assertion is checked against the tenant-supplied `cert`/`entryPoint`/
+ * `idpMetadata` — so a tenant could satisfy a string-only allow-list while
+ * pointing every endpoint at an IdP of their own. The allow-list therefore
+ * covers these too (`issuerAllowed`).
+ *
+ * OIDC: `discoveryEndpoint`, `authorizationEndpoint`, `tokenEndpoint`,
+ * `jwksEndpoint`, `userInfoEndpoint`. SAML: `entryPoint`,
+ * `idpMetadata.entityID`, every `idpMetadata.singleSignOnService[]` /
+ * `singleLogoutService[]` `Location`, and — when the IdP is given as a
+ * metadata XML document — the `EntityDescriptor`'s `entityID` and the
+ * `SingleSignOnService`/`SingleLogoutService` locations inside it. Returns
+ * `null` (fail closed) for a metadata document without an extractable
+ * `entityID`. Non-string values are ignored (upstream's schema refuses them).
+ */
+export function collectIdpEndpoints(oidcConfig: unknown, samlConfig: unknown): string[] | null {
+  const out = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === "string" && value.length > 0) out.add(value);
+  };
+  if (isRecord(oidcConfig)) {
+    for (const key of OIDC_ENDPOINT_FIELDS) add(oidcConfig[key]);
+  }
+  if (isRecord(samlConfig)) {
+    add(samlConfig.entryPoint);
+    const idp = samlConfig.idpMetadata;
+    if (isRecord(idp)) {
+      add(idp.entityID);
+      for (const key of ["singleSignOnService", "singleLogoutService"] as const) {
+        const services = idp[key];
+        if (Array.isArray(services)) {
+          for (const service of services) if (isRecord(service)) add(service.Location);
+        }
+      }
+      if (typeof idp.metadata === "string" && idp.metadata.length > 0) {
+        const entity = SAML_METADATA_ENTITY_ID.exec(idp.metadata);
+        const entityId = (entity?.[1] ?? entity?.[2])?.trim();
+        if (!entityId) return null;
+        out.add(entityId);
+        for (const match of idp.metadata.matchAll(SAML_METADATA_SERVICE_LOCATION)) {
+          add(match[1] ?? match[2]);
+        }
+      }
+    }
+  }
+  return [...out];
+}
+
+const OIDC_ENDPOINT_FIELDS = [
+  "discoveryEndpoint",
+  "authorizationEndpoint",
+  "tokenEndpoint",
+  "jwksEndpoint",
+  "userInfoEndpoint",
+] as const;
+
+// `<md:EntityDescriptor … entityID="…">` (any/no namespace prefix, either
+// quote style, any attribute order); `<md:SingleSignOnService … Location="…">`.
+const SAML_METADATA_ENTITY_ID =
+  /<(?:[\w.-]+:)?EntityDescriptor\b[^>]*?\sentityID\s*=\s*(?:"([^"]*)"|'([^']*)')/;
+const SAML_METADATA_SERVICE_LOCATION =
+  /<(?:[\w.-]+:)?Single(?:SignOn|Logout)Service\b[^>]*?\sLocation\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** `https://idp.example/path` → `https://idp.example`; `null` for a value with no origin (a URN, a bare name). */
+function originOf(value: string): string | null {
+  try {
+    const origin = new URL(value).origin;
+    return origin === "null" ? null : origin;
+  } catch {
+    return null;
+  }
+}
+
+function entryMatches(entry: string | RegExp, value: string): boolean {
+  return typeof entry === "string" ? entry === value : entry.test(value);
+}
+
+/**
+ * An IdP-defining value passes an array allow-list when it *is* the (already
+ * allowed) issuer, sits on the issuer's origin, or is itself — or its origin
+ * is — an entry of the list. Operators whose IdP serves endpoints from
+ * several origins (e.g. Google: `accounts.google.com` issues, `oauth2.
+ * googleapis.com` exchanges) list those origins alongside the issuer.
+ */
+function endpointAllowed(
+  allowed: ReadonlyArray<string | RegExp>,
+  issuer: string,
+  endpoint: string,
+): boolean {
+  if (endpoint === issuer) return true;
+  const endpointOrigin = originOf(endpoint);
+  const issuerOrigin = originOf(issuer);
+  if (endpointOrigin && issuerOrigin && endpointOrigin === issuerOrigin) return true;
+  return allowed.some(
+    (entry) =>
+      entryMatches(entry, endpoint) || (!!endpointOrigin && entryMatches(entry, endpointOrigin)),
+  );
+}
+
+export interface IssuerCheckContext {
+  organizationId: string | null;
+  /** The IdP-defining values of the configuration being stored (`collectIdpEndpoints`); `null` when they could not be read (a metadata document without an `entityID`). */
+  endpoints: string[] | null;
+}
+
+/**
+ * Whether `issuer` **and the IdP it actually points at** pass
+ * `sso.allowedIssuers` for a provider bound to `ctx.organizationId`: no
+ * allow-list → anything (upstream behaviour); an array → the issuer must
+ * match an entry (exact string or `RegExp`) and every one of
+ * `ctx.endpoints` must pass `endpointAllowed`; a predicate → its verdict on
+ * `(issuer, { organizationId, endpoints })` (`false` on a throw — fail
+ * closed). Unreadable endpoints (`null`) fail every configured list.
  */
 export async function issuerAllowed(
   opts: EnterpriseOptions | undefined,
   issuer: string,
-  organizationId: string | null,
+  ctx: IssuerCheckContext,
 ): Promise<boolean> {
   const allowed = opts?.sso?.allowedIssuers;
   if (allowed === undefined) return true;
+  const endpoints = ctx.endpoints;
+  if (endpoints === null) return false;
   if (typeof allowed === "function") {
     try {
-      return (await allowed(issuer, { organizationId })) === true;
+      return (await allowed(issuer, { organizationId: ctx.organizationId, endpoints })) === true;
     } catch {
       return false;
     }
   }
-  return allowed.some((entry) =>
-    typeof entry === "string" ? entry === issuer : entry.test(issuer),
-  );
+  if (!allowed.some((entry) => entryMatches(entry, issuer))) return false;
+  return endpoints.every((endpoint) => endpointAllowed(allowed, issuer, endpoint));
 }
 
 function domainInvalidError(): APIError {
@@ -112,18 +233,25 @@ function domainInvalidError(): APIError {
   });
 }
 
-function domainTakenError(taken: VerifiedProviderRow[]): APIError {
-  const domains = [...new Set(taken.flatMap((row) => normalizeProviderDomains(row.domain) ?? []))];
+/**
+ * Names only the **caller's own** submitted entries that collide. The other
+ * organization's verified list is never echoed: a tenant who registers one
+ * domain it happens to know must not learn every other domain the victim
+ * org has verified (a cross-tenant disclosure oracle).
+ */
+function domainTakenError(mine: readonly string[], taken: VerifiedProviderRow[]): APIError {
+  const theirs = taken.flatMap((row) => normalizeProviderDomains(row.domain) ?? []);
+  const colliding = mine.filter((domain) => theirs.some((other) => domainsOverlap(domain, other)));
   return new APIError("CONFLICT", {
     code: "SSO_DOMAIN_TAKEN",
-    message: `Another organization has already verified an overlapping domain (${domains.join(", ")}).`,
+    message: `Another organization has already verified a domain overlapping ${colliding.join(", ")}.`,
   });
 }
 
 function issuerNotAllowedError(issuer: string): APIError {
   return new APIError("FORBIDDEN", {
     code: "SSO_ISSUER_NOT_ALLOWED",
-    message: `The issuer ${JSON.stringify(issuer)} is not on this deployment's SSO issuer allow-list.`,
+    message: `The issuer ${JSON.stringify(issuer)}, or an identity-provider endpoint the configuration points at, is not on this deployment's SSO issuer allow-list.`,
   });
 }
 
@@ -138,6 +266,42 @@ function stringField(body: Body, key: string): string | null {
 interface GuardedProviderRow extends VerifiedProviderRow {
   issuer: string;
   userId: string | null;
+  /** JSON as upstream stores it (a string), or `null`. */
+  oidcConfig?: string | null;
+  samlConfig?: string | null;
+}
+
+function parseStoredConfig(raw: unknown): Record<string, unknown> | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The configuration `/sso/update-provider` will store: upstream merges the body over the stored config (one level; `idpMetadata` one level deeper), so the allow-list judges the merged result. */
+function mergedProviderConfig(
+  provider: GuardedProviderRow,
+  body: Body,
+): { oidcConfig: unknown; samlConfig: unknown } {
+  const storedOidc = parseStoredConfig(provider.oidcConfig);
+  const storedSaml = parseStoredConfig(provider.samlConfig);
+  const bodyOidc = isRecord(body.oidcConfig) ? body.oidcConfig : null;
+  const bodySaml = isRecord(body.samlConfig) ? body.samlConfig : null;
+  const oidcConfig = bodyOidc ? { ...(storedOidc ?? {}), ...bodyOidc } : storedOidc;
+  let samlConfig: unknown = storedSaml;
+  if (bodySaml) {
+    const storedIdp = isRecord(storedSaml?.idpMetadata) ? storedSaml.idpMetadata : {};
+    const bodyIdp = isRecord(bodySaml.idpMetadata) ? bodySaml.idpMetadata : null;
+    samlConfig = {
+      ...(storedSaml ?? {}),
+      ...bodySaml,
+      ...(bodyIdp ? { idpMetadata: { ...storedIdp, ...bodyIdp } } : {}),
+    };
+  }
+  return { oidcConfig, samlConfig };
 }
 
 async function findProvider(
@@ -173,15 +337,18 @@ async function guardRegister(
   // own rows are excluded" — still fail-closed.
   const organizationId = stringField(body, "organizationId");
   const issuer = stringField(body, "issuer");
-  if (issuer && !(await issuerAllowed(opts, issuer, organizationId))) {
-    throw issuerNotAllowedError(issuer);
+  if (issuer) {
+    const endpoints = collectIdpEndpoints(body.oidcConfig, body.samlConfig);
+    if (!(await issuerAllowed(opts, issuer, { organizationId, endpoints }))) {
+      throw issuerNotAllowedError(issuer);
+    }
   }
   const domains = normalizeProviderDomains(stringField(body, "domain"));
   if (!domains) throw domainInvalidError();
   const taken = await findVerifiedProvidersOverlapping(ctx, domains, {
     excludeOrgId: organizationId,
   });
-  if (taken.length > 0) throw domainTakenError(taken);
+  if (taken.length > 0) throw domainTakenError(domains, taken);
   return { context: { body: { ...body, domain: domains.join(",") } } };
 }
 
@@ -199,9 +366,21 @@ async function guardUpdate(
   // scan or the allow-list through this hook either.
   if (!(await callerMayMutate(ctx, provider, userId))) return;
 
+  // The allow-list judges the provider as it will be *after* the update: a
+  // new issuer against the (stored or replaced) endpoints, and replaced
+  // endpoints against the (stored or new) issuer — `oidcConfig`/`samlConfig`
+  // alone, with the issuer untouched, is the endpoint-swap this exists for.
   const issuer = stringField(body, "issuer");
-  if (issuer && !(await issuerAllowed(opts, issuer, provider.organizationId))) {
-    throw issuerNotAllowedError(issuer);
+  const configSent = isRecord(body.oidcConfig) || isRecord(body.samlConfig);
+  if ((issuer || configSent) && opts?.sso?.allowedIssuers !== undefined) {
+    const effectiveIssuer = issuer ?? provider.issuer;
+    const merged = mergedProviderConfig(provider, body);
+    const endpoints = collectIdpEndpoints(merged.oidcConfig, merged.samlConfig);
+    const allowed = await issuerAllowed(opts, effectiveIssuer, {
+      organizationId: provider.organizationId,
+      endpoints,
+    });
+    if (!allowed) throw issuerNotAllowedError(effectiveIssuer);
   }
   const domain = stringField(body, "domain");
   // An unchanged domain (repeated verbatim) is not a domain change: upstream
@@ -214,7 +393,7 @@ async function guardUpdate(
     excludeOrgId: provider.organizationId,
     excludeProviderId: provider.providerId,
   });
-  if (taken.length > 0) throw domainTakenError(taken);
+  if (taken.length > 0) throw domainTakenError(domains, taken);
   return { context: { body: { ...body, domain: domains.join(",") } } };
 }
 
@@ -230,7 +409,7 @@ async function guardVerify(ctx: GenericEndpointContext, body: Body): Promise<Hoo
     excludeOrgId: provider.organizationId,
     excludeProviderId: provider.providerId,
   });
-  if (taken.length > 0) throw domainTakenError(taken);
+  if (taken.length > 0) throw domainTakenError(domains, taken);
   return;
 }
 
