@@ -324,6 +324,8 @@ change log.
 
 The step-by-step guide, the full behaviour table, the new options and the error codes are in
 [`docs/upgrading-to-1.1.md`](./upgrading-to-1.1.md); this section holds the details it links to.
+Table and column names in the queries below are this package's and better-auth's defaults;
+adjust them to your schema if the package's tables were created under other names.
 
 1.1.0 binds every SSO sign-in to the signing provider's verified domain (GHSA-8p84-pc7q-69jr).
 An `account` row that links a user to a provider **not** verified for that user's e-mail domain

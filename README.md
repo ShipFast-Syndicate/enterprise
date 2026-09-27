@@ -11,8 +11,9 @@ framework-agnostic admin portal — as one package with four subpath entry point
 **v1.1.** Server plugins, schema/CLI, client helpers, and all seven portal elements are
 implemented and tested (1026 tests). Upgrading from 1.0.x or 0.1.x: read
 [`docs/upgrading-to-1.1.md`](./docs/upgrading-to-1.1.md) first — every change is on by default,
-and a few change what existing users see. Read [`docs/security.md`](./docs/security.md) before
-deploying to a real customer — it documents the patched SCIM migration, token storage, policy
+a few change what existing users see, and a product that replaces one of the preset's plugins
+sets the preset's settings on its own call (step 2). Read
+[`docs/security.md`](./docs/security.md) before deploying to a real customer — it documents the patched SCIM migration, token storage, policy
 enforcement, audit chain limitations, and the retention/GDPR posture.
 
 ## Install
@@ -36,7 +37,7 @@ This package ships one dependency of its own (`zod`) and declares everything els
   "@libsql/client": "^0.15.15 || ^0.17.3", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
   "lit": "^3", // optional — only needed for ./portal
-  "samlify": "^2.13.1", // already a dependency of @better-auth/sso (since 1.1.0)
+  "samlify": "^2.13.1", // peer since 1.1.0; already a dependency of @better-auth/sso
 }
 ```
 

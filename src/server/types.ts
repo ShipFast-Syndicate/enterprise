@@ -153,7 +153,11 @@ export interface EnterpriseOptions {
     samlCertificateFingerprints?: Record<string, string[]>;
   };
   /**
-   * Forwarded to the upstream `organization()` plugin by the preset.
+   * Forwarded to the upstream `organization()` plugin by the preset. Both
+   * settings configure the preset's own `organization()` entry only: a
+   * product that replaces or filters out that entry (by plugin id) and
+   * mounts its own `organization()` sets them on its own call, or upstream's
+   * defaults apply (see `docs/upgrading-to-1.1.md`, step 2).
    *
    * `requireEmailVerificationOnInvitation` (default `true` here; upstream
    * defaults it to `false` for opaque invitation ids): accepting or

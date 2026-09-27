@@ -3,7 +3,10 @@
 1.1.0 is a minor release. It tightens how the package applies the controls it already
 documented — SSO domain ownership, organization policy, API-key lifetime, SCIM decommission and
 the audit log — and adds options for the few places where an integrator may legitimately choose
-otherwise. Every change is **on by default**; nothing needs to be configured to get it.
+otherwise. Every change is **on by default** in the plugins `enterprisePreset()` mounts; nothing
+needs to be configured to get it. A plugin your auth config mounts **in place of** one of the
+preset's (replaced or filtered out by id) does not carry the preset's settings — step 2 lists
+what such a plugin must set.
 
 - **No schema change.** No column is added to any table the auth adapter writes, so a product's
   hand-maintained Drizzle tables need no edit.
@@ -12,6 +15,10 @@ otherwise. Every change is **on by default**; nothing needs to be configured to 
 - **One new peer dependency**, `samlify` (step 1).
 - The upgrade applies to every release from 0.1.0 to 1.0.1. Upgrade from any of them; the
   release notes list what changed ([`docs/releases/1.1.0.md`](./releases/1.1.0.md)).
+- **From 0.1.x**, first follow [`docs/migration-1-7.md`](./migration-1-7.md) (the better-auth
+  1.6.33 → 1.7.5 peer set and SCIM connection catalog that 1.0.0 introduced), then this guide.
+  That guide's `0002` is applied once: either there (through `applyMigration()`, then
+  `--from 0003` in step 3) or through `--from 0002` in step 3, not both.
 
 Read the whole [behaviour table](#3-behaviour-changes) before upgrading a deployment with real
 users: a handful of rows change what existing users see on their first request after the
@@ -19,8 +26,10 @@ upgrade (`require2fa`, invitation acceptance, API-key expiry, SCIM decommission)
 
 ## 1. Before you upgrade — checks
 
-Run these against each production database. Column names below are this package's and
-better-auth's defaults; adjust them to your schema. Each query is read-only.
+Run these against each production database. Table and column names below are this package's
+and better-auth's defaults; adjust them to your schema (a product that created the package's
+tables through a migration of its own may have prefixed table names, snake_case user columns or
+a differently named organization table). Each query is read-only.
 
 ```sql
 -- (a) SSO account rows linked to a provider that is not verified for the user's e-mail
@@ -69,11 +78,23 @@ WHERE m.role LIKE '%owner%';
 
 -- (k) organization ids longer than 128 characters (row 19; expected: none)
 SELECT id FROM organization WHERE length(id) > 128;
+
+-- (l) organizations that enforce SSO (row 3): their members who also belong to another
+--     organization are sent to this organization's own IdP
+SELECT org_id FROM org_policy WHERE sso_enforced = 1;
 ```
 
 In the product's own code, check for:
 
+- a preset plugin replaced or filtered out by id — `organization`, `api-key` or `admin`, e.g.
+  `.map((p) => (p.id === "organization" ? organization({ … }) : p))` or
+  `.filter((p) => p.id !== "api-key")` followed by a mount of your own (step 2);
 - a second `apiKey()` plugin mounted next to `enterprisePreset()` (step 2);
+- sign-in or session-minting plugins beyond the preset's (e-mail and password, magic link,
+  social providers, passkey, SSO): e-mail OTP, generic OAuth, anonymous, one-tap, an OAuth
+  proxy, or a plugin of your own that creates sessions. Declare their paths in
+  `policy.signInMethods`, or they are refused for users under a restricted `allowedMethods`
+  (row 12);
 - `advanced.backgroundTasks` in the auth config if the product runs on a serverless host
   (step 4);
 - any code that sends an `x-api-key` header to `/api/auth/*` other than `/get-session`
@@ -91,20 +112,49 @@ In the product's own code, check for:
    already depends on it, so it is usually present; add it explicitly
    (`pnpm add samlify@^2.13.1`) if your package manager does not install peer dependencies
    automatically or runs with strict peer checks.
-2. **One `apiKey()` plugin only.** `enterprisePreset()` already mounts `apiKey()` with the
-   enterprise validator, header list and expiry bound. If your auth config mounts a second
-   `apiKey()` next to it, remove that mount: better-auth merges plugin endpoints last-wins, so a
-   second mount replaces the preset's `/api-key/*` endpoints and `verifyApiKey`, and the
-   default expiry and the banned-owner refusal (rows 13 and 14) would not apply. The header
-   allow-list (row 14) holds either way. To let a key authenticate as its owner, set
-   `apiKeys.enableSessionForAPIKeys: true` on the preset instead.
+2. **Preset plugins you replace, filter out or mount twice.** `enterprisePreset()` returns a
+   plugin list; the settings below are applied to the preset's own entries only.
+   - **`organization()`.** The preset mounts
+     `organization({ teams: { enabled: true }, requireEmailVerificationOnInvitation, allowUserToCreateOrganization })`,
+     with `organization.requireEmailVerificationOnInvitation` (default `true`) and
+     `organization.allowUserToCreateOrganization` (default `true`) taken from the preset's
+     options. If your config replaces that entry by id or filters it out and mounts its own
+     `organization()`, those two options are ignored and upstream's defaults apply — for the
+     invitation check that is `false`, so row 4 does not hold. Your own call must carry the
+     preset's settings:
+
+     ```ts
+     organization({
+       teams: { enabled: true },
+       requireEmailVerificationOnInvitation: true,
+       allowUserToCreateOrganization: true, // or your own boolean / predicate
+       // …your other settings
+     });
+     ```
+
+   - **`apiKey()`.** The preset mounts `apiKey()` with the enterprise validator, header list and
+     expiry bound. If your config filters the preset's `api-key` plugin out and mounts its own
+     `apiKey()`, remove **both** the filter and your own mount wherever the preset is mounted;
+     keep a plain `apiKey()` only in configurations where `enterprisePreset()` is not mounted
+     (e.g. `...(enterpriseEnabled ? [] : [apiKey()])`), since the preset already mounts it. Removing
+     only your own mount leaves such a config with no API-key plugin at all. Likewise, if your
+     auth config mounts a second `apiKey()` next to the preset's, remove that mount:
+     better-auth merges plugin endpoints last-wins, so a second mount replaces the preset's
+     `/api-key/*` endpoints and `verifyApiKey`, and the default expiry and the banned-owner
+     refusal (rows 13 and 14) would not apply. The header allow-list (row 14) holds either way.
+     To let a key authenticate as its owner, set `apiKeys.enableSessionForAPIKeys: true` on the
+     preset instead.
+   - **`admin()`** is mounted with upstream's defaults, so a replacement changes only what it
+     configures itself.
+
 3. **Data migration.** Apply `0003_require2fa.sql` once, through the product's own migrator:
 
    ```sh
    # any 1.0.x install — whatever wrote the folder's 0001 (this command, or a
    # migration the product wrote itself when it adopted the package)
    ab-enterprise migrate --out <drizzle migrations folder> --from 0003
-   # only a folder coming straight from 0.1.x, which never applied 0002
+   # only a folder coming straight from 0.1.x whose database never applied 0002
+   # (not through applyMigration() either)
    ab-enterprise migrate --out <drizzle migrations folder> --from 0002
    ```
 
@@ -124,12 +174,16 @@ In the product's own code, check for:
    (failed, refused and 2FA-pending sign-ins, magic-link and password-reset requests) are
    written off the response path, so response time does not depend on whether the address has
    an account. On a host that freezes the instance after the response (Vercel, Cloudflare
-   Workers, …) set `advanced: { backgroundTasks: { handler: waitUntil } }` (or the platform's
-   equivalent) in the better-auth config, or such rows can be lost. `flushAuditWrites()` drains
+   Workers, …) set `advanced: { backgroundTasks: { handler: waitUntil } }` in the better-auth
+   config — `waitUntil` from `@vercel/functions` on Vercel, from `cloudflare:workers` on
+   Cloudflare Workers, or the platform's equivalent — or such rows can be lost. `flushAuditWrites()` drains
    pending writes on a graceful shutdown.
 5. **Product UI.**
    - A product that offers password sign-in redirects to its two-factor enrolment UI when
-     `/get-session` reports `enterprise.enrollmentRequired: true` (row 10).
+     `/get-session` reports `enterprise.enrollmentRequired: true` (row 10). A passwordless
+     product (e-mail and password disabled) has no enrolment step: under `require2fa`, its
+     members sign in through SSO only, unless `policy.twoFactor.satisfiedBy` also names
+     `magic_link`, `passkey` or a social provider.
    - `auth.api.getSession()` may now answer `null` for a session that does not stand under
      `require2fa`; treat it as signed out (row 10).
    - A custom SSO registration UI surfaces `409 SSO_DOMAIN_TAKEN` (row 6) and
@@ -137,7 +191,11 @@ In the product's own code, check for:
 6. **SSO providers without an organization.** If check (c) returned rows, bind each to the
    organization it serves or delete and re-register it before upgrading —
    [`docs/security.md`](./security.md#sso-providers-without-an-organization).
-7. **Deploy, then run `ab-enterprise verify`** against the live database.
+7. **Deploy.** Where the package's tables use its default table and column names (they were
+   created by `ab-enterprise migrate` or `applyMigration()`), run `ab-enterprise verify`
+   against the live database; 1.1.0 adds no table or column, so a schema that verified under
+   1.0.x verifies unchanged. A schema whose package tables were created under other names
+   fails `verify` whatever the release; skip the command there.
 8. **Watch the logs for 48 hours** for `auth.sign_in_refused` audit rows,
    `TWO_FACTOR_ENROLLMENT_REQUIRED`, `could not be decrypted` and `DatabaseQueryError`.
 
@@ -150,8 +208,8 @@ the queries in section 1.
 | --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | 1   | **SSO domain binding** (`sso.domainBinding: "verified-domain"`): JIT user creation and every session an SSO callback mints require the signing provider to be domain-verified for the user's e-mail domain                                         | an IdP that signs in addresses outside its organization's verified domains (external contractors on a public mail domain) is refused for them (`SSO_DOMAIN_NOT_ALLOWED`); account rows linked to such a provider stop signing in — check (a) | `sso.domainBinding: "off"` — only safe with `sso.allowedIssuers` and, for SAML, `sso.samlCertificateFingerprints`; warns at startup |
 | 2   | Domain-bound JIT users are stored with `emailVerified: true`                                                                                                                                                                                       | a "verify your e-mail after SSO" step becomes unnecessary                                                                                                                                                                                    | `sso.trustVerifiedDomainEmail: false`                                                                                               |
-| 3   | `ssoEnforced` is satisfied only by the enforcing organization's own IdP                                                                                                                                                                            | a user in two organizations is sent to the enforcing organization's IdP (`SSO_REQUIRED`); break-glass unchanged                                                                                                                              | none                                                                                                                                |
-| 4   | Accepting or rejecting an invitation requires a verified e-mail                                                                                                                                                                                    | a password sign-up without e-mail verification cannot accept invitations (upstream's `EMAIL_VERIFICATION_REQUIRED_BEFORE_ACCEPTING_OR_REJECTING_INVITATION`) — check (f)                                                                     | `organization.requireEmailVerificationOnInvitation: false`                                                                          |
+| 3   | `ssoEnforced` is satisfied only by the enforcing organization's own IdP                                                                                                                                                                            | a user in two organizations is sent to the enforcing organization's IdP (`SSO_REQUIRED`); break-glass unchanged — check (l)                                                                                                                  | none                                                                                                                                |
+| 4   | Accepting or rejecting an invitation requires a verified e-mail (in the preset's own `organization()`; a replaced one sets it itself, step 2)                                                                                                      | a password sign-up without e-mail verification cannot accept invitations (upstream's `EMAIL_VERIFICATION_REQUIRED_BEFORE_ACCEPTING_OR_REJECTING_INVITATION`) — check (f)                                                                     | `organization.requireEmailVerificationOnInvitation: false`                                                                          |
 | 5   | `/sso/register` requires `organizationId`                                                                                                                                                                                                          | `400 ORG_REQUIRED` without it; the portal already sends it — check (c)                                                                                                                                                                       | none                                                                                                                                |
 | 6   | One organization per verified domain; e-mail `/sign-in/sso` pinned to the verified provider                                                                                                                                                        | `409 SSO_DOMAIN_TAKEN` on register, update and verify-domain; domains two organizations already verified keep upstream's lookup (logged) — check (d)                                                                                         | none                                                                                                                                |
 | 7   | A user in several organizations gets the **union** of their policies                                                                                                                                                                               | any `ssoEnforced` applies, `allowedMethods` intersect (no overlap = no method), smallest `sessionMaxAgeS`, any `require2fa` — check (g)                                                                                                      | none (per-org break-glass)                                                                                                          |
@@ -159,7 +217,7 @@ the queries in section 1.
 | 9   | `sessionMaxAgeS` also bounds session refresh                                                                                                                                                                                                       | the portal's 1 h / 8 h / 24 h caps hold; lowering a cap ends older sessions at their next refresh — check (h)                                                                                                                                | none                                                                                                                                |
 | 10  | **`require2fa` is enforced**, no grace period (details)                                                                                                                                                                                            | organizations with `require_2fa = 1` start enforcing at upgrade — check (b); add the enrolment redirect (step 5) and apply `0003` (step 3)                                                                                                   | `policy.twoFactor.satisfiedBy`, `policy.twoFactor.enrollmentPaths`                                                                  |
 | 11  | A wrong password under a policy is a plain `401` (was `403`); `/sign-in/magic-link` always sends the link and `/magic-link/verify` applies the policy                                                                                              | sign-in UIs keep calling `/enterprise/home-realm` first                                                                                                                                                                                      | none                                                                                                                                |
-| 12  | Sign-in paths the package cannot classify are refused under a restricted `allowedMethods`                                                                                                                                                          | only products that mount extra sign-in plugins (e-mail OTP, generic OAuth, …): `METHOD_NOT_ALLOWED`                                                                                                                                          | declare them in `policy.signInMethods`                                                                                              |
+| 12  | Sign-in paths the package cannot classify are refused under a restricted `allowedMethods`                                                                                                                                                          | only products that mount extra sign-in or session-minting plugins (e-mail OTP, generic OAuth, …): `METHOD_NOT_ALLOWED` — code check in section 1                                                                                             | declare them in `policy.signInMethods`                                                                                              |
 | 13  | New API keys expire after 90 days (at most 365); an expiry cannot be removed (`400 API_KEY_EXPIRY_REQUIRED`)                                                                                                                                       | automation assuming perpetual keys rotates them; existing keys keep their lifetime — check (i)                                                                                                                                               | `apiKeys.defaultExpiresInS: null`, `apiKeys.maxExpiresInDays`                                                                       |
 | 14  | Keys of banned or deleted users are refused (`USER_BANNED`, `USER_NOT_FOUND`); ban and removal delete the user's keys (audited `api_key.revoked`); a request carrying a key reaches `/get-session` only (`403 API_KEY_NOT_ALLOWED_HERE` elsewhere) | routes branching on `valid` need nothing; `getSession({ headers })` with a forwarded `x-api-key` next to a cookie answers the cookie's session                                                                                               | none                                                                                                                                |
 | 15  | SCIM decommission (`/enterprise/scim/tokens/revoke`) is owner-only; an owner membership is never banned by SCIM                                                                                                                                    | admins get `403 NOT_ORG_OWNER`; for owners, sessions and API keys are still revoked and the skipped ban is audited (`scim.user_deactivation_skipped`) — check (j)                                                                            | none                                                                                                                                |
@@ -171,7 +229,9 @@ the queries in section 1.
 | 21  | The entitlement gate checks the organization the endpoint acts on (details)                                                                                                                                                                        | organization ids in other request fields no longer decide the entitlement                                                                                                                                                                    | none                                                                                                                                |
 | 22  | A hard audited change whose audit row cannot be written answers `500 AUDIT_WRITE_FAILED`, whatever status the endpoint set                                                                                                                         | SCIM `POST /scim/v2/Users` and `/sso/request-domain-verification` no longer answer `201` with that error body; the change is still committed                                                                                                 | none                                                                                                                                |
 
-Rows 13 and 14 apply when the preset's own `apiKey()` serves the key endpoints (step 2).
+Rows 13 and 14 apply when the preset's own `apiKey()` serves the key endpoints, and row 4
+when the preset's own `organization()` is mounted or yours sets
+`requireEmailVerificationOnInvitation: true` (step 2).
 
 **Row 10 — `require2fa`.**
 
@@ -240,8 +300,8 @@ All new options are optional and default to the stricter behaviour.
 | `sso.trustVerifiedDomainEmail`                      | `true`              | store domain-bound JIT users as `emailVerified` (row 2)                                                                                                                                                              |
 | `sso.allowedIssuers`                                | unset (any IdP)     | array of strings/`RegExp`s or a predicate restricting which identity providers may be registered and signed in through ([`sso.md`](./sso.md#oidc-provider-origins-trustedorigins-and-the-issuer-allow-list))         |
 | `sso.samlCertificateFingerprints`                   | unset               | SHA-256 pins of each SAML IdP's signing certificates; with an array `allowedIssuers`, a SAML provider without pins is refused                                                                                        |
-| `organization.requireEmailVerificationOnInvitation` | `true`              | invitation accept/reject requires a verified e-mail (row 4)                                                                                                                                                          |
-| `organization.allowUserToCreateOrganization`        | `true`              | self-serve organization creation (boolean or predicate); policy resolution no longer depends on it                                                                                                                   |
+| `organization.requireEmailVerificationOnInvitation` | `true`              | invitation accept/reject requires a verified e-mail (row 4); configures the preset's own `organization()` only (step 2)                                                                                              |
+| `organization.allowUserToCreateOrganization`        | `true`              | self-serve organization creation (boolean or predicate); policy resolution no longer depends on it; configures the preset's own `organization()` only (step 2)                                                       |
 | `policy.signInMethods`                              | `{}`                | name the sign-in paths of plugins the preset does not ship, so `allowedMethods` can allow them (row 12)                                                                                                              |
 | `policy.twoFactor.satisfiedBy`                      | `["sso"]`           | sign-in methods accepted as carrying a second factor (row 10)                                                                                                                                                        |
 | `policy.twoFactor.enrollmentPaths`                  | `[]`                | product endpoints an un-enrolled user may still reach while enrolling                                                                                                                                                |
