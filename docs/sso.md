@@ -372,7 +372,10 @@ Upstream ran its owner/admin check only when the field was present, so any
 signed-in user could create a "personal" (`organizationId: null`) provider
 claiming any domain. Such rows cannot be domain-verified through this layer,
 are skipped by every org-scoped read, and are refused by the test-login
-finish.
+finish. `/sso/update-provider` and `/sso/delete-provider` are gated on the
+`sso` entitlement of the provider's own organization, so a provider without
+one is refused there too (`403 NOT_ORG_MEMBER`); docs/security.md, "SSO
+providers without an organization", has the operator path for such rows.
 
 ### Invitations require a verified e-mail
 

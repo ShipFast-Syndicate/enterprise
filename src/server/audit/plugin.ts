@@ -10,7 +10,7 @@
 // 2. `hooks.before`/`hooks.after` on the route table in `./routes.ts`
 //    (`AUDITED_PATHS`): the before-hook captures what the endpoint is about
 //    to destroy or change (the caller's session, the provider's org, the
-//    target user's orgs, the caller's proven org); the after-hook writes one
+//    target user's orgs, the acted-on team's/invitation's org); the after-hook writes one
 //    row per organization in the entry's `scope`, with the actor taken from
 //    the session first (never from the response), impersonation made
 //    explicit (`actorType: "impersonated"`, `metadata.impersonatedBy`).
@@ -38,7 +38,9 @@
 // see `AuditScope` in `./routes.ts`. A `?orgId=` on the request is ignored
 // everywhere except the two endpoints that themselves require the caller to
 // be an owner/admin of exactly that org (`/enterprise/policy/set`, and the
-// export, which audits itself).
+// export, which audits itself). An organization endpoint's row goes to the
+// org of the resource it acted on, read from that resource
+// (`RESOURCE_ORG_SOURCES`) — never from an org id the caller named.
 
 import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import type { Where } from "@better-auth/core/db/adapter";
@@ -77,7 +79,17 @@ import {
   type CompactionResult,
 } from "./chain";
 import { auditInBackground } from "./background";
-import { auditChangedKeys, auditCode, auditEmail, auditToken, auditUserAgent } from "./bounds";
+import {
+  AUDIT_TIME_MAX,
+  auditChangedKeys,
+  auditCode,
+  auditEmail,
+  auditId,
+  auditRoles,
+  auditRowBounds,
+  auditToken,
+  auditUserAgent,
+} from "./bounds";
 import {
   auditStashOf,
   isNotedPolicyRefusal,
@@ -170,21 +182,6 @@ export async function auditOrgIdsForUser(
   return resolvePolicyOrgsForUser(ctx, { userId, email: email ?? "" });
 }
 
-async function isOrgMember(
-  ctx: GenericEndpointContext,
-  orgId: string,
-  userId: string,
-): Promise<boolean> {
-  const member = await ctx.context.adapter.findOne<{ id: string }>({
-    model: "member",
-    where: [
-      { field: "organizationId", value: orgId },
-      { field: "userId", value: userId },
-    ],
-  });
-  return !!member;
-}
-
 function str(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -205,7 +202,7 @@ function extractId(value: unknown): string | null {
 function returnedOrgId(path: string, returned: unknown): string | null {
   const body = record(returned);
   if (!body) return null;
-  if (path === "/organization/update") return str(body.id);
+  if (path === "/organization/update" || path === "/organization/delete") return str(body.id);
   return (
     str(body.organizationId) ??
     str(record(body.member)?.organizationId) ??
@@ -226,8 +223,8 @@ interface AuditStash extends EnterpriseAuditStash {
   subjectHint?: { userId?: string | null; email?: string | null } | null;
   /** The subject's orgs, resolved before the endpoint deleted them. */
   preOrgIds?: string[];
-  /** Body/active org the caller was a member of before the request. */
-  provenOrgId?: string | null;
+  /** The org of the team/invitation a `resource`-scope endpoint is about to act on, read from that row (`RESOURCE_ORG_SOURCES`). */
+  resourceOrgId?: string | null;
   provider?: { providerId: string; orgId: string | null; linkedAccounts?: number } | null;
   targetUser?: { userId: string; orgIds: string[] } | null;
   /** Noted by the `databaseHooks` below: whose session / user a create was for. */
@@ -353,20 +350,68 @@ async function targetUserOf(
   return { userId, orgIds: await auditOrgIdsForUser(ctx, { userId }) };
 }
 
-async function provenClaimedOrg(
+/**
+ * Where the org of a `resource`-scope row comes from — always the resource
+ * the endpoint acted on, never an org id the caller named (a body
+ * `organizationId`, a `?organizationId=`, the session's active org):
+ *
+ * - `"team"` / `"invitation"`: the `organizationId` of the team / invitation
+ *   row the request names (`body.teamId` / `body.invitationId`), read before
+ *   the endpoint runs (it may delete the row). Upstream only acts on a team
+ *   it found *in* the org it resolved (`findTeamById({ teamId,
+ *   organizationId })`), and on an invitation of that invitation's own org,
+ *   so this is the org the endpoint changed.
+ * - `"returned"`: the organization id on the member, invitation, team or
+ *   organization the endpoint returned (`returnedOrgId`).
+ *
+ * A path in `scope: "resource"` without an entry here resolves no org and
+ * writes no row (logged) — `test/security/audit-cluster-resource-org.test.ts`
+ * pins that every such path has one.
+ */
+export const RESOURCE_ORG_SOURCES: Readonly<Record<string, "team" | "invitation" | "returned">> = {
+  "/organization/update": "returned",
+  "/organization/delete": "returned",
+  "/organization/leave": "returned",
+  "/organization/invite-member": "returned",
+  "/organization/cancel-invitation": "invitation",
+  "/organization/reject-invitation": "invitation",
+  "/organization/accept-invitation": "invitation",
+  "/organization/remove-member": "returned",
+  "/organization/update-member-role": "returned",
+  "/organization/create-team": "returned",
+  "/organization/update-team": "team",
+  "/organization/remove-team": "team",
+  "/organization/add-team-member": "team",
+  "/organization/remove-team-member": "team",
+};
+
+/** The org of the team / invitation a `resource`-scope request names, from that row; `null` for the other sources. */
+async function resourceOrgBefore(
   ctx: GenericEndpointContext,
-  session: SessionLike | null,
+  path: string,
 ): Promise<string | null> {
-  const userId = session?.user?.id;
-  if (!userId) return null;
+  const source = RESOURCE_ORG_SOURCES[path];
   const body = record(ctx.body);
-  const query = record(ctx.query);
-  const claimed =
-    str(body?.organizationId) ??
-    str(query?.organizationId) ??
-    str(session?.session?.activeOrganizationId);
-  if (!claimed) return null;
-  return (await isOrgMember(ctx, claimed, userId)) ? claimed : null;
+  const lookup =
+    source === "team"
+      ? { model: "team", id: str(body?.teamId) }
+      : source === "invitation"
+        ? { model: "invitation", id: str(body?.invitationId) }
+        : null;
+  if (!lookup?.id) return null;
+  const row = await ctx.context.adapter.findOne<{ organizationId?: string | null }>({
+    model: lookup.model,
+    where: [{ field: "id", value: lookup.id }],
+  });
+  return str(row?.organizationId);
+}
+
+/** The org a `resource`-scope row goes to: the acted-on resource's own org, or `null` (no row). */
+function resourceOrgId(path: string, stash: AuditStash, returned: unknown): string | null {
+  const source = RESOURCE_ORG_SOURCES[path];
+  if (source === "returned") return returnedOrgId(path, returned);
+  if (source === "team" || source === "invitation") return stash.resourceOrgId ?? null;
+  return null;
 }
 
 async function captureBefore(
@@ -389,7 +434,7 @@ async function captureBefore(
   } else if (entry.scope === "target-user") {
     stash.targetUser = await targetUserOf(ctx, path, session);
   } else if (entry.scope === "resource") {
-    stash.provenOrgId = await provenClaimedOrg(ctx, session);
+    stash.resourceOrgId = await resourceOrgBefore(ctx, path);
   } else if (entry.scope === "provider") {
     stash.provider = await providerOf(ctx, path);
   }
@@ -583,9 +628,10 @@ async function writeRows(
     else ctx.context.logger.debug(message);
     return;
   }
+  const bounded = auditRowBounds(row);
   for (const orgId of targets) {
     try {
-      await writeAudit(ctx, { ...row, orgId });
+      await writeAudit(ctx, { ...bounded, orgId });
     } catch (err) {
       if (opts.soft) {
         ctx.context.logger.error("enterprise-audit: failed to write audit row", err);
@@ -829,6 +875,12 @@ function routeParamId(ctx: GenericEndpointContext): string | null {
   return str(params?.userId) ?? str(params?.groupId) ?? str(params?.providerId);
 }
 
+// Every value below that comes from the request (a body field, a route
+// parameter) goes through `./bounds.ts` before it reaches the row: ids via
+// `auditId`, roles via `auditRoles`, key lists via `changedKeys`; values read
+// back from the database or the response are the stored ones. `writeRows`
+// applies `auditRowBounds` to the result as a backstop.
+
 async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
   const { ctx, path, stash, returned } = a;
   const failure = failureOf(returned);
@@ -855,11 +907,11 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
   switch (entry.scope) {
     case "scim":
       orgIds = [scimConnection?.provisioningDomainId ?? null];
-      targetId = extractId(returned) ?? routeParamId(ctx);
+      targetId = auditId(extractId(returned) ?? routeParamId(ctx));
       break;
     case "request-org":
       orgIds = [str(body?.orgId) ?? str(body?.organizationId)];
-      targetId = orgIds[0] ?? null;
+      targetId = auditId(orgIds[0]);
       Object.assign(metadata, changedKeys(body, ["orgId", "organizationId"]));
       break;
     case "provider": {
@@ -869,7 +921,7 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
         (await providerOrgId(ctx, providerId)) ??
         str(record(returned)?.organizationId);
       orgIds = [orgId];
-      targetId = providerId;
+      targetId = auditId(providerId);
       if (path === "/sso/update-provider") {
         Object.assign(metadata, changedKeys(body, ["providerId"]));
       }
@@ -885,7 +937,7 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
         target = userId ? { userId, orgIds: await safeOrgIds(ctx, { userId }) } : null;
       }
       orgIds = target?.orgIds ?? [];
-      targetId = target?.userId ?? null;
+      targetId = auditId(target?.userId);
       if (path === "/admin/stop-impersonating") {
         // The session being ended was the staff member's impersonation of
         // the target: the staff member is the actor.
@@ -894,41 +946,43 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
           ? { actorType: "user", actorId: staff, metadata: {} }
           : sessionActor(stash.session);
       }
-      if (path === "/admin/set-role") metadata.role = body?.role ?? null;
+      if (path === "/admin/set-role") Object.assign(metadata, auditRoles(body?.role));
       if (path === "/admin/update-user") Object.assign(metadata, changedKeys(body?.data, []));
       break;
     }
     case "resource": {
-      orgIds = [returnedOrgId(path, returned) ?? stash.provenOrgId ?? null];
+      orgIds = [resourceOrgId(path, stash, returned)];
       const returnedBody = record(returned);
       if (path === "/organization/update" || path === "/organization/delete") {
-        targetId = orgIds[0] ?? null;
+        targetId = auditId(orgIds[0]);
         if (path === "/organization/update") Object.assign(metadata, changedKeys(body?.data, []));
       } else if (path === "/organization/update-member-role") {
         // F-09: the target is the member whose role changed, the actor the
         // caller — never the `userId` on the returned member row.
-        targetId = str(returnedBody?.id) ?? str(body?.memberId);
-        metadata.targetUserId = str(returnedBody?.userId);
-        metadata.role = body?.role ?? null;
+        targetId = auditId(str(returnedBody?.id) ?? str(body?.memberId));
+        metadata.targetUserId = auditId(str(returnedBody?.userId));
+        Object.assign(metadata, auditRoles(body?.role));
       } else if (path === "/organization/remove-member") {
         const member = record(returnedBody?.member);
-        targetId = str(member?.id) ?? str(body?.memberIdOrEmail);
-        metadata.targetUserId = str(member?.userId);
+        targetId = auditId(str(member?.id) ?? str(body?.memberIdOrEmail));
+        metadata.targetUserId = auditId(str(member?.userId));
       } else if (path === "/organization/accept-invitation") {
         const member = record(returnedBody?.member);
-        targetId = str(member?.id);
-        metadata.invitationId =
-          str(record(returnedBody?.invitation)?.id) ?? str(body?.invitationId);
+        targetId = auditId(str(member?.id));
+        metadata.invitationId = auditId(
+          str(record(returnedBody?.invitation)?.id) ?? str(body?.invitationId),
+        );
       } else if (path === "/organization/leave") {
-        targetId = str(returnedBody?.id) ?? null;
+        targetId = auditId(str(returnedBody?.id));
       } else {
-        targetId =
+        targetId = auditId(
           extractId(returned) ??
-          extractId(returnedBody?.invitation) ??
-          extractId(returnedBody?.team) ??
-          extractId(returnedBody?.member) ??
-          str(body?.invitationId) ??
-          str(body?.teamId);
+            extractId(returnedBody?.invitation) ??
+            extractId(returnedBody?.team) ??
+            extractId(returnedBody?.member) ??
+            str(body?.invitationId) ??
+            str(body?.teamId),
+        );
       }
       break;
     }
@@ -971,14 +1025,14 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
         action = "user.deletion_requested";
       }
       if (path === "/update-user") Object.assign(metadata, changedKeys(body, []));
-      if (path === "/unlink-account") metadata.providerId = str(body?.providerId);
+      if (path === "/unlink-account") metadata.providerId = auditId(body?.providerId);
       if (path.startsWith("/api-key/")) {
         targetType = "api_key";
-        targetId = extractId(returned) ?? str(body?.keyId);
+        targetId = auditId(extractId(returned) ?? str(body?.keyId));
         if (path === "/api-key/update") Object.assign(metadata, changedKeys(body, ["keyId"]));
       }
       if (path.startsWith("/passkey/")) {
-        targetId = extractId(returned) ?? str(body?.id) ?? null;
+        targetId = auditId(extractId(returned) ?? str(body?.id));
       }
       if (targetType === "session") targetId = null; // never record a session token
       break;
@@ -1111,20 +1165,28 @@ function toCsvRow(row: AuditEventRow): string {
     .join(",");
 }
 
+/**
+ * A `from`/`to` filter: whole milliseconds since the epoch within what a
+ * `Date` can hold (`[0, AUDIT_TIME_MAX]`). Anything else is a 400 at
+ * validation, before a query is built — an out-of-range value used to reach
+ * the adapter as an Invalid Date and answer 500.
+ */
+const timeBound = z.coerce.number().int().min(0).max(AUDIT_TIME_MAX).optional();
+
 const listQuerySchema = z.object({
   orgId: z.string(),
   action: z.string().optional(),
   actorId: z.string().optional(),
-  from: z.coerce.number().optional(),
-  to: z.coerce.number().optional(),
+  from: timeBound,
+  to: timeBound,
   cursor: z.coerce.number().int().optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
 const exportQuerySchema = z.object({
   orgId: z.string(),
-  from: z.coerce.number().optional(),
-  to: z.coerce.number().optional(),
+  from: timeBound,
+  to: timeBound,
 });
 
 const verifyQuerySchema = z.object({
@@ -1294,6 +1356,7 @@ export function auditLog(opts: EnterpriseOptions) {
       // rows are HMAC links only the key can check.
       let cursor: number | null = null;
       let prevHash: string | null = null;
+      let keyed = false;
       for (;;) {
         const where: Where[] = [{ field: "orgId", value: orgId }];
         if (cursor !== null) where.push({ field: "seq", value: cursor, operator: "gt" });
@@ -1309,9 +1372,13 @@ export function auditLog(opts: EnterpriseOptions) {
         if (!result.ok) return ctx.json(result);
         prevHash = result.prevHash;
         cursor = page[page.length - 1]!.seq;
+        keyed = isKeyedHash(page[page.length - 1]!.hash);
         if (page.length < VERIFY_PAGE_SIZE) break;
       }
-      return ctx.json({ ok: true });
+      // `keyed`: whether the newest row is an HMAC link (`audit.chainKey`) —
+      // the same flag `/enterprise/audit/head` reports. An unkeyed chain
+      // that verifies proves consistency, not authenticity.
+      return ctx.json({ ok: true, keyed });
     },
   );
 
@@ -1437,9 +1504,10 @@ export function auditLog(opts: EnterpriseOptions) {
       // session (`/sign-out` deletes it; its value comes from the caller's
       // own cookie, never their body), the provider's org and linked-account
       // count (`/sso/delete-provider` deletes both), the target user's orgs
-      // (`/admin/remove-user` deletes the memberships), the org the caller
-      // named and belonged to (`/organization/leave|delete`). A capture
-      // failure is logged and never blocks the request.
+      // (`/admin/remove-user` deletes the memberships), the org of the team
+      // or invitation an organization endpoint is about to act on
+      // (`/organization/remove-team` deletes it). A capture failure is
+      // logged and never blocks the request.
       before: [
         {
           matcher: (ctx) => !!ctx.path && auditEntryFor(ctx.path, ctx.request?.method) !== null,

@@ -6,9 +6,15 @@
 // Every value such a row takes from the request therefore goes through one
 // of these helpers first: an address is recorded only when it is a
 // syntactically valid e-mail address, a code or identifier only when it is
-// a short token, a user agent only up to a fixed length, and a list of
-// changed keys only up to a fixed count. Anything else is dropped (or, for
-// the user agent, truncated) — never stored verbatim.
+// a short token (else `AUDIT_UNRECORDED`), a role list only as a capped list
+// of short tokens with the total count, a user agent only up to a fixed
+// length, and a list of changed keys only up to a fixed count. Anything else
+// is dropped, truncated or replaced by the marker — never stored verbatim.
+//
+// `auditRowBounds` is the backstop the plugin applies to every row it
+// writes, whatever the path: a target id that is not a short value and a
+// metadata value too large to be a bounded one are replaced by the marker,
+// so a request value a path forgot to bound still cannot grow a chain.
 
 import * as z from "zod";
 
@@ -22,6 +28,22 @@ export const AUDIT_TOKEN_MAX_LENGTH = 128;
 export const AUDIT_CHANGED_KEYS_MAX = 64;
 /** Longest key name `metadata.changed` lists. */
 export const AUDIT_KEY_MAX_LENGTH = 64;
+/** Most role names `metadata.role` lists; the total is in `metadata.roleCount`. */
+export const AUDIT_ROLES_MAX = 16;
+/** Longest role name `metadata.role` lists. */
+export const AUDIT_ROLE_MAX_LENGTH = 64;
+/** Longest serialized metadata value a row keeps (larger ones become `AUDIT_UNRECORDED`). */
+export const AUDIT_METADATA_VALUE_MAX_LENGTH = 10_000;
+/** Longest serialized metadata object a row keeps (the largest values become `AUDIT_UNRECORDED` until it fits). */
+export const AUDIT_METADATA_MAX_LENGTH = 16_384;
+/** Latest instant a JavaScript `Date` can hold (ms since the epoch); `from`/`to` filters are bounded to `[0, AUDIT_TIME_MAX]`. */
+export const AUDIT_TIME_MAX = 8.64e15;
+/**
+ * What a request-derived value that cannot be recorded as it is (too long,
+ * not a short token) is recorded as. Its parentheses are outside the token
+ * alphabet, so it never equals a recorded identifier.
+ */
+export const AUDIT_UNRECORDED = "(unrecorded)";
 
 const emailSchema = z.email();
 
@@ -47,6 +69,16 @@ export function auditToken(value: unknown): string | null {
   return value.length > 0 && value.length <= AUDIT_TOKEN_MAX_LENGTH && TOKEN.test(value)
     ? value
     : null;
+}
+
+/**
+ * An identifier taken from the request (a provider, member, team,
+ * invitation, key or user id) as recorded: the value when it is a short
+ * token, `null` when the request carried none, else `AUDIT_UNRECORDED`.
+ */
+export function auditId(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  return auditToken(value) ?? AUDIT_UNRECORDED;
 }
 
 /** An error code as recorded: the code when it is a short token, else `"UNRECOGNIZED_ERROR"`. */
@@ -83,4 +115,76 @@ export function auditChangedKeys(paths: readonly string[]): {
   );
   const changed = [...new Set(wellFormed)].sort().slice(0, AUDIT_CHANGED_KEYS_MAX);
   return changed.length === paths.length ? { changed } : { changed, changedCount: paths.length };
+}
+
+const ROLE = /^[A-Za-z0-9_.:-]+$/;
+
+/**
+ * `metadata.role` for a role value from the request — a string (upstream
+ * splits it on `,`) or a list of strings: the first `AUDIT_ROLES_MAX`
+ * distinct well-formed names, joined with `,` the way upstream stores a
+ * member's role; `roleCount` carries how many names the request gave
+ * whenever anything was left out. No value → `{ role: null }`; a value
+ * with no recordable name → `AUDIT_UNRECORDED`.
+ */
+export function auditRoles(value: unknown): { role: string | null; roleCount?: number } {
+  if (value === undefined || value === null) return { role: null };
+  const names: unknown[] =
+    typeof value === "string" ? value.split(",") : Array.isArray(value) ? value : [value];
+  const wellFormed = names
+    .map((name) => (typeof name === "string" ? name.trim() : ""))
+    .filter((name) => name.length > 0 && name.length <= AUDIT_ROLE_MAX_LENGTH && ROLE.test(name));
+  const kept = [...new Set(wellFormed)].slice(0, AUDIT_ROLES_MAX);
+  const complete = kept.length === names.length;
+  if (kept.length === 0) return { role: AUDIT_UNRECORDED, roleCount: names.length };
+  return complete ? { role: kept.join(",") } : { role: kept.join(","), roleCount: names.length };
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function serializedLength(value: unknown): number {
+  try {
+    return (JSON.stringify(value) ?? "").length;
+  } catch {
+    return Number.POSITIVE_INFINITY; // cyclic / unserializable: never stored
+  }
+}
+
+/**
+ * The backstop every plugin-written row goes through (`writeRows`): a
+ * `targetId` that is not a short value becomes `AUDIT_UNRECORDED`; a
+ * metadata value whose JSON exceeds `AUDIT_METADATA_VALUE_MAX_LENGTH`
+ * becomes `AUDIT_UNRECORDED`, and while the whole metadata still exceeds
+ * `AUDIT_METADATA_MAX_LENGTH` the largest remaining value does too. The
+ * per-path bounds above keep every value well inside these limits; this
+ * only decides what happens to a value a path did not bound.
+ */
+export function auditRowBounds<
+  T extends { targetId?: string | null; metadata?: Record<string, unknown> },
+>(row: T): T {
+  const targetId =
+    typeof row.targetId === "string" &&
+    (row.targetId.length > AUDIT_TOKEN_MAX_LENGTH || hasControlCharacter(row.targetId))
+      ? AUDIT_UNRECORDED
+      : row.targetId;
+  const metadata: Record<string, unknown> = {};
+  const sizes = new Map<string, number>();
+  for (const [key, value] of Object.entries(row.metadata ?? {})) {
+    if (value === undefined) continue;
+    const size = serializedLength(value);
+    metadata[key] = size > AUDIT_METADATA_VALUE_MAX_LENGTH ? AUDIT_UNRECORDED : value;
+    sizes.set(key, size > AUDIT_METADATA_VALUE_MAX_LENGTH ? AUDIT_UNRECORDED.length : size);
+  }
+  const bySize = [...sizes.entries()].sort((a, b) => b[1] - a[1]);
+  while (serializedLength(metadata) > AUDIT_METADATA_MAX_LENGTH && bySize.length > 0) {
+    const [key] = bySize.shift()!;
+    metadata[key] = AUDIT_UNRECORDED;
+  }
+  return { ...row, targetId, metadata };
 }

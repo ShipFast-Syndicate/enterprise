@@ -289,6 +289,37 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   `null`). A `customAPIKeyGetter` or another header name is still confined to the allow-list
   and judged by the validator, but forfeits the header-alone layer and the `null` answer.
 
+## SSO providers without an organization
+
+Changing or deleting an SSO provider (`/sso/update-provider`, `/sso/delete-provider`) needs the
+`sso` entitlement of the organization that owns the provider, like registering one (F-17). The
+org is the stored provider's `organizationId` — never one the request names — and the caller
+must be a member of it (upstream then requires owner or admin); anyone else gets
+`403 NOT_ORG_MEMBER`, an unentitled org `403 FEATURE_NOT_ENTITLED`.
+
+A provider without an organization — a "personal" provider that `/sso/register` accepted before
+1.1.0 required `organizationId` (docs/sso.md, "Providers belong to organizations") — has no org
+to be entitled, so it is refused with `403 NOT_ORG_MEMBER`, its creator included. The gate is a
+`hooks.before` handler, so a server-side `auth.api.updateSSOProvider` / `deleteSSOProvider` call
+made with a user's headers is refused the same way. Find such rows with
+`SELECT "providerId", "domain" FROM "ssoProvider" WHERE "organizationId" IS NULL` (column names
+as in your schema); a deployment that never registered a provider without an organization has
+none. An operator manages one in either of two ways:
+
+- **Bind it to the organization it serves**:
+  `UPDATE "ssoProvider" SET "organizationId" = '<org id>' WHERE "providerId" = '<provider id>'`.
+  From then on it is that org's provider — its owners and admins update or delete it through the
+  gated endpoints, under the org's `sso` entitlement, and the domain rules of docs/sso.md apply
+  to it like to any other.
+- **Remove it and register it again under the organization**: delete the legacy row directly —
+  the two deletes upstream's `/sso/delete-provider` performs,
+  `DELETE FROM "account" WHERE "providerId" = '<provider id>'` then
+  `DELETE FROM "ssoProvider" WHERE "providerId" = '<provider id>'` — and register the provider
+  through `/sso/register` with `organizationId`, as an owner or admin of that org.
+
+Either change happens outside the application, so no audit row records it; note it in your own
+change log.
+
 ## Upgrading from 1.0.x
 
 1.0.x let any tenant's domain-verified IdP create and sign in accounts for **any** e-mail
@@ -434,7 +465,7 @@ the export, which records itself).
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `subject`     | every org with a claim on the user the event is about — their memberships **and** every org owning a verified SSO domain for their e-mail (the union policy uses); for a failed sign-in of an unknown address, the domain orgs only |
 | `target-user` | every org of the user an `/admin/*` action targets, resolved before the endpoint runs (removal deletes the memberships)                                                                                                             |
-| `resource`    | the org of the member/invitation/team/organization the endpoint acted on (a join lands in the org joined); else the org the request named **only if** the caller belonged to it before the request                                  |
+| `resource`    | the org of the member/invitation/team/organization the endpoint acted on, read from that resource (a join lands in the org joined); never an org the request names — not the body's, not `?organizationId=`, not the active org     |
 | `provider`    | the org owning the SSO provider (read before the endpoint runs, so a deletion is still attributed); SSO sign-ins go to the provider's org as well as the user's                                                                     |
 | `scim`        | the SCIM bearer's own provisioning org                                                                                                                                                                                              |
 | `request-org` | the org in the request body, written only when the endpoint (owner/admin of exactly that org) succeeded                                                                                                                             |
@@ -490,9 +521,20 @@ recorded — and used to find the organizations a request is about — only when
 e-mail address of at most 254 characters, lower-cased; a request whose address is not one (a
 400 validation failure, an IdP asserting a malformed address) names no subject and writes no
 row. `metadata.changed` lists at most 64 key names, each a short identifier, with the total in
-`metadata.changedCount` whenever anything was left out; error codes and provider ids are
-recorded only as short tokens (`UNRECOGNIZED_ERROR` otherwise); the user agent is cut at 512
-characters.
+`metadata.changedCount` whenever anything was left out; `metadata.role`
+(`/organization/update-member-role`, `/admin/set-role`) holds at most 16 distinct role names of
+at most 64 characters, comma-joined as upstream stores a role, with the number of names the
+request gave in `metadata.roleCount` whenever anything was left out; error codes are recorded
+only as short tokens (`UNRECOGNIZED_ERROR` otherwise); every id taken from the request — provider
+ids (`target_id` of the `sso.*` rows), member, team, invitation, key, passkey and user ids,
+SCIM route parameters — is recorded only as a token of at most 128 characters, else as the
+marker `(unrecorded)`; the user agent is cut at 512 characters. As a backstop, every row the
+plugin writes has a `target_id` of at most 128 characters and metadata values of at most
+10,000 characters each and 16 KiB in total (a larger value is stored as `(unrecorded)`), and
+`test/security/audit-cluster-request-values.test.ts` sends oversized strings and lists to every
+audited route and checks every stored row. The log's own read endpoints bound their filters the
+same way: `from`/`to` on `/enterprise/audit/list` and `/enterprise/audit/export` must be whole
+milliseconds in `[0, 8.64e15]` (the range a `Date` holds), else `400` before any query runs.
 
 **Which rows can hold up a response, and which can fail it.** Rows about an address the caller
 chose — failed, refused and 2FA-pending sign-ins, `/sign-in/magic-link`,
@@ -531,6 +573,15 @@ calls the product's own code makes — audit those where they are made). A socia
 completes at `/callback/:id` without a session being minted and is recorded at
 `/link-social` only.
 
+**Refused requests leave no row, except refused sign-ins.** Event rows record changes that
+happened (success only). A request refused by authorization changes nothing and writes nothing:
+a `403` on a privileged endpoint (a plain member's `/organization/remove-member`, a non-staff
+`/admin/*` call, an unentitled `/sso/update-provider`, a stranger's `/enterprise/policy/set`),
+and a request carrying an API key refused with `403 API_KEY_NOT_ALLOWED_HERE`. The one kind of
+refusal that is recorded is a sign-in refused by policy (`auth.sign_in_refused`,
+`auth.session_refused`). If you need a trace of refused attempts, keep it in your HTTP access
+logs.
+
 ## Audit chain limits
 
 - **Unkeyed by default, which proves consistency, not authenticity.** Without
@@ -543,7 +594,9 @@ completes at `/callback/:id` without a session being minted and is recorded at
   package uses it (the plugin, refusal rows, SCIM, API-key revocation, the portal wrappers;
   they read it off the running instance, so none can forget it), and `/enterprise/audit/verify`
   and `ab-enterprise audit-verify` (key from `AB_AUDIT_CHAIN_KEY`, never argv) verify under
-  it; and **head export** — `GET /enterprise/audit/head?orgId=` (owner/admin, `audit_log`)
+  it (`/enterprise/audit/verify` answers `{ ok: true, keyed }`, where `keyed` says whether the
+  newest row is an HMAC link — the same flag `/enterprise/audit/head` reports; an `ok` with
+  `keyed: false` proves consistency only); and **head export** — `GET /enterprise/audit/head?orgId=` (owner/admin, `audit_log`)
   returns the newest row's `seq`/`hash` and, with a key, a signature over them — which you store
   off-box on a schedule and later check with `ab-enterprise audit-verify --org <id>
 --expect-head '<the JSON>'` (or `<seq>:<hash>`): a truncated or rewritten chain no longer holds

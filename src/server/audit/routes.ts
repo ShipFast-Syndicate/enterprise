@@ -35,10 +35,12 @@
  *   A caller-supplied `?orgId` is never consulted.
  * - `target-user` — every org of the user an `/admin/*` action targets,
  *   resolved *before* the endpoint runs (removal deletes the memberships).
- * - `resource` — the org of the resource the endpoint acted on: the
- *   organization id on the returned member/invitation/team/organization,
- *   else the org the request named (body, else the session's active org)
- *   **only if** the caller was a member of it before the request.
+ * - `resource` — the org of the resource the endpoint acted on, read from
+ *   that resource: the team / invitation row the request names (read
+ *   before the endpoint runs), or the organization id on the member,
+ *   invitation, team or organization it returned (`RESOURCE_ORG_SOURCES`
+ *   in `./plugin.ts`). Never an org id the caller named — not the body's,
+ *   not a `?organizationId=`, not the session's active org.
  * - `provider` — the org owning the SSO provider named by the request
  *   (`ssoProvider.organizationId`, read before the endpoint runs, so a
  *   deletion is still attributed).

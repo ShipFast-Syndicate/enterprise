@@ -194,7 +194,7 @@ describe("a retention anchor written under impersonation names the staff member"
     const verify = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, {
       cookie: owner.cookie,
     });
-    expect(await verify.json()).toEqual({ ok: true });
+    expect(await verify.json()).toEqual({ ok: true, keyed: false });
   });
 
   it("the compaction GET /enterprise/audit/list triggers: same attribution", async () => {

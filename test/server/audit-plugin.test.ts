@@ -365,7 +365,7 @@ describe("GET /enterprise/audit/verify", () => {
 
     const ok = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, { cookie });
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ ok: true });
+    expect(await ok.json()).toEqual({ ok: true, keyed: false });
 
     // Tamper with the metadata of the first row directly on the underlying
     // DB, bypassing the plugin entirely — this is what makes the chain a
@@ -441,7 +441,7 @@ describe("GET /enterprise/audit/verify", () => {
 
       const ok = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, { cookie });
       expect(ok.status).toBe(200);
-      expect(await ok.json()).toEqual({ ok: true });
+      expect(await ok.json()).toEqual({ ok: true, keyed: false });
 
       // The first row of the second page — the boundary the paging has to
       // carry `prevHash` across.

@@ -23,6 +23,13 @@ export const GATED_PATHS: Record<string, Feature> = {
   "/sso/register": "sso",
   "/sso/request-domain-verification": "sso",
   "/sso/verify-domain": "sso",
+  // F-17: changing or deleting a provider needs the `sso` entitlement of the
+  // org that owns it, like registering one. An org-less (legacy, personal)
+  // provider has no org to be entitled, so it is refused here — operators
+  // manage one server-side (docs/security.md, "SSO providers without an
+  // organization").
+  "/sso/update-provider": "sso",
+  "/sso/delete-provider": "sso",
   "/organization/create-team": "teams",
   "/api-key/create": "api_keys",
   "/enterprise/audit/list": "audit_log",
@@ -58,8 +65,15 @@ export const GATED_PATHS: Record<string, Feature> = {
 };
 
 // These upstream endpoints accept only a providerId. Their organization must
-// come from the stored provider, independent of the caller's active organization.
-const PROVIDER_DOMAIN_PATHS = new Set(["/sso/request-domain-verification", "/sso/verify-domain"]);
+// come from the stored provider, independent of the caller's active
+// organization or any org id in the request: a provider without an org
+// (legacy, personal) is refused with `NOT_ORG_MEMBER` — fail closed.
+const PROVIDER_ORG_PATHS = new Set([
+  "/sso/request-domain-verification",
+  "/sso/verify-domain",
+  "/sso/update-provider",
+  "/sso/delete-provider",
+]);
 
 // Credential management is tenant-authorized; only owners may mint, rotate or
 // revoke. Revoke joined the set for F-07: since 1.7 it is a *decommission*
@@ -79,7 +93,7 @@ const OWNER_ONLY_PATHS = new Set([
 // entitlement resolved from their *active* org by the fallback chain below —
 // registered a "personal" (`organizationId: null`, `userId`-bound) provider
 // claiming any domain. Such a row can never be domain-verified through this
-// gate (`PROVIDER_DOMAIN_PATHS` answers `NOT_ORG_MEMBER` for it), but it
+// gate (`PROVIDER_ORG_PATHS` answers `NOT_ORG_MEMBER` for it), but it
 // still poisoned upstream's e-mail `/sign-in/sso` lookup (F-30) and was
 // invisible to every org-scoped read. `400 ORG_REQUIRED` before the
 // fallback chain closes it.
@@ -191,7 +205,7 @@ export function enterpriseGate(opts: EnterpriseOptions) {
               body?.orgId ??
               query?.orgId ??
               (session.session as { activeOrganizationId?: string }).activeOrganizationId;
-            if (PROVIDER_DOMAIN_PATHS.has(ctx.path)) {
+            if (PROVIDER_ORG_PATHS.has(ctx.path)) {
               const provider =
                 typeof body?.providerId === "string"
                   ? await ctx.context.adapter.findOne<{ organizationId?: string | null }>({

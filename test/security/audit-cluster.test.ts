@@ -927,7 +927,7 @@ describe("chain key — every writer keys its rows, and the log verifies under t
     const verify = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, {
       cookie: owner.cookie,
     });
-    expect(await verify.json()).toEqual({ ok: true });
+    expect(await verify.json()).toEqual({ ok: true, keyed: true });
   });
 });
 
@@ -1031,6 +1031,6 @@ describe("integrators — the product-shaped Drizzle schema (hand-maintained ses
     const verify = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, {
       cookie: owner.cookie,
     });
-    expect(await verify.json()).toEqual({ ok: true });
+    expect(await verify.json()).toEqual({ ok: true, keyed: false });
   });
 });
