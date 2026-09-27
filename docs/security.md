@@ -233,14 +233,17 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   (`TWO_FACTOR_ENROLLMENT_REQUIRED`, `TWO_FACTOR_REQUIRED`); an unknown key stays upstream's
   `INVALID_API_KEY`. New keys expire after
   `apiKeys.defaultExpiresInS` (90 days; `null` = never unless the caller asks) and may never be
-  created for longer than `apiKeys.maxExpiresInDays` (365). Every deprovisioning path revokes the
-  user's keys and audits `api_key.revoked` (one row per key) into every organization the user
-  belonged to — captured before the rows go: `/admin/ban-user` and `/admin/remove-user` (actor =
-  the admin, reason `admin.ban` / `admin.remove`) and a SCIM deactivation, IdP delete or
+  created for longer than `apiKeys.maxExpiresInDays` (365). The following deprovisioning paths
+  revoke the user's keys and audit `api_key.revoked` (one row per key) into every organization
+  the user belonged to — captured before the rows go: `/admin/ban-user` and `/admin/remove-user`
+  (actor = the admin, reason `admin.ban` / `admin.remove`) and a SCIM deactivation, IdP delete or
   connection decommission (actor `scim`, reason `scim.deactivate`; the provisioning organization
   is handed over by the SCIM projector in-transaction, since its membership row is already gone).
-  Revoking sessions alone (`/admin/revoke-user-sessions`, `/revoke-sessions`) is deliberately not
-  a key revocation: the identity is unchanged. The expiry bound also holds on update:
+  Revoking sessions alone (`/admin/revoke-user-sessions`, `/revoke-sessions`) or removing an
+  organization membership is deliberately not a key revocation: the identity is unchanged.
+  Removing a user at the identity provider without SCIM does not revoke keys either: the
+  application receives no signal. Ban the user or delete their keys. The expiry bound also holds
+  on update:
   `/api-key/update { expiresIn: null }` (which upstream accepts and writes as "never") is refused
   with `400 API_KEY_EXPIRY_REQUIRED` unless the operator chose `apiKeys.defaultExpiresInS: null`;
   a finite lifetime still goes through upstream's ceiling check. Finally, a request that carries
@@ -849,7 +852,7 @@ fail on 1.0.1 and pass on 1.1.0; what an integrator sees is in
 | F-12             | Actions under impersonation recorded as `actorType: "impersonated"` with `metadata.impersonatedBy`; impersonation start/stop audited                                                                                                                              | `test/security/audit-cluster.test.ts`                                                                                                                                                       |
 | F-13             | Every mounted endpoint is audited, self-audited or listed as unaudited with a reason; IdP, `/admin/*`, organization, credential, session, API-key, export and compaction changes audited                                                                          | `test/security/audit-cluster-routes.test.ts`, `test/security/audit-cluster.test.ts`, `test/security/audit-cluster-request-values.test.ts`                                                   |
 | F-17             | `/sso/update-provider`, `/sso/delete-provider` gated on the stored provider's organization and its `sso` entitlement                                                                                                                                              | `test/security/f17-provider-mutation-gate.test.ts`, `test/security/gate-org-source.test.ts`                                                                                                 |
-| F-21 (inverse)   | Every deprovisioning path (`/admin/ban-user`, `/admin/remove-user`, SCIM) revokes the user's API keys, audited per organization                                                                                                                                   | `test/security/gap1-api-keys.test.ts`, `test/server/deprovision.test.ts`                                                                                                                    |
+| F-21 (inverse)   | `/admin/ban-user`, `/admin/remove-user` and SCIM deprovisioning revoke the user's API keys, audited per organization                                                                                                                                              | `test/security/gap1-api-keys.test.ts`, `test/server/deprovision.test.ts`                                                                                                                    |
 | F-23 (part)      | A SCIM ban skipped for an owner is audited (`scim.user_deactivation_skipped`)                                                                                                                                                                                     | `test/security/f07-scim-revoke-owner-only.test.ts`                                                                                                                                          |
 | F-27 (part)      | Organization deletion is audited (`org.deleted` ends the chain); the rows are kept (see "Retention and GDPR")                                                                                                                                                     | `test/security/audit-cluster-resource-org.test.ts`                                                                                                                                          |
 | F-28             | `sso.allowedIssuers` applies to the issuer, every OIDC endpoint and the SAML signing certificates (`sso.samlCertificateFingerprints`), on write and at sign-in; `trustedOrigins` documented as an SSRF/redirect boundary                                          | `test/security/f28-issuer-allowlist.test.ts`, `test/security/f28-saml-trust-root.test.ts`, `test/security/f28-samlify-signing-set.test.ts`                                                  |
