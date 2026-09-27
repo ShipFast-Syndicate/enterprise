@@ -324,7 +324,7 @@ describe("every gated path has a declared org source, read off the handler", () 
     GATED_PATHS[path] = "teams";
     try {
       const before = await snapshot(w.t);
-      for (const headers of [{ cookie: w.cookie }, {}]) {
+      for (const headers of [{ cookie: w.cookie }, {}] as Array<Record<string, string>>) {
         const res = await w.t.api.post(
           path,
           { organizationId: w.E, data: { name: "renamed" } },
