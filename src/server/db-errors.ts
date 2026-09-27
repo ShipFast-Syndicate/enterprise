@@ -16,8 +16,11 @@
 // `./audit/chain.ts` and upstream's), and a missing table/column hint, which
 // names only identifiers.
 //
-// Errors that carry no query — `APIError`s, the secrets wrapper's own errors,
-// better-auth's schema-mismatch error — pass through unchanged.
+// An error carries a query when it (or its `cause` chain) has a `query`,
+// `sql` or `params` property, or a "Failed query" message. Every other error —
+// `APIError`s, the secrets wrapper's own errors, better-auth's own adapter
+// errors (schema mismatch, an empty `incrementOne`) — passes through
+// unchanged, message included.
 
 import { isAPIError } from "better-auth/api";
 import type { AuthContext } from "better-auth";
@@ -45,8 +48,12 @@ export class DatabaseQueryError extends Error {
   }
 }
 
-const SQL_TEXT =
-  /failed query|\b(select|insert\s+into|update|delete\s+from)\b[\s\S]*\b(from|values|set|where|returning)\b/i;
+// Drizzle's wording for a failed statement (`DrizzleQueryError`: "Failed
+// query: <sql> params: <values>"). Only this message is matched: a general
+// SQL-keyword pattern also matched adapter errors that carry no statement at
+// all (better-auth's "incrementOne resolved to an empty update: every
+// increment/set field …") and replaced their diagnostic with a generic one.
+const FAILED_QUERY_TEXT = /\bfailed query\b/i;
 
 function chainOf(error: unknown): Record<string, unknown>[] {
   const chain: Record<string, unknown>[] = [];
@@ -67,7 +74,7 @@ export function carriesQuery(error: unknown): boolean {
       typeof link.query === "string" ||
       typeof link.sql === "string" ||
       Array.isArray(link.params) ||
-      (typeof link.message === "string" && SQL_TEXT.test(link.message)),
+      (typeof link.message === "string" && FAILED_QUERY_TEXT.test(link.message)),
   );
 }
 

@@ -7,7 +7,13 @@
 //   `(unrecorded)` (`/sso/register`).
 // - A walk over every audited route, each with oversized strings and lists
 //   in every field the audit layer reads and in the route parameters, finds
-//   no stored row with an oversized target id or metadata.
+//   no stored row with an oversized target id or metadata. Each path whose
+//   base request succeeds must have written rows: on gated paths the
+//   oversized `?organizationId` is a request of its own, because the gate
+//   refuses it before the endpoint runs (round 5).
+// - With every audit insert failing, no audited change on a path whose
+//   write failure is not soft answers success: SCIM `POST /scim/v2/Users`
+//   answered 201 with `{"code":"AUDIT_WRITE_FAILED"}` (round 5).
 // - `/enterprise/audit/list` and `/enterprise/audit/export` answer 400 for a
 //   `from`/`to` that is not a whole number of milliseconds in the range a
 //   `Date` can hold, and no query (or its SQL) reaches the error log.
@@ -20,6 +26,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createOrg, makeAuth, signUpOwner, type TestAuth } from "../helpers/auth";
 import { insertMemberRow, mintScimToken, createScimUser } from "./helpers";
 import { AUDITED_PATHS, METHOD_ACTION_OVERRIDES } from "../../src/server/audit/routes";
+import { GATED_PATHS } from "../../src/server/gate";
+import * as auditPlugin from "../../src/server/audit/plugin";
 import {
   AUDIT_METADATA_MAX_LENGTH,
   AUDIT_ROLES_MAX,
@@ -374,8 +382,36 @@ function methodsOf(path: string): string[] {
  */
 const WALK_TIMEOUT_MS = 120_000;
 
+/**
+ * Gated paths whose base request the walk must see succeed and write a row.
+ * Round 4 made the gate refuse an oversized org id in any field
+ * (`400 ORG_ID_INVALID`, before the endpoint runs); the walk sent
+ * `?organizationId=<100,000 characters>` with every request, so on these
+ * paths every request was refused and the cases passed without reaching the
+ * audit layer. The oversized query is now its own request on gated paths,
+ * and the walk asserts per path that a successful base request wrote rows.
+ */
+const GATED_WALK_PATHS = [
+  "/api-key/create",
+  "/enterprise/policy/set",
+  "/organization/create-team",
+  "/sso/register",
+  "/sso/request-domain-verification",
+  "/sso/update-provider",
+];
+
+/**
+ * Audited paths whose successful base request has no chain to write to in
+ * the walk's world. `target-user` rows go to the target user's orgs, and the
+ * user `/admin/create-user` creates belongs to none yet — the row is skipped
+ * and logged at debug (`writeRows`, `expectOrg: false`).
+ */
+const NO_ORG_ON_SUCCESS = new Set(["/admin/create-user"]);
+
 describe("every audited route, with oversized request values, stores only bounded rows", () => {
   const written = { rows: 0 };
+  const rowsByPath = new Map<string, number>();
+  const baseStatusByPath = new Map<string, number>();
 
   for (const path of Object.keys(AUDITED_PATHS).sort()) {
     it(
@@ -396,16 +432,39 @@ describe("every audited route, with oversized request values, stores only bounde
         const params = path.includes(":")
           ? [path.includes(":userId") && w.scim ? w.scim.userId : "p1", BIG]
           : [""];
+        const oversizedOrgQuery = `?organizationId=${encodeURIComponent(BIG)}`;
+        const gated = path in GATED_PATHS;
+        let baseStatus: number | undefined;
         for (const method of methodsOf(path)) {
           for (const param of params) {
-            const url = `${concrete(path, param)}?organizationId=${encodeURIComponent(BIG)}`;
-            for (const body of method === "DELETE" ? [undefined] : variants) {
-              await w.t.api.request(method, url, body, headers);
+            const plain = concrete(path, param);
+            const bodies = method === "DELETE" ? [undefined] : variants;
+            // A gated path refuses an oversized org id before the endpoint
+            // runs, so there the oversized query goes on a request of its own
+            // and every body variant is sent without it.
+            const requests: Array<[string, Array<Record<string, unknown> | undefined>]> = gated
+              ? [
+                  [plain, bodies],
+                  [`${plain}${oversizedOrgQuery}`, [bodies[0]]],
+                ]
+              : [[`${plain}${oversizedOrgQuery}`, bodies]];
+            for (const [url, sent] of requests) {
+              for (const body of sent) {
+                const res = await w.t.api.request(method, url, body, headers);
+                baseStatus ??= res.status;
+              }
             }
           }
         }
         const max = await largest(w.t);
         written.rows += max.rows - before;
+        rowsByPath.set(path, max.rows - before);
+        baseStatusByPath.set(path, baseStatus!);
+        // A base request the endpoint accepted is an audited change: the
+        // walk reached the audit layer on this path, not only its refusals.
+        if (baseStatus! >= 200 && baseStatus! < 300 && !NO_ORG_ON_SUCCESS.has(path)) {
+          expect(max.rows - before, `${path}: rows written`).toBeGreaterThanOrEqual(1);
+        }
         expect(max.metadata).toBeLessThanOrEqual(AUDIT_METADATA_MAX_LENGTH);
         expect(max.target).toBeLessThanOrEqual(AUDIT_TOKEN_MAX_LENGTH);
         expect(max.actor).toBeLessThanOrEqual(AUDIT_TOKEN_MAX_LENGTH);
@@ -418,6 +477,94 @@ describe("every audited route, with oversized request values, stores only bounde
 
   it("the walk reached the audit layer (rows were written, not only refused)", () => {
     expect(written.rows).toBeGreaterThan(40);
+  });
+
+  it("the gated paths are walked through the endpoint: each base request succeeds and writes rows", () => {
+    for (const path of GATED_WALK_PATHS) {
+      expect(path in GATED_PATHS, path).toBe(true);
+      const status = baseStatusByPath.get(path);
+      expect(status! >= 200 && status! < 300, `${path}: base request status ${status}`).toBe(true);
+      expect(rowsByPath.get(path), `${path}: rows written`).toBeGreaterThanOrEqual(1);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Paths where a failed audit write is logged and the request still succeeds
+ * (docs/security.md, "Audit log coverage"): the sign-in family (every
+ * `session` entry) and these unauthenticated account flows.
+ */
+const SOFT_WRITE_PATHS = new Set([
+  "/sign-out",
+  "/sign-in/magic-link",
+  "/request-password-reset",
+  "/reset-password",
+  "/sso/saml2/logout/:providerId",
+  "/sso/saml2/sp/slo/:providerId",
+]);
+
+function softWrite(path: string): boolean {
+  return AUDITED_PATHS[path]!.kind === "session" || SOFT_WRITE_PATHS.has(path);
+}
+
+describe("an audited change whose row cannot be written never answers success", () => {
+  it("the soft-path list above is the plugin's own", () => {
+    const isSoft = (
+      auditPlugin as {
+        writeFailureIsSoft?: (path: string, entry: (typeof AUDITED_PATHS)[string]) => boolean;
+      }
+    ).writeFailureIsSoft;
+    expect(typeof isSoft).toBe("function");
+    for (const [path, entry] of Object.entries(AUDITED_PATHS)) {
+      expect(isSoft!(path, entry), path).toBe(softWrite(path));
+    }
+  });
+
+  // Every audit_event insert fails (a trigger, after the world is built).
+  // The change itself is already committed when the after-hook runs, so
+  // the answer must say the row is missing: never a 2xx or 3xx, whatever
+  // status the endpoint set (SCIM `POST /scim/v2/Users` sets 201).
+  const answers = new Map<string, number>();
+  const failedWrites = new Set<string>();
+
+  for (const path of Object.keys(AUDITED_PATHS).sort()) {
+    if (softWrite(path) || NO_ORG_ON_SUCCESS.has(path)) continue;
+    it(
+      path,
+      async () => {
+        const w = await walkWorld(path);
+        await w.t.client.execute(
+          `CREATE TRIGGER audit_insert_fails BEFORE INSERT ON audit_event BEGIN SELECT RAISE(ABORT, 'audit insert refused'); END`,
+        );
+        const param = path.includes(":userId") && w.scim ? w.scim.userId : "p1";
+        for (const method of methodsOf(path)) {
+          const res = await w.t.api.request(
+            method,
+            concrete(path, param),
+            method === "DELETE" ? undefined : baseBody(path, w),
+            callerOf(path, w),
+          );
+          const text = await res.text();
+          expect(
+            res.status < 200 || res.status >= 400,
+            `${method} ${path}: ${res.status} ${text}`,
+          ).toBe(true);
+          answers.set(`${method} ${path}`, res.status);
+          if (text.includes("AUDIT_WRITE_FAILED")) failedWrites.add(`${method} ${path}`);
+        }
+      },
+      WALK_TIMEOUT_MS,
+    );
+  }
+
+  it("SCIM user create answers 500 AUDIT_WRITE_FAILED (was 201), and so do most audited changes", () => {
+    expect(answers.get("POST /scim/v2/Users")).toBe(500);
+    expect(failedWrites.has("POST /scim/v2/Users")).toBe(true);
+    // SCIM delete writes its rows inside the endpoint and fails there.
+    expect(answers.get("DELETE /scim/v2/Users/:userId")).toBeGreaterThanOrEqual(500);
+    expect(failedWrites.size).toBeGreaterThan(20);
   });
 });
 

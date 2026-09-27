@@ -461,14 +461,14 @@ sign-in plugin (email OTP, generic OAuth, …) is never a silent way in.
 require the caller to be an owner or admin of exactly that org (`/enterprise/policy/set`, and
 the export, which records itself).
 
-| Scope         | Organizations written to                                                                                                                                                                                                            |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subject`     | every org with a claim on the user the event is about — their memberships **and** every org owning a verified SSO domain for their e-mail (the union policy uses); for a failed sign-in of an unknown address, the domain orgs only |
-| `target-user` | every org of the user an `/admin/*` action targets, resolved before the endpoint runs (removal deletes the memberships)                                                                                                             |
-| `resource`    | the org of the member/invitation/team/organization the endpoint acted on, read from that resource (a join lands in the org joined); never an org the request names — not the body's, not `?organizationId=`, not the active org     |
-| `provider`    | the org owning the SSO provider (read before the endpoint runs, so a deletion is still attributed); SSO sign-ins go to the provider's org as well as the user's                                                                     |
-| `scim`        | the SCIM bearer's own provisioning org                                                                                                                                                                                              |
-| `request-org` | the org in the request body, written only when the endpoint (owner/admin of exactly that org) succeeded                                                                                                                             |
+| Scope         | Organizations written to                                                                                                                                                                                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `subject`     | every org with a claim on the user the event is about — their memberships **and** every org owning a verified SSO domain for their e-mail (the union policy uses); for a failed sign-in of an unknown address, the domain orgs only                                      |
+| `target-user` | every org of the user an `/admin/*` action targets, resolved before the endpoint runs (removal deletes the memberships)                                                                                                                                                  |
+| `resource`    | the org of the member/invitation/team/organization the endpoint acted on, read from that resource (a join lands in the org joined); never an org the request names — not the body's, not `?organizationId=`, not the active org                                          |
+| `provider`    | the org owning the SSO provider the endpoint acts on — the `:providerId` route parameter where the route has one, else `body.providerId` (read before the endpoint runs, so a deletion is still attributed); SSO sign-ins go to the provider's org as well as the user's |
+| `scim`        | the SCIM bearer's own provisioning org                                                                                                                                                                                                                                   |
+| `request-org` | the org in the body field the endpoint reads (`orgId` on `/enterprise/policy/set`), written only when the endpoint (owner/admin of exactly that org) succeeded                                                                                                           |
 
 **Actions.** Sign-in steps (`*`): success = a session was minted (a refreshed or re-issued
 session is not); a 2FA challenge instead of a session is `auth.sign_in_2fa_pending`; an error is
@@ -552,6 +552,23 @@ refused the same way. `test/security/audit-cluster-org-id-types.test.ts` walks e
 and every `/enterprise/*` endpoint with lists, objects, numbers, booleans, `null` and oversized
 strings in every org-id field.
 
+**The organization the gate checks is the one the endpoint acts on.** Each gated path declares
+where its endpoint takes its organization (`GATE_ORG_SOURCES` in `src/server/gate.ts`, each entry
+citing the handler line that reads it), and the gate checks membership and the entitlement for
+that organization only; every other org-id field of the request is ignored, as the endpoint
+ignores it. `/organization/create-team` and `/api-key/create` read `body.organizationId`, else
+the session's active organization; `/sso/register` reads `body.organizationId` (required);
+`/sso/update-provider`, `/sso/delete-provider`, `/sso/request-domain-verification` and
+`/sso/verify-domain` read the stored provider that `body.providerId` names; each `/enterprise/*`
+endpoint reads the one field its schema declares (`?orgId`, body `orgId`, or body
+`organizationId` on `/enterprise/sso/register`). A gated path without a declared source is
+refused with `403 GATE_ORG_SOURCE_UNDECLARED`. The gate used to take the first of
+`body.organizationId`, `body.orgId`, `?orgId` and the active organization on every path, so
+`/organization/create-team?orgId=<an entitled org>` created a team in an unentitled active org.
+`test/security/gate-org-source.test.ts` sends, for every gated path, a request that acts on an
+unentitled org and names an entitled one in every other carrier, and checks for `403` and an
+unchanged database.
+
 **Failed queries are logged without their SQL.** better-auth logs whatever error a request
 throws, through the auth logger and again through `console.error`; an error from a SQL adapter
 (drizzle's `DrizzleQueryError`) carries the statement and every value bound to it. `enterpriseGate`
@@ -559,8 +576,13 @@ wraps the auth adapter so that an error carrying a query leaves it as a `Databas
 naming only the model, the adapter method, the driver's error code (`code`, `errno`, `errcode`
 and `number` are kept, so unique-violation checks still work) and, for a missing table or
 column, the driver's own hint (`no such table: member`). The statement, its parameters and the
-driver error it wrapped are not kept. Errors that carry no query — `APIError`s, the secrets
-wrapper's own errors, better-auth's schema-mismatch error — pass through unchanged.
+driver error it wrapped are not kept. An error carries a query when it, or an error in its
+`cause` chain, has a `query`, `sql` or `params` property or drizzle's "Failed query" message.
+Every other error — `APIError`s, the secrets wrapper's own errors, better-auth's own adapter
+errors such as the schema mismatch or an empty `incrementOne` update — passes through unchanged,
+message included. A driver error raised without any of these (for example a Postgres error
+surfaced by an adapter that does not attach the statement) is not rewritten; its `detail` can
+carry a value.
 
 **Which rows can hold up a response, and which can fail it.** Rows about an address the caller
 chose — failed, refused and 2FA-pending sign-ins, `/sign-in/magic-link`,
@@ -588,7 +610,11 @@ response:
   every `/organization/*` entry, `/scim/v2/*` and `/enterprise/policy/set`. The after-hook runs
   once the endpoint has returned, so the change **is already committed** when this 500 is
   answered: it reports a change the log does not hold, it does not undo it. A client that sees
-  it should re-read the state rather than retry blindly. `/enterprise/audit/export` answers the
+  it should re-read the state rather than retry blindly. The 500 holds whatever status the
+  endpoint set: SCIM `POST /scim/v2/Users` (201) and `/sso/request-domain-verification` (201)
+  used to answer their success status with `{"code":"AUDIT_WRITE_FAILED"}` as the body. A
+  server-side `auth.api.*` call without a `Request` gets the error thrown. The failure is also
+  logged (without SQL). `/enterprise/audit/export` answers the
   same 500 instead of the CSV when its `audit.exported` row cannot be written.
 
 **Not audited, by decision** (reasons in `UNAUDITED_PATHS`): reads, flow starts

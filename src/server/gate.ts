@@ -18,7 +18,7 @@ import { withSecretEncryption } from "./secrets";
 import { buildSsoDomainGuardHook } from "./sso-domain";
 import { assertEnterpriseOptions, takeDomainBindingOffUnlistedWarning } from "./options";
 import { assertNotApiKeyRequest, isApiKeyRefusedPath, isServerOnlyCall } from "./api-keys";
-import { isOrgId, requestOrgIds } from "./org-id";
+import { isOrgId, ORG_ID_FIELDS, requestOrgIds } from "./org-id";
 import { withDatabaseErrorRedaction } from "./db-errors";
 
 export const GATED_PATHS: Record<string, Feature> = {
@@ -66,16 +66,151 @@ export const GATED_PATHS: Record<string, Feature> = {
   "/enterprise/scim/tokens/revoke": "scim",
 };
 
-// These upstream endpoints accept only a providerId. Their organization must
-// come from the stored provider, independent of the caller's active
-// organization or any org id in the request: a provider without an org
-// (legacy, personal) is refused with `NOT_ORG_MEMBER` — fail closed.
-const PROVIDER_ORG_PATHS = new Set([
-  "/sso/request-domain-verification",
-  "/sso/verify-domain",
-  "/sso/update-provider",
-  "/sso/delete-provider",
-]);
+/** A request field that can name the organization an endpoint acts on. */
+export interface GateOrgField {
+  from: "body" | "query";
+  field: (typeof ORG_ID_FIELDS)[number];
+}
+
+/**
+ * Where a gated endpoint takes the organization it acts on — the one org
+ * the gate checks membership and entitlement for.
+ *
+ * - `request`: the first of `fields` that holds an id (an empty string counts
+ *   as absent, as upstream's `||` does), else — only when `activeOrganization`
+ *   is set — the session's active organization, a stored value. Every other
+ *   org-id carrier of the request is ignored, because the endpoint ignores it.
+ * - `provider`: the organization of the stored SSO provider that
+ *   `body.providerId` names — never the session's or the request's org. A
+ *   provider without an org (legacy, personal) is refused.
+ *
+ * `refs` are the `file:line`s where the endpoint reads that source;
+ * `test/security/gate-org-source.test.ts` checks that each line still names
+ * every declared field.
+ */
+export type GateOrgSource =
+  | {
+      kind: "request";
+      fields: readonly GateOrgField[];
+      activeOrganization: boolean;
+      refs: readonly string[];
+    }
+  | { kind: "provider"; refs: readonly string[] };
+
+const body = (field: GateOrgField["field"]): GateOrgField => ({ from: "body", field });
+const query = (field: GateOrgField["field"]): GateOrgField => ({ from: "query", field });
+const SSO = "node_modules/@better-auth/sso/dist/index.mjs";
+
+/**
+ * The org source of every `GATED_PATHS` entry, read off the handler that
+ * serves it. The gate used to check the first org id the request carried in
+ * any field (`body.organizationId`, `body.orgId`, `?orgId`, then the active
+ * org), whatever the endpoint itself read: `/organization/create-team` acts
+ * on `body.organizationId || activeOrganizationId` only, so a caller who
+ * named an entitled org in `?orgId` or `body.orgId` created teams in their
+ * unentitled active org. A gated path without an entry here is refused
+ * (`GATE_ORG_SOURCE_UNDECLARED`) — fail closed.
+ */
+export const GATE_ORG_SOURCES: Record<string, GateOrgSource> = {
+  // `if (ctx.body.organizationId)` … `organizationId: body.organizationId`;
+  // required here (`BODY_ORG_REQUIRED_PATHS`), no active-org fallback.
+  "/sso/register": {
+    kind: "request",
+    fields: [body("organizationId")],
+    activeOrganization: false,
+    refs: [`${SSO}:3357`, `${SSO}:3506`],
+  },
+  // `checkProviderAccess(ctx, body.providerId)` / `ctx.body.providerId`.
+  "/sso/request-domain-verification": { kind: "provider", refs: [`${SSO}:2540`] },
+  "/sso/verify-domain": { kind: "provider", refs: [`${SSO}:2578`] },
+  "/sso/update-provider": { kind: "provider", refs: [`${SSO}:2367`] },
+  "/sso/delete-provider": { kind: "provider", refs: [`${SSO}:2467`] },
+  // `ctx.body.organizationId || session?.session.activeOrganizationId`.
+  "/organization/create-team": {
+    kind: "request",
+    fields: [body("organizationId")],
+    activeOrganization: true,
+    refs: ["node_modules/better-auth/dist/plugins/organization/routes/crud-team.mjs:75"],
+  },
+  // Upstream reads `ctx.body.organizationId` (an organization-owned key,
+  // `references: "organization"`). A user-owned key — the preset's default —
+  // belongs to no org, and upstream reads none: the entitlement is then the
+  // session's active organization's, a stored value (`/organization/set-active`
+  // checks membership), never a caller-named one.
+  "/api-key/create": {
+    kind: "request",
+    fields: [body("organizationId")],
+    activeOrganization: true,
+    refs: ["node_modules/@better-auth/api-key/dist/index.mjs:739"],
+  },
+  // This package's own endpoints: exactly the field each handler reads.
+  "/enterprise/audit/list": {
+    kind: "request",
+    fields: [query("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/audit/plugin.ts:1303"],
+  },
+  "/enterprise/audit/export": {
+    kind: "request",
+    fields: [query("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/audit/plugin.ts:1333"],
+  },
+  "/enterprise/audit/compact": {
+    kind: "request",
+    fields: [body("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/audit/plugin.ts:1478"],
+  },
+  "/enterprise/policy/set": {
+    kind: "request",
+    fields: [body("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/policy/plugin.ts:166"],
+  },
+  "/enterprise/sso/providers": {
+    kind: "request",
+    fields: [query("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/enterprise-api/sso.ts:140"],
+  },
+  "/enterprise/sso/register": {
+    kind: "request",
+    fields: [body("organizationId")],
+    activeOrganization: false,
+    refs: ["src/server/enterprise-api/sso.ts:231"],
+  },
+  "/enterprise/sso/test-login/start": {
+    kind: "request",
+    fields: [body("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/enterprise-api/sso.ts:274"],
+  },
+  "/enterprise/scim/tokens": {
+    kind: "request",
+    fields: [query("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/enterprise-api/scim.ts:135"],
+  },
+  "/enterprise/scim/tokens/create": {
+    kind: "request",
+    fields: [body("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/enterprise-api/scim.ts:50"],
+  },
+  "/enterprise/scim/tokens/rotate": {
+    kind: "request",
+    fields: [body("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/enterprise-api/scim.ts:50"],
+  },
+  "/enterprise/scim/tokens/revoke": {
+    kind: "request",
+    fields: [body("orgId")],
+    activeOrganization: false,
+    refs: ["src/server/enterprise-api/scim.ts:160"],
+  },
+};
 
 // Credential management is tenant-authorized; only owners may mint, rotate or
 // revoke. Revoke joined the set for F-07: since 1.7 it is a *decommission*
@@ -95,7 +230,7 @@ const OWNER_ONLY_PATHS = new Set([
 // entitlement resolved from their *active* org by the fallback chain below —
 // registered a "personal" (`organizationId: null`, `userId`-bound) provider
 // claiming any domain. Such a row can never be domain-verified through this
-// gate (`PROVIDER_ORG_PATHS` answers `NOT_ORG_MEMBER` for it), but it
+// gate (a `provider` source answers `NOT_ORG_MEMBER` for it), but it
 // still poisoned upstream's e-mail `/sign-in/sso` lookup (F-30) and was
 // invisible to every org-scoped read. `400 ORG_REQUIRED` before the
 // fallback chain closes it.
@@ -198,6 +333,17 @@ export function enterpriseGate(opts: EnterpriseOptions) {
             // parameters went to the error log.
             const ids = requestOrgIds(ctx.body, ctx.query);
 
+            // The org the endpoint acts on comes from its declared source
+            // only (`GATE_ORG_SOURCES`). A gated path without one is refused,
+            // with or without a session.
+            const source = GATE_ORG_SOURCES[ctx.path];
+            if (!source) {
+              throw new APIError("FORBIDDEN", {
+                code: "GATE_ORG_SOURCE_UNDECLARED",
+                message: "This endpoint has no declared organization source.",
+              });
+            }
+
             // The hook context (`HookEndpointContext`) is structurally the
             // same shape `getSessionFromCtx`/`requireFeature` need
             // (`{ context: AuthContext, path, body, ... }` — a
@@ -208,34 +354,18 @@ export function enterpriseGate(opts: EnterpriseOptions) {
             const session = await getSessionFromCtx(ctx as unknown as GenericEndpointContext);
             if (!session) return; // anonymous — let the endpoint answer 401
 
-            const body = ctx.body as { providerId?: unknown } | undefined;
-            if (BODY_ORG_REQUIRED_PATHS.has(ctx.path) && !ids.body.organizationId) {
-              throw new APIError("BAD_REQUEST", {
-                code: "ORG_REQUIRED",
-                message: "organizationId is required.",
-              });
-            }
-            // GET endpoints (e.g. `/enterprise/audit/list|export`, Task 4)
-            // carry the org id in the query string, not the body. The
-            // session's active organization is a stored value; it is used
-            // only when it is an id too.
-            const activeOrganizationId = (session.session as { activeOrganizationId?: unknown })
-              .activeOrganizationId;
-            let orgId: string | undefined =
-              ids.body.organizationId ??
-              ids.body.orgId ??
-              ids.query.orgId ??
-              (isOrgId(activeOrganizationId) ? activeOrganizationId : undefined);
-            if (PROVIDER_ORG_PATHS.has(ctx.path)) {
+            let orgId: string | undefined;
+            if (source.kind === "provider") {
+              const providerId = (ctx.body as { providerId?: unknown } | undefined)?.providerId;
               const provider =
-                typeof body?.providerId === "string"
+                typeof providerId === "string"
                   ? await ctx.context.adapter.findOne<{ organizationId?: string | null }>({
                       model: "ssoProvider",
-                      where: [{ field: "providerId", value: body.providerId }],
+                      where: [{ field: "providerId", value: providerId }],
                     })
                   : null;
-              // Never let an entitled session/caller org authorize verification
-              // for another provider, including a legacy unbound provider.
+              // Never let an entitled session/caller org authorize a change
+              // to another provider, including a legacy unbound provider.
               orgId = isOrgId(provider?.organizationId) ? provider.organizationId : undefined;
               if (!orgId) {
                 throw new APIError("FORBIDDEN", {
@@ -243,6 +373,26 @@ export function enterpriseGate(opts: EnterpriseOptions) {
                   message: "You are not a member of this organization.",
                 });
               }
+            } else {
+              for (const { from, field } of source.fields) {
+                const value = ids[from][field];
+                if (value) {
+                  orgId = value;
+                  break;
+                }
+              }
+              if (BODY_ORG_REQUIRED_PATHS.has(ctx.path) && !orgId) {
+                throw new APIError("BAD_REQUEST", {
+                  code: "ORG_REQUIRED",
+                  message: "organizationId is required.",
+                });
+              }
+              // The session's active organization is a stored value; it is
+              // used only where the endpoint itself falls back to it, and
+              // only when it is an id.
+              const active = (session.session as { activeOrganizationId?: unknown })
+                .activeOrganizationId;
+              if (!orgId && source.activeOrganization && isOrgId(active)) orgId = active;
             }
             if (!orgId) {
               throw new APIError("BAD_REQUEST", {
@@ -252,8 +402,9 @@ export function enterpriseGate(opts: EnterpriseOptions) {
             }
 
             // Membership before entitlement (M-07). `orgId` here is still
-            // caller-supplied on most paths, and `resolveEntitlements` is the
-            // product's own billing/plan lookup: letting a non-member reach
+            // caller-supplied on most paths (in the one field the endpoint
+            // reads), and `resolveEntitlements` is the product's own
+            // billing/plan lookup: letting a non-member reach
             // it turned `/enterprise/*?orgId=<any string>` into both a
             // cross-tenant existence/plan oracle (`FEATURE_NOT_ENTITLED` =
             // "org exists, no plan" vs. `NOT_ORG_ADMIN` = "org exists and is

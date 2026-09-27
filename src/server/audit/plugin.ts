@@ -302,13 +302,31 @@ async function subjectHintOf(
   return email ? { email } : null;
 }
 
+/**
+ * The provider a provider-scoped endpoint acts on: a route with a
+ * `:providerId` parameter (`/sso/saml2/sp/slo/:providerId`) acts on the
+ * parameter and ignores any body field (`const { providerId } = ctx.params`,
+ * `node_modules/@better-auth/sso/dist/index.mjs:4285`); every other provider
+ * route acts on `body.providerId` (`checkProviderAccess(ctx,
+ * body.providerId)`, the `/sso/*` entries of `GATE_ORG_SOURCES` in
+ * `../gate.ts`). Reading the body first let
+ * a request that named another org's provider in its body file the row in
+ * that org's chain.
+ */
+export function actedOnProviderId(
+  ctx: { body?: unknown; params?: unknown },
+  path: string,
+): string | null {
+  return path.includes(":providerId")
+    ? str(record(ctx.params)?.providerId)
+    : str(record(ctx.body)?.providerId);
+}
+
 async function providerOf(
   ctx: GenericEndpointContext,
   path: string,
 ): Promise<AuditStash["provider"]> {
-  const body = record(ctx.body);
-  const params = record(ctx.params);
-  const providerId = str(body?.providerId) ?? str(params?.providerId);
+  const providerId = actedOnProviderId(ctx, path);
   if (!providerId) return null;
   const row = await ctx.context.adapter.findOne<{ organizationId?: string | null }>({
     model: "ssoProvider",
@@ -562,7 +580,7 @@ const SSO_CALLBACK_PATHS = new Set([
  * returned), so the 500 reports a missing row, it does not undo the change.
  * docs/security.md ("Audit log coverage") lists both sets.
  */
-function writeFailureIsSoft(path: string, entry: AuditedPath | null): boolean {
+export function writeFailureIsSoft(path: string, entry: AuditedPath | null): boolean {
   if (!entry || entry.kind === "session") return true;
   return (
     path === "/sign-out" ||
@@ -609,6 +627,36 @@ function requestMeta(ctx: GenericEndpointContext): { ip: string | null; userAgen
   };
 }
 
+/** The error a non-soft path answers when its audit row could not be written. */
+function auditWriteFailed(): APIError {
+  return new APIError("INTERNAL_SERVER_ERROR", { code: "AUDIT_WRITE_FAILED" });
+}
+
+function isAuditWriteFailed(error: unknown): error is APIError {
+  return (
+    isAPIError(error) &&
+    (error.body as { code?: unknown } | undefined)?.code === "AUDIT_WRITE_FAILED"
+  );
+}
+
+/**
+ * The HTTP answer for `AUDIT_WRITE_FAILED`: a `Response` rather than a thrown
+ * `APIError`. better-auth answers a thrown after-hook error with the status
+ * the endpoint set (`dispatch.mjs` passes the endpoint's `status` to
+ * `toResponse`, which prefers it over the error's own), so an endpoint that
+ * calls `ctx.setStatus` — SCIM `POST /scim/v2/Users` answers 201 — reported
+ * success for a change whose row was never written, with
+ * `{"code":"AUDIT_WRITE_FAILED"}` as its body. A returned `Response` is
+ * answered as-is. A server-side call (no `Request`) still gets the thrown
+ * error, which better-auth rethrows to the caller.
+ */
+function auditWriteFailedResponse(error: APIError): Response {
+  return new Response(JSON.stringify(error.body ?? { code: "AUDIT_WRITE_FAILED" }), {
+    status: error.statusCode,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 /**
  * One row per org. A write failure is logged and swallowed on soft paths
  * (`writeFailureIsSoft`), else `500 AUDIT_WRITE_FAILED`. No org at all is
@@ -633,11 +681,15 @@ async function writeRows(
       // `writeAudit` applies the row backstop (`./bounds.ts`) itself.
       await writeAudit(ctx, { ...row, orgId });
     } catch (err) {
-      if (opts.soft) {
-        ctx.context.logger.error("enterprise-audit: failed to write audit row", err);
-        continue;
-      }
-      throw new APIError("INTERNAL_SERVER_ERROR", { code: "AUDIT_WRITE_FAILED" });
+      // Logged on both kinds of path: the error is what the adapter let
+      // through, which never carries a statement or its values
+      // (`../db-errors.ts`).
+      ctx.context.logger.error(
+        `enterprise-audit: failed to write the ${row.action} row on ${opts.path}`,
+        err,
+      );
+      if (opts.soft) continue;
+      throw auditWriteFailed();
     }
   }
 }
@@ -911,21 +963,17 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
       targetId = auditId(extractId(returned) ?? routeParamId(ctx));
       break;
     case "request-org":
-      // The endpoint's own schema already refused anything but an id
-      // (`../org-id.ts`); checked again so this row can never be filed
-      // under a value that is not one.
-      orgIds = [
-        isOrgId(body?.orgId)
-          ? body.orgId
-          : isOrgId(body?.organizationId)
-            ? body.organizationId
-            : null,
-      ];
+      // The one field the endpoint acts on (`/enterprise/policy/set` reads
+      // `body.orgId`, the gate's `GATE_ORG_SOURCES` entry too) — never
+      // another org-id field of the same body. The endpoint's own schema
+      // already refused anything but an id (`../org-id.ts`); checked again
+      // so this row can never be filed under a value that is not one.
+      orgIds = [isOrgId(body?.orgId) ? body.orgId : null];
       targetId = auditId(orgIds[0]);
       Object.assign(metadata, changedKeys(body, ["orgId", "organizationId"]));
       break;
     case "provider": {
-      const providerId = stash.provider?.providerId ?? str(body?.providerId) ?? routeParamId(ctx);
+      const providerId = stash.provider?.providerId ?? actedOnProviderId(ctx, path);
       const orgId =
         stash.provider?.orgId ??
         (await providerOrgId(ctx, providerId)) ??
@@ -1559,8 +1607,14 @@ export function auditLog(opts: EnterpriseOptions) {
               returned: ctx.context.returned,
               opts,
             };
-            if (entry.kind === "session") await auditSignInStep(a);
-            else await auditEvent(a, entry);
+            try {
+              if (entry.kind === "session") await auditSignInStep(a);
+              else await auditEvent(a, entry);
+            } catch (err) {
+              // The change is committed and its row is missing: never a 2xx.
+              if (isAuditWriteFailed(err) && ctx.request) return auditWriteFailedResponse(err);
+              throw err;
+            }
           }),
         },
         {
