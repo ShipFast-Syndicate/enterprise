@@ -15,6 +15,7 @@
 import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
 import type { GenericEndpointContext } from "better-auth";
 import * as z from "zod";
+import { orgIdSchema } from "../org-id";
 import { requireOrgMember } from "../policy/store";
 
 interface MemberRow {
@@ -47,7 +48,7 @@ interface InvitationRow {
   expiresAt: Date;
 }
 
-const membersQuerySchema = z.object({ orgId: z.string() });
+const membersQuerySchema = z.object({ orgId: orgIdSchema });
 
 export function buildMembersEndpoint() {
   return createAuthEndpoint(

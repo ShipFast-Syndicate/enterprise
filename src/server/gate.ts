@@ -18,6 +18,8 @@ import { withSecretEncryption } from "./secrets";
 import { buildSsoDomainGuardHook } from "./sso-domain";
 import { assertEnterpriseOptions, takeDomainBindingOffUnlistedWarning } from "./options";
 import { assertNotApiKeyRequest, isApiKeyRefusedPath, isServerOnlyCall } from "./api-keys";
+import { isOrgId, requestOrgIds } from "./org-id";
+import { withDatabaseErrorRedaction } from "./db-errors";
 
 export const GATED_PATHS: Record<string, Feature> = {
   "/sso/register": "sso",
@@ -132,15 +134,25 @@ export function enterpriseGate(opts: EnterpriseOptions) {
       if (warning) context.logger.warn(warning);
       return {
         context: {
-          adapter: withSecretEncryption(context.adapter, opts.secretsKey, {
-            // F-06: an undecryptable secret is an operator problem (rotated
-            // key, corrupted row), reported through the product's logger —
-            // never a request failure for every tenant.
-            onUndecryptable: ({ providerId, field }) =>
-              context.logger.error(
-                `ssoProvider "${providerId}" field "${field}" could not be decrypted (wrong or rotated secretsKey, or a corrupted/transplanted ciphertext); the value is left sealed and this provider's IdP exchange will fail until the secret is re-entered.`,
-              ),
-          }),
+          // Innermost, directly around the product's adapter: a query that
+          // fails anywhere reaches the logs without its SQL or parameter
+          // values (`./db-errors.ts`). Inside the encryption wrapper, not
+          // around it: that wrapper routes each call to the adapter the
+          // request's async-local store holds, which is the one returned
+          // here, so it must stay the outermost layer.
+          adapter: withSecretEncryption(
+            withDatabaseErrorRedaction(context.adapter),
+            opts.secretsKey,
+            {
+              // F-06: an undecryptable secret is an operator problem (rotated
+              // key, corrupted row), reported through the product's logger —
+              // never a request failure for every tenant.
+              onUndecryptable: ({ providerId, field }) =>
+                context.logger.error(
+                  `ssoProvider "${providerId}" field "${field}" could not be decrypted (wrong or rotated secretsKey, or a corrupted/transplanted ciphertext); the value is left sealed and this provider's IdP exchange will fail until the secret is re-entered.`,
+                ),
+            },
+          ),
         },
       };
     },
@@ -176,6 +188,16 @@ export function enterpriseGate(opts: EnterpriseOptions) {
             const feature = GATED_PATHS[ctx.path];
             if (!feature) return;
 
+            // Every org-id field of the body and the query string is checked
+            // first, before the session lookup or any other query: a value
+            // that is not a short string (an array — which is what a
+            // duplicated query parameter parses to —, an object, a number)
+            // answers `400 ORG_ID_INVALID` (`./org-id.ts`). It used to reach
+            // `getMemberRoles` below as a query value; the driver refused to
+            // bind it, the request answered 500 and the failed query with its
+            // parameters went to the error log.
+            const ids = requestOrgIds(ctx.body, ctx.query);
+
             // The hook context (`HookEndpointContext`) is structurally the
             // same shape `getSessionFromCtx`/`requireFeature` need
             // (`{ context: AuthContext, path, body, ... }` — a
@@ -186,25 +208,24 @@ export function enterpriseGate(opts: EnterpriseOptions) {
             const session = await getSessionFromCtx(ctx as unknown as GenericEndpointContext);
             if (!session) return; // anonymous — let the endpoint answer 401
 
-            const body = ctx.body as
-              { organizationId?: string; orgId?: string; providerId?: string } | undefined;
-            if (
-              BODY_ORG_REQUIRED_PATHS.has(ctx.path) &&
-              !(typeof body?.organizationId === "string" && body.organizationId)
-            ) {
+            const body = ctx.body as { providerId?: unknown } | undefined;
+            if (BODY_ORG_REQUIRED_PATHS.has(ctx.path) && !ids.body.organizationId) {
               throw new APIError("BAD_REQUEST", {
                 code: "ORG_REQUIRED",
                 message: "organizationId is required.",
               });
             }
             // GET endpoints (e.g. `/enterprise/audit/list|export`, Task 4)
-            // carry the org id in the query string, not the body.
-            const query = ctx.query as { orgId?: string } | undefined;
-            let orgId =
-              body?.organizationId ??
-              body?.orgId ??
-              query?.orgId ??
-              (session.session as { activeOrganizationId?: string }).activeOrganizationId;
+            // carry the org id in the query string, not the body. The
+            // session's active organization is a stored value; it is used
+            // only when it is an id too.
+            const activeOrganizationId = (session.session as { activeOrganizationId?: unknown })
+              .activeOrganizationId;
+            let orgId: string | undefined =
+              ids.body.organizationId ??
+              ids.body.orgId ??
+              ids.query.orgId ??
+              (isOrgId(activeOrganizationId) ? activeOrganizationId : undefined);
             if (PROVIDER_ORG_PATHS.has(ctx.path)) {
               const provider =
                 typeof body?.providerId === "string"
@@ -215,7 +236,7 @@ export function enterpriseGate(opts: EnterpriseOptions) {
                   : null;
               // Never let an entitled session/caller org authorize verification
               // for another provider, including a legacy unbound provider.
-              orgId = provider?.organizationId ?? undefined;
+              orgId = isOrgId(provider?.organizationId) ? provider.organizationId : undefined;
               if (!orgId) {
                 throw new APIError("FORBIDDEN", {
                   code: "NOT_ORG_MEMBER",

@@ -55,6 +55,7 @@ import {
 } from "better-auth/api";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
+import { isOrgId, orgIdSchema } from "../org-id";
 // One shared implementation of the owner/admin check (it used to be
 // duplicated here), so the `NOT_ORG_MEMBER` vs `NOT_ORG_ADMIN` distinction
 // M-07 depends on is made in exactly one place.
@@ -86,7 +87,6 @@ import {
   auditEmail,
   auditId,
   auditRoles,
-  auditRowBounds,
   auditToken,
   auditUserAgent,
 } from "./bounds";
@@ -628,10 +628,10 @@ async function writeRows(
     else ctx.context.logger.debug(message);
     return;
   }
-  const bounded = auditRowBounds(row);
   for (const orgId of targets) {
     try {
-      await writeAudit(ctx, { ...bounded, orgId });
+      // `writeAudit` applies the row backstop (`./bounds.ts`) itself.
+      await writeAudit(ctx, { ...row, orgId });
     } catch (err) {
       if (opts.soft) {
         ctx.context.logger.error("enterprise-audit: failed to write audit row", err);
@@ -879,7 +879,8 @@ function routeParamId(ctx: GenericEndpointContext): string | null {
 // parameter) goes through `./bounds.ts` before it reaches the row: ids via
 // `auditId`, roles via `auditRoles`, key lists via `changedKeys`; values read
 // back from the database or the response are the stored ones. `writeRows`
-// applies `auditRowBounds` to the result as a backstop.
+// hands the result to `writeAudit`, which applies `auditRowBounds` as a
+// backstop to every row.
 
 async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
   const { ctx, path, stash, returned } = a;
@@ -910,7 +911,16 @@ async function auditEvent(a: AuditCtx, entry: AuditedPath): Promise<void> {
       targetId = auditId(extractId(returned) ?? routeParamId(ctx));
       break;
     case "request-org":
-      orgIds = [str(body?.orgId) ?? str(body?.organizationId)];
+      // The endpoint's own schema already refused anything but an id
+      // (`../org-id.ts`); checked again so this row can never be filed
+      // under a value that is not one.
+      orgIds = [
+        isOrgId(body?.orgId)
+          ? body.orgId
+          : isOrgId(body?.organizationId)
+            ? body.organizationId
+            : null,
+      ];
       targetId = auditId(orgIds[0]);
       Object.assign(metadata, changedKeys(body, ["orgId", "organizationId"]));
       break;
@@ -1174,7 +1184,7 @@ function toCsvRow(row: AuditEventRow): string {
 const timeBound = z.coerce.number().int().min(0).max(AUDIT_TIME_MAX).optional();
 
 const listQuerySchema = z.object({
-  orgId: z.string(),
+  orgId: orgIdSchema,
   action: z.string().optional(),
   actorId: z.string().optional(),
   from: timeBound,
@@ -1184,21 +1194,21 @@ const listQuerySchema = z.object({
 });
 
 const exportQuerySchema = z.object({
-  orgId: z.string(),
+  orgId: orgIdSchema,
   from: timeBound,
   to: timeBound,
 });
 
 const verifyQuerySchema = z.object({
-  orgId: z.string(),
+  orgId: orgIdSchema,
 });
 
 const headQuerySchema = z.object({
-  orgId: z.string(),
+  orgId: orgIdSchema,
 });
 
 const compactBodySchema = z.object({
-  orgId: z.string(),
+  orgId: orgIdSchema,
 });
 
 /** Default ceiling on one `/enterprise/audit/export` call (M-05); override with `audit.exportMaxRows`. */

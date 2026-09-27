@@ -63,6 +63,7 @@ import {
   type VerifiedProviderRow,
 } from "./policy/domains";
 import { getMemberRoles } from "./policy/store";
+import { isOrgId } from "./org-id";
 
 export const SSO_DOMAIN_GUARD_PATHS = new Set([
   "/sso/register",
@@ -676,7 +677,7 @@ async function guardRegister(
   // `ORG_REQUIRED` is the entitlement gate's job and it runs first; a
   // missing org here (a hand-composed plugin list) simply means "no org's
   // own rows are excluded" — still fail-closed.
-  const organizationId = stringField(body, "organizationId");
+  const organizationId = isOrgId(body.organizationId) ? body.organizationId : null;
   const issuer = stringField(body, "issuer");
   if (issuer) {
     const endpoints = collectIdpEndpoints(body.oidcConfig, body.samlConfig);

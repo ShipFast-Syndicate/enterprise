@@ -366,42 +366,54 @@ function methodsOf(path: string): string[] {
   return [...methods];
 }
 
+/**
+ * Each walk case sends a few dozen requests, and on the password paths each
+ * valid variant hashes a password: about 4 s alone, but a case exceeded the
+ * default 20 s once while the whole suite ran in parallel. The walk cases get
+ * their own ceiling so load alone cannot fail them.
+ */
+const WALK_TIMEOUT_MS = 120_000;
+
 describe("every audited route, with oversized request values, stores only bounded rows", () => {
   const written = { rows: 0 };
 
   for (const path of Object.keys(AUDITED_PATHS).sort()) {
-    it(path, async () => {
-      const w = await walkWorld(path);
-      const before = (await largest(w.t)).rows;
-      const base = baseBody(path, w);
-      const headers = {
-        ...callerOf(path, w),
-        "user-agent": BIG,
-        "x-forwarded-for": BIG,
-      };
-      const variants: Record<string, unknown>[] = [base];
-      for (const field of new Set<string>([...Object.keys(base), ...READ_FIELDS])) {
-        variants.push({ ...base, [field]: BIG }, { ...base, [field]: BIG_LIST });
-      }
-      const params = path.includes(":")
-        ? [path.includes(":userId") && w.scim ? w.scim.userId : "p1", BIG]
-        : [""];
-      for (const method of methodsOf(path)) {
-        for (const param of params) {
-          const url = `${concrete(path, param)}?organizationId=${encodeURIComponent(BIG)}`;
-          for (const body of method === "DELETE" ? [undefined] : variants) {
-            await w.t.api.request(method, url, body, headers);
+    it(
+      path,
+      async () => {
+        const w = await walkWorld(path);
+        const before = (await largest(w.t)).rows;
+        const base = baseBody(path, w);
+        const headers = {
+          ...callerOf(path, w),
+          "user-agent": BIG,
+          "x-forwarded-for": BIG,
+        };
+        const variants: Record<string, unknown>[] = [base];
+        for (const field of new Set<string>([...Object.keys(base), ...READ_FIELDS])) {
+          variants.push({ ...base, [field]: BIG }, { ...base, [field]: BIG_LIST });
+        }
+        const params = path.includes(":")
+          ? [path.includes(":userId") && w.scim ? w.scim.userId : "p1", BIG]
+          : [""];
+        for (const method of methodsOf(path)) {
+          for (const param of params) {
+            const url = `${concrete(path, param)}?organizationId=${encodeURIComponent(BIG)}`;
+            for (const body of method === "DELETE" ? [undefined] : variants) {
+              await w.t.api.request(method, url, body, headers);
+            }
           }
         }
-      }
-      const max = await largest(w.t);
-      written.rows += max.rows - before;
-      expect(max.metadata).toBeLessThanOrEqual(AUDIT_METADATA_MAX_LENGTH);
-      expect(max.target).toBeLessThanOrEqual(AUDIT_TOKEN_MAX_LENGTH);
-      expect(max.actor).toBeLessThanOrEqual(AUDIT_TOKEN_MAX_LENGTH);
-      expect(max.ua).toBeLessThanOrEqual(AUDIT_USER_AGENT_MAX_LENGTH);
-      expect(max.ip).toBeLessThanOrEqual(45);
-    });
+        const max = await largest(w.t);
+        written.rows += max.rows - before;
+        expect(max.metadata).toBeLessThanOrEqual(AUDIT_METADATA_MAX_LENGTH);
+        expect(max.target).toBeLessThanOrEqual(AUDIT_TOKEN_MAX_LENGTH);
+        expect(max.actor).toBeLessThanOrEqual(AUDIT_TOKEN_MAX_LENGTH);
+        expect(max.ua).toBeLessThanOrEqual(AUDIT_USER_AGENT_MAX_LENGTH);
+        expect(max.ip).toBeLessThanOrEqual(45);
+      },
+      WALK_TIMEOUT_MS,
+    );
   }
 
   it("the walk reached the audit layer (rows were written, not only refused)", () => {

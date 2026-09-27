@@ -42,6 +42,7 @@ import {
 } from "better-auth/api";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
+import { orgIdSchema } from "../org-id";
 import type { EnterpriseOptions } from "../types";
 import {
   buildSessionCreateBeforeHook,
@@ -118,7 +119,7 @@ export async function getPolicyPreconditions(
 
 // --- policy endpoints --------------------------------------------------
 
-const getPolicyQuerySchema = z.object({ orgId: z.string() });
+const getPolicyQuerySchema = z.object({ orgId: orgIdSchema });
 
 /**
  * `allowedMethods` accepts the closed `ALLOWED_METHOD_VALUES` set plus the
@@ -129,7 +130,7 @@ const getPolicyQuerySchema = z.object({ orgId: z.string() });
 function buildSetPolicyBodySchema(opts: EnterpriseOptions) {
   const methods = allowedMethodValues(opts) as [string, ...string[]];
   return z.object({
-    orgId: z.string(),
+    orgId: orgIdSchema,
     require2fa: z.boolean().optional(),
     ssoEnforced: z.boolean().optional(),
     breakGlassUserId: z.string().nullable().optional(),

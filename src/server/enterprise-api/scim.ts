@@ -5,12 +5,12 @@ import type { GenericEndpointContext } from "better-auth";
 import type { SCIMPlugin } from "@better-auth/scim";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
+import { orgIdSchema } from "../org-id";
 import { requireOwner, requireOwnerOrAdmin } from "../policy/store";
 import { scimConnectionLabel as label } from "../scim-connection";
 import { writeAudit } from "../audit/chain";
 import { sessionActor } from "../audit/plugin";
 
-const orgIdSchema = z.string().min(1).max(100);
 const body = z.object({ orgId: orgIdSchema, providerId: z.string().trim().min(1).max(64) });
 const scopes = [
   "scim.users.read",

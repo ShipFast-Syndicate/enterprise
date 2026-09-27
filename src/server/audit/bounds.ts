@@ -11,10 +11,11 @@
 // length, and a list of changed keys only up to a fixed count. Anything else
 // is dropped, truncated or replaced by the marker — never stored verbatim.
 //
-// `auditRowBounds` is the backstop the plugin applies to every row it
-// writes, whatever the path: a target id that is not a short value and a
+// `auditRowBounds` is the backstop `writeAudit` applies to every row, whoever
+// writes it: a target id, actor id or IP that is not a short value and a
 // metadata value too large to be a bounded one are replaced by the marker,
-// so a request value a path forgot to bound still cannot grow a chain.
+// and a user agent is cut, so a request value a writer forgot to bound still
+// cannot grow a chain.
 
 import * as z from "zod";
 
@@ -156,23 +157,36 @@ function serializedLength(value: unknown): number {
   }
 }
 
+/** A string column value as recorded: itself when short and free of control characters, else the marker. */
+function boundedColumn(value: string | null | undefined): string | null | undefined {
+  return typeof value === "string" &&
+    (value.length > AUDIT_TOKEN_MAX_LENGTH || hasControlCharacter(value))
+    ? AUDIT_UNRECORDED
+    : value;
+}
+
 /**
- * The backstop every plugin-written row goes through (`writeRows`): a
- * `targetId` that is not a short value becomes `AUDIT_UNRECORDED`; a
- * metadata value whose JSON exceeds `AUDIT_METADATA_VALUE_MAX_LENGTH`
- * becomes `AUDIT_UNRECORDED`, and while the whole metadata still exceeds
- * `AUDIT_METADATA_MAX_LENGTH` the largest remaining value does too. The
- * per-path bounds above keep every value well inside these limits; this
- * only decides what happens to a value a path did not bound.
+ * The backstop every row goes through: `writeAudit` (`./chain.ts`) applies it
+ * to whatever a writer passes, so no writer — the plugin, the refusal path,
+ * SCIM, API keys, the enterprise endpoints, the export row — can store an
+ * unbounded value. A `targetId`, `actorId` or `ip` that is not a short value
+ * becomes `AUDIT_UNRECORDED`; a user agent is cut to
+ * `AUDIT_USER_AGENT_MAX_LENGTH`; a metadata value whose JSON exceeds
+ * `AUDIT_METADATA_VALUE_MAX_LENGTH` becomes `AUDIT_UNRECORDED`, and while the
+ * whole metadata still exceeds `AUDIT_METADATA_MAX_LENGTH` the largest
+ * remaining value does too. The per-path bounds above keep every value well
+ * inside these limits; this only decides what happens to a value a writer
+ * did not bound.
  */
 export function auditRowBounds<
-  T extends { targetId?: string | null; metadata?: Record<string, unknown> },
+  T extends {
+    targetId?: string | null;
+    actorId?: string | null;
+    ip?: string | null;
+    userAgent?: string | null;
+    metadata?: Record<string, unknown>;
+  },
 >(row: T): T {
-  const targetId =
-    typeof row.targetId === "string" &&
-    (row.targetId.length > AUDIT_TOKEN_MAX_LENGTH || hasControlCharacter(row.targetId))
-      ? AUDIT_UNRECORDED
-      : row.targetId;
   const metadata: Record<string, unknown> = {};
   const sizes = new Map<string, number>();
   for (const [key, value] of Object.entries(row.metadata ?? {})) {
@@ -186,5 +200,13 @@ export function auditRowBounds<
     const [key] = bySize.shift()!;
     metadata[key] = AUDIT_UNRECORDED;
   }
-  return { ...row, targetId, metadata };
+  const bounded = {
+    ...row,
+    targetId: boundedColumn(row.targetId),
+    metadata,
+  };
+  if (row.actorId !== undefined) bounded.actorId = boundedColumn(row.actorId);
+  if (row.ip !== undefined) bounded.ip = boundedColumn(row.ip);
+  if (row.userAgent !== undefined) bounded.userAgent = auditUserAgent(row.userAgent);
+  return bounded;
 }

@@ -34,6 +34,7 @@
 
 import type { AuthContext } from "better-auth";
 import type { Where } from "@better-auth/core/db/adapter";
+import { auditRowBounds } from "./bounds";
 
 type AuditAdapter = AuthContext["adapter"];
 
@@ -582,12 +583,16 @@ export async function writeAudit(
 ): Promise<AuditRow> {
   const adapter = ctx.context.adapter as unknown as AuditAdapter;
   const chainKey = effectiveChainKey(ctx, options);
-  return withOrgLock(input.orgId, async () => {
+  // Bounded here, not by each writer: every row any writer appends goes
+  // through the same backstop (`./bounds.ts`), so a value one of them did not
+  // bound can never grow a chain.
+  const row = { ...auditRowBounds(input), orgId: input.orgId };
+  return withOrgLock(row.orgId, async () => {
     try {
-      return await insertNextRow(adapter, input, chainKey);
+      return await insertNextRow(adapter, row, chainKey);
     } catch (err) {
       if (!isUniqueViolation(err)) throw err;
-      return await insertNextRow(adapter, input, chainKey);
+      return await insertNextRow(adapter, row, chainKey);
     }
   });
 }

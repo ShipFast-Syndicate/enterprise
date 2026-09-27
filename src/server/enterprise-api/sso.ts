@@ -27,6 +27,8 @@ import {
 import type { GenericEndpointContext } from "better-auth";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
+import { orgIdSchema } from "../org-id";
+import { auditId } from "../audit/bounds";
 import { domainMatches, emailDomain, normalizeProviderDomains } from "../policy/domains";
 import { getOrgPolicy, requireOrgMember, requireOwnerOrAdmin } from "../policy/store";
 import { forwardJson, forwardToAuth, relayStatus } from "./forward";
@@ -127,7 +129,7 @@ function acsUrl(ctx: GenericEndpointContext, row: SsoProviderRow): string {
   return `${ctx.context.baseURL}/sso/saml2/sp/acs/${row.providerId}`;
 }
 
-const providersQuerySchema = z.object({ orgId: z.string() });
+const providersQuerySchema = z.object({ orgId: orgIdSchema });
 
 function buildProvidersEndpoint() {
   return createAuthEndpoint(
@@ -186,7 +188,7 @@ function buildProvidersEndpoint() {
 // re-declaring its full, evolving zod schema here — upstream is the
 // authoritative validator once forwarded (see `./forward.ts`); this schema
 // only pins down the one field *our* membership/role check needs.
-const registerBodySchema = z.object({ organizationId: z.string() }).catchall(z.unknown());
+const registerBodySchema = z.object({ organizationId: orgIdSchema }).catchall(z.unknown());
 
 /** Strips secret/private material from a (possibly error) upstream `/sso/register` JSON response before it's relayed to the portal. No-op on an error body (no `oidcConfig`/`samlConfig` keys to strip). */
 function redactRegisterResponse(data: Record<string, unknown>): Record<string, unknown> {
@@ -259,7 +261,7 @@ function buildRegisterEndpoint() {
   );
 }
 
-const testLoginStartBodySchema = z.object({ orgId: z.string(), providerId: z.string() });
+const testLoginStartBodySchema = z.object({ orgId: orgIdSchema, providerId: z.string() });
 
 const TEST_LOGIN_PENDING_TTL_MS = 10 * 60 * 1000;
 
@@ -449,7 +451,10 @@ function buildTestLoginFinishEndpoint() {
         metadata: actor.metadata,
         action: "sso.test_login_passed",
         targetType: "sso_provider",
-        targetId: providerId,
+        // The query value, recorded the way every other provider id is: as
+        // itself when it is a short token, else `(unrecorded)`. `writeAudit`
+        // bounds the row again whatever a writer passes.
+        targetId: auditId(providerId),
       }).catch((err) => {
         ctx.context.logger.error("enterprise-api: failed to audit sso.test_login_passed", err);
       });

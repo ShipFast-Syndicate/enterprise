@@ -528,13 +528,39 @@ request gave in `metadata.roleCount` whenever anything was left out; error codes
 only as short tokens (`UNRECOGNIZED_ERROR` otherwise); every id taken from the request — provider
 ids (`target_id` of the `sso.*` rows), member, team, invitation, key, passkey and user ids,
 SCIM route parameters — is recorded only as a token of at most 128 characters, else as the
-marker `(unrecorded)`; the user agent is cut at 512 characters. As a backstop, every row the
-plugin writes has a `target_id` of at most 128 characters and metadata values of at most
-10,000 characters each and 16 KiB in total (a larger value is stored as `(unrecorded)`), and
+marker `(unrecorded)`; the user agent is cut at 512 characters. As a backstop, `writeAudit`
+itself bounds every row, whoever writes it — the plugin, refused sign-ins, SCIM, API keys, the
+enterprise SCIM and SSO endpoints (including `sso.test_login_passed`) and the export row: a
+`target_id`, `actor_id` or `ip` of more than 128 characters is stored as `(unrecorded)`, the
+user agent is cut at 512 characters, and metadata values are kept to at most 10,000 characters
+each and 16 KiB in total (a larger value is stored as `(unrecorded)`).
 `test/security/audit-cluster-request-values.test.ts` sends oversized strings and lists to every
-audited route and checks every stored row. The log's own read endpoints bound their filters the
-same way: `from`/`to` on `/enterprise/audit/list` and `/enterprise/audit/export` must be whole
+audited route and checks every stored row; `test/security/audit-cluster-writers-bounded.test.ts`
+does the same for the self-audited endpoints and a direct `writeAudit` call, and checks that no
+other module writes an audit row. The log's own read endpoints bound their filters the same
+way: `from`/`to` on `/enterprise/audit/list` and `/enterprise/audit/export` must be whole
 milliseconds in `[0, 8.64e15]` (the range a `Date` holds), else `400` before any query runs.
+
+**Organization ids from a request.** Every organization id taken from a request — `orgId` or
+`organizationId`, in the body or the query string, on every gated path and every
+`/enterprise/*` endpoint — is used only when it is a non-empty string of at most 128
+characters. Anything else is refused with `400` before any query runs: the gate answers
+`400 ORG_ID_INVALID` (it checks every such field of the body and the query string, before it
+looks up the session), and the enterprise endpoints' own validation answers `400
+VALIDATION_ERROR`. A duplicated query parameter (`?orgId=A&orgId=B`) parses to a list and is
+refused the same way. `test/security/audit-cluster-org-id-types.test.ts` walks every gated path
+and every `/enterprise/*` endpoint with lists, objects, numbers, booleans, `null` and oversized
+strings in every org-id field.
+
+**Failed queries are logged without their SQL.** better-auth logs whatever error a request
+throws, through the auth logger and again through `console.error`; an error from a SQL adapter
+(drizzle's `DrizzleQueryError`) carries the statement and every value bound to it. `enterpriseGate`
+wraps the auth adapter so that an error carrying a query leaves it as a `DatabaseQueryError`
+naming only the model, the adapter method, the driver's error code (`code`, `errno`, `errcode`
+and `number` are kept, so unique-violation checks still work) and, for a missing table or
+column, the driver's own hint (`no such table: member`). The statement, its parameters and the
+driver error it wrapped are not kept. Errors that carry no query — `APIError`s, the secrets
+wrapper's own errors, better-auth's schema-mismatch error — pass through unchanged.
 
 **Which rows can hold up a response, and which can fail it.** Rows about an address the caller
 chose — failed, refused and 2FA-pending sign-ins, `/sign-in/magic-link`,
