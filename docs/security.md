@@ -158,7 +158,7 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
     `org_policy.updated_at` and the user's `member.createdAt` in it — and a no-password session
     stands only if its `session.createdAt` is **strictly after** that onset. Timestamps are compared in
     epoch milliseconds whatever unit a product keeps them in (a `session.created_at` in whole seconds
-    next to millisecond policy and membership stamps is the fleet's reality); a stamp that falls on a
+    next to millisecond policy and membership stamps is a common Drizzle layout); a stamp that falls on a
     whole second is read as the last millisecond of that second, and a stamp that cannot be read makes
     the session not stand. The creation rule stamps each session it admits for a named method with a
     `createdAt` at the start of the second after next, so a judged session never reads as "not after"
@@ -257,7 +257,7 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   JWT signing, …) and every endpoint of a plugin you add that this package has never heard of
   (`jwt()`'s `/token`, `oneTimeToken()`'s `/one-time-token/generate`, your own). The list is an
   allow-list rather than a deny-list because a deny-list is fail-open for every endpoint it does
-  not know; it was built from what the fleet products do with a key — each resolves the key's
+  not know; it was built from how integrators use a key — resolving the key's
   owner through `auth.api.getSession({ headers })` and nothing else — and widening it is a
   reviewed change to this package on evidence, not a per-product option. The refusal is enforced
   twice: inside `enterpriseApiKeyValidator` — before the key is even looked up, so it holds
@@ -322,12 +322,14 @@ change log.
 
 ## Upgrading from 1.0.x
 
-1.0.x let any tenant's domain-verified IdP create and sign in accounts for **any** e-mail
-address on the deployment (GHSA-8p84-pc7q-69jr). 1.1.0 binds every SSO sign-in to the signing
-provider's verified domain, so an account a foreign IdP squatted before the upgrade can no
-longer sign in through it — but the rows are still there, and the legitimate user is still
-locked out of their own IdP until they are removed (upstream refuses to link a second provider
-to an unverified account). Run this on each database before or right after upgrading:
+The step-by-step guide, the full behaviour table, the new options and the error codes are in
+[`docs/upgrading-to-1.1.md`](./upgrading-to-1.1.md); this section holds the details it links to.
+
+1.1.0 binds every SSO sign-in to the signing provider's verified domain (GHSA-8p84-pc7q-69jr).
+An `account` row that links a user to a provider **not** verified for that user's e-mail domain
+can no longer sign in, but the row stays in the database until it is removed, and while it is
+there the user cannot link their own organization's provider (upstream refuses to link a second
+provider to an unverified account). Run this on each database before or right after upgrading:
 
 ```sql
 -- account rows linked to an SSO provider that is not verified for the user's e-mail domain
@@ -343,10 +345,10 @@ WHERE p.domainVerified = 0
 ```
 
 (The `LIKE` covers exact and single-entry subdomain matches; review comma-list providers by
-hand.) For every row: delete the foreign `account` row, revoke the user's sessions
-(`DELETE FROM session WHERE userId = ?`), and check `member` rows the squat's auto-join created
-in the attacker's org. If the squatted address belongs to a real person, the account is theirs
-once the foreign link is gone — the next sign-in through their own IdP links it.
+hand.) For every row: delete the `account` row, revoke the user's sessions
+(`DELETE FROM session WHERE userId = ?`), and review the `member` rows the provider's JIT
+auto-join created in the provider's organization. Once the row is gone, the user's next sign-in
+through their own organization's IdP links that provider.
 
 Other pre-upgrade checks for this release:
 
@@ -377,10 +379,10 @@ them unjudged, so a member who holds no password and is not enrolled signs in ag
 sign-in then satisfies the policy). Apply it as part of the upgrade, **once**, through the product's
 own migrator:
 
-- **A product whose package tables came from its own migration** — every fleet product today: klar
-  `drizzle/0010_enterprise_pilot.sql`, dispatch `0011`, nomi `0023` plus `0024_scim_1_7.sql`,
-  rendra `migrations/0004`, pagr `0008`, opensalary `0006`, publishr `0014` — runs
-  `ab-enterprise migrate --out <drizzle migrations folder> --from 0003`. It writes exactly one
+- **A product whose package tables came from its own migration** (for example a hand-written
+  `NNNN_enterprise_pilot.sql`, possibly followed by its own copy of `0002`) runs
+  `ab-enterprise migrate --out <drizzle migrations folder> --from 0003`, once for **every**
+  folder it migrates from (one per environment lineage, if it keeps several). It writes exactly one
   file, `NNNN_enterprise_0003_require2fa.sql`, next-numbered and registered in
   `meta/_journal.json` after the product's own entries, and a second run writes nothing. Never
   the full emit: `0001` and `0002` would re-run `ALTER TABLE`s that product's own migration
@@ -411,8 +413,7 @@ under an emitted name with other content is refused whatever `--from` says. A pl
 empty folder (a new install) or one whose `0002` this command wrote.
 Journal entries it adds start after the newest `when` already in the journal, so the migrator never
 skips them. `applyMigration()` runs every file on each call, and a second run of `0003` signs those
-members out once more. Where no org has `require_2fa = 1` (production on 2026-09-26), `0003`
-changes nothing.
+members out once more. Where no org has `require_2fa = 1`, `0003` changes nothing.
 
 Check first, and add a redirect-to-enrolment on `enterprise.enrollmentRequired` in a product that
 offers password sign-in before upgrading:
@@ -766,7 +767,7 @@ package. The 0.1.0 release is therefore published manually, once, by Bastien:
 ### Before first publish — checklist
 
 From the 2026-09-15 security audit
-(private audit archive, `bros-brain/projects/enterprise/audits/`),
+(private audit archive),
 split by who does it:
 
 **Done in this task (Claude, code/config):**
@@ -825,10 +826,45 @@ rotated by construction going forward (every test run mints a new pair). Do not 
 historical path in `.gitleaks.toml`; the working tree itself is clean, which is what matters for
 every scan of the current codebase (dependency review, `npm pack`, a fresh clone).
 
+## Fixed in 1.1.0
+
+The 2026-09-25 security audit (private audit archive) of 1.0.1 and its completeness review
+("gap" items) led to the changes below, released in 1.1.0 together with the GitHub security
+advisories named in [the release notes](./releases/1.1.0.md). Each has regression tests that
+fail on 1.0.1 and pass on 1.1.0; what an integrator sees is in
+[`docs/upgrading-to-1.1.md`](./upgrading-to-1.1.md).
+
+| id               | change in 1.1.0                                                                                                                                                                                                                                                   | tests                                                                                                                                                                                       |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F-01             | JIT user creation and every SSO session require the signing provider to be domain-verified for the user's e-mail domain (`sso.domainBinding`); `ssoEnforced` is satisfied only by the enforcing org's own IdP; accepting an invitation requires a verified e-mail | `test/security/f01-jit-domain-binding.test.ts`, `test/security/f01-invitation-verified-email.test.ts`, `test/e2e/jit.test.ts`                                                               |
+| F-03             | Policy is the union over every organization with a claim on the user (active org, memberships, verified-domain claims); membership scan paginated, fail closed                                                                                                    | `test/security/ghsa-policy-bypass.test.ts`, `test/server/effective-policy.test.ts`, `test/server/policy.test.ts`                                                                            |
+| F-04             | One domain matcher shared with upstream (comma lists, case-insensitive, subdomains) for home-realm, policy, JIT and SCIM rules; provider domains stored normalised                                                                                                | `test/server/domains.test.ts`, `test/server/home-realm.test.ts`, `test/security/ghsa-policy-bypass.test.ts`                                                                                 |
+| F-05             | `sessionMaxAgeS` bounds session refresh as well as creation                                                                                                                                                                                                       | `test/security/ghsa-policy-bypass.test.ts`                                                                                                                                                  |
+| F-06             | `ssoProvider` secret fields always encrypted on write; a field that cannot be decrypted is reported and left sealed for its own row                                                                                                                               | `test/security/f06-enc-prefix-poison.test.ts`, `test/security/c04-secrets-at-rest.test.ts`                                                                                                  |
+| F-07             | SCIM decommission owner-only; an owner membership is never banned by SCIM                                                                                                                                                                                         | `test/security/f07-scim-revoke-owner-only.test.ts`, `test/security/m01-privilege-escalation.test.ts`                                                                                        |
+| F-08             | Sign-in, sign-out, failed, refused and 2FA-pending sign-ins audited into every organization of the user, resolved server-side                                                                                                                                     | `test/security/audit-cluster.test.ts`, `test/security/audit-cluster-bounds.test.ts`                                                                                                         |
+| F-09, F-10, F-11 | Rows attributed to the acting user and filed in the organization acted on (role changes, joins, domain verification)                                                                                                                                              | `test/security/audit-cluster.test.ts`, `test/security/audit-cluster-resource-org.test.ts`                                                                                                   |
+| F-12             | Actions under impersonation recorded as `actorType: "impersonated"` with `metadata.impersonatedBy`; impersonation start/stop audited                                                                                                                              | `test/security/audit-cluster.test.ts`                                                                                                                                                       |
+| F-13             | Every mounted endpoint is audited, self-audited or listed as unaudited with a reason; IdP, `/admin/*`, organization, credential, session, API-key, export and compaction changes audited                                                                          | `test/security/audit-cluster-routes.test.ts`, `test/security/audit-cluster.test.ts`, `test/security/audit-cluster-request-values.test.ts`                                                   |
+| F-17             | `/sso/update-provider`, `/sso/delete-provider` gated on the stored provider's organization and its `sso` entitlement                                                                                                                                              | `test/security/f17-provider-mutation-gate.test.ts`, `test/security/gate-org-source.test.ts`                                                                                                 |
+| F-21 (inverse)   | Every deprovisioning path (`/admin/ban-user`, `/admin/remove-user`, SCIM) revokes the user's API keys, audited per organization                                                                                                                                   | `test/security/gap1-api-keys.test.ts`, `test/server/deprovision.test.ts`                                                                                                                    |
+| F-23 (part)      | A SCIM ban skipped for an owner is audited (`scim.user_deactivation_skipped`)                                                                                                                                                                                     | `test/security/f07-scim-revoke-owner-only.test.ts`                                                                                                                                          |
+| F-27 (part)      | Organization deletion is audited (`org.deleted` ends the chain); the rows are kept (see "Retention and GDPR")                                                                                                                                                     | `test/security/audit-cluster-resource-org.test.ts`                                                                                                                                          |
+| F-28             | `sso.allowedIssuers` applies to the issuer, every OIDC endpoint and the SAML signing certificates (`sso.samlCertificateFingerprints`), on write and at sign-in; `trustedOrigins` documented as an SSRF/redirect boundary                                          | `test/security/f28-issuer-allowlist.test.ts`, `test/security/f28-saml-trust-root.test.ts`, `test/security/f28-samlify-signing-set.test.ts`                                                  |
+| F-30             | One organization per verified domain (`SSO_DOMAIN_TAKEN`); e-mail `/sign-in/sso` pinned to the verified provider                                                                                                                                                  | `test/security/f30-domain-uniqueness.test.ts`                                                                                                                                               |
+| F-38             | `ab-enterprise migrate` writes every package migration and takes `--from`                                                                                                                                                                                         | `test/cli/cli.test.ts`                                                                                                                                                                      |
+| gap 1            | API keys bound to the live user, expiring by default, revoked on deprovisioning, confined to `/get-session`                                                                                                                                                       | `test/security/gap1-api-keys.test.ts`, `test/security/api-key-root-route.test.ts`, `test/portal/api-keys.test.ts`                                                                           |
+| gap 2            | `require2fa` enforced at session creation, on every request and for API-key owners                                                                                                                                                                                | `test/security/gap2-require2fa*.test.ts`                                                                                                                                                    |
+| gap 3            | No policy answer before the credential is checked on `/sign-in/email` and `/sign-in/magic-link`                                                                                                                                                                   | `test/security/ghsa-policy-bypass.test.ts`                                                                                                                                                  |
+| gap 4            | Unclassified sign-in paths fail closed under a restricted `allowedMethods`; `policy.signInMethods`                                                                                                                                                                | `test/security/ghsa-policy-bypass.test.ts`, `test/server/policy.test.ts`                                                                                                                    |
+| gap 5            | `/sso/register` requires `organizationId`                                                                                                                                                                                                                         | `test/security/gap5-personal-providers.test.ts`, `test/server/gate.test.ts`                                                                                                                 |
+| gap 6            | Optional HMAC-keyed audit chain (`audit.chainKey`), head export (`GET /enterprise/audit/head`) and `audit-verify --expect-head`                                                                                                                                   | `test/server/audit-chain.test.ts`, `test/server/audit-plugin.test.ts`                                                                                                                       |
+| hardening        | Organization ids from a request validated before any query; the gate checks the organization each endpoint acts on; audit rows bounded; failed adapter queries logged without SQL                                                                                 | `test/security/audit-cluster-org-id-types.test.ts`, `test/security/gate-org-source.test.ts`, `test/security/audit-cluster-writers-bounded.test.ts`, `test/security/db-errors-scope.test.ts` |
+
 ## Fixed in the pre-publish security pass
 
 The 2026-09-15 code-level security audit
-(private audit archive `bros-brain/projects/enterprise/audits/`, 31 findings:
+(private audit archive, 31 findings:
 4 High, 8 Medium, 10 Low, 9 Info) ran against `feat/v0.1-package`. Everything below was fixed
 before the first publish, each with a regression test in `test/security/` that reproduces the
 audit's own exploit (failing before the fix, passing after).
@@ -879,7 +915,7 @@ org can tell the two apart, and for them the plan is not a secret.
 - **L-08** `secretsKey` is validated (`>= 32` characters) in `enterprisePreset()`, now that C-04
   makes it load-bearing.
 
-### Low — deferred (tracked for the nomi/klar pilot, none a publish blocker)
+### Low — deferred (none a publish blocker)
 
 - **L-01 — audit-write failure becomes a 500 on non-sign-in paths.** Fixing it properly means
   allocating `seq` inside the same transaction as the write, which the generic better-auth
@@ -904,7 +940,10 @@ org can tell the two apart, and for them the plan is not a secret.
   Requires a uniqueness constraint on `(domain)` among `domainVerified` providers plus a
   migration; deferred to P2. Mitigation: a domain can only become `domainVerified` by proving
   DNS control of it, so two orgs claiming the same verified domain implies control of that
-  domain by both.
+  domain by both. **Since 1.1.0** a second organization can no longer register or verify a
+  domain another one verified (`409 SSO_DOMAIN_TAKEN`), policy resolution uses every matching
+  organization (`findOrgsByEmailDomain`), and e-mail SSO sign-in is pinned only when one
+  organization holds the domain; rows written before 1.1.0 are left as they are and logged.
 
 ### Info items adopted without a finding
 

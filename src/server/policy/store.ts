@@ -336,9 +336,9 @@ export async function twoFactorEnrollmentState(
 /**
  * Epoch milliseconds from a stored timestamp, whatever unit and type the
  * adapter hands back, or `null` when it cannot be read. Products keep these
- * columns in different units — klar's and dispatch's `session.created_at` is
- * Drizzle `mode: "timestamp"` (whole **seconds**, read back as a `Date`
- * whose milliseconds are 0), their `member.createdAt` and `org_policy.
+ * columns in different units — a `session.created_at` declared as Drizzle
+ * `mode: "timestamp"` holds whole **seconds** (read back as a `Date`
+ * whose milliseconds are 0), while `member.createdAt` and `org_policy.
  * updated_at` are milliseconds — so:
  *
  * - a `Date` is taken as is;

@@ -15,8 +15,8 @@
 -- The new value keeps the column's unit — whole seconds, milliseconds, or an
 -- ISO-8601 string — and is rounded **up** (to the next second, or the next
 -- millisecond), so no session created before the statement ran can read as
--- later than it. Only rows with `require_2fa = 1` are touched (production had
--- none on 2026-09-26, where this is a no-op).
+-- later than it. Only rows with `require_2fa = 1` are touched (where there
+-- are none, this is a no-op).
 --
 -- Run it once, as part of the upgrade: through
 -- `ab-enterprise migrate --out <folder> --from 0003` from any 1.0.x install,

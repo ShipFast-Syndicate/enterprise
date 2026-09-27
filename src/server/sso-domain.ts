@@ -38,8 +38,8 @@
 //   ranks first (most specific matched domain, then `providerId`), but only
 //   when every provider at that specificity belongs to one org; otherwise
 //   upstream's own lookup is left alone and the ambiguity is logged
-//   (legacy data written before uniqueness was enforced — see §6 of the
-//   upgrade notes in `docs/security.md`).
+//   (legacy data written before uniqueness was enforced — see the
+//   pre-upgrade checks in `docs/upgrading-to-1.1.md`).
 //
 // `trustedOrigins` was documented as the way to control which IdPs an org
 // admin may point a provider at. It is not: it is better-auth's SSRF

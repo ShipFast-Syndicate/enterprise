@@ -535,18 +535,14 @@ export function apiKeyLifecycle(
 
 /**
  * The only better-auth endpoint a request carrying an API key may reach
- * over HTTP — an allow-list, not a deny-list (verifier round 3, F6/F7: a
- * deny-list is fail-open for every endpoint it does not know, and
- * `/list-sessions` handed a key the owner's raw session tokens while a
- * `jwt()` or `oneTimeToken()` plugin a product adds minted a fresh
- * credential from a key). Built from what the fleet products actually do
- * with a key (2026-09-26, read-only survey of the seven `enterprisePreset`
- * integrators — evidence table in the fork PR and plan §6): every one of
- * them calls `auth.api.getSession({ headers })` with the incoming request's
- * headers (which is where an `x-api-key` header reaches this package) and
- * none opts into the mock session. Nothing else: not the organization,
- * provider, account or key *reads* rounds 2–3 allow-listed (no product
- * reads them with a key; a key's owner resolves through `/get-session`),
+ * over HTTP — an allow-list, not a deny-list: a deny-list is fail-open for
+ * every endpoint it does not know (`/list-sessions` returns the owner's raw
+ * session tokens; a `jwt()` or `oneTimeToken()` plugin a product adds mints
+ * a fresh credential). Built from how integrators use a key: they call
+ * `auth.api.getSession({ headers })` with the incoming request's headers
+ * (which is where an `x-api-key` header reaches this package). Nothing
+ * else: not the organization, provider, account or key *reads* (a key's
+ * owner resolves through `/get-session`),
  * not sign-in flows (no key is ever sent to them), not any endpoint of a
  * plugin added later. Widening this set is a reviewed change to this
  * package, on evidence, never a per-product option — that is the point.

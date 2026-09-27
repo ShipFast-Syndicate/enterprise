@@ -280,8 +280,8 @@ function withoutBreakpoints(sql: string): string {
  * content, breakpoint markers aside, is the package file's own. Every release
  * of this command wrote exactly that (`0001` has not changed since 0.1.0), so
  * a folder it wrote into is recognised; nothing else is — not a product's own
- * migration that created the same tables under another name (a pilot's
- * `0010_enterprise_pilot.sql`), not a hand-edited copy under the emitted
+ * migration that created the same tables under another name (a product's
+ * own `NNNN_enterprise_pilot.sql`), not a hand-edited copy under the emitted
  * name. The command cannot prove what such a file applied, so it never
  * guesses: see `cmdMigrate` for what it does instead.
  */
@@ -314,9 +314,9 @@ function emissionState(outDir: string, file: string): EmissionState {
 /**
  * `.sql` files in the folder whose name mentions `enterprise` but that are
  * not a proven emission of any package migration — typically the migration
- * a product wrote itself when it first adopted this package (klar
- * `0010_enterprise_pilot.sql`, dispatch `0011`, nomi `0023` + `0024_scim_1_7`,
- * …). Its tables are already in the database; emitting `0001`/`0002` next to
+ * a product wrote itself when it first adopted this package (e.g. a
+ * hand-written `NNNN_enterprise_pilot.sql`, possibly followed by its own copy
+ * of `0002`). Its tables are already in the database; emitting `0001`/`0002` next to
  * it would re-run their `ALTER TABLE`s and fail the product's migrator.
  */
 function unprovenEnterpriseFiles(outDir: string): string[] {

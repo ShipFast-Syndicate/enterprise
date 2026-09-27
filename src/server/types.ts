@@ -12,7 +12,7 @@ export type Feature = "sso" | "scim" | "audit_log" | "enforce_2fa" | "api_keys" 
 export type ResolveEntitlements = (orgId: string) => Promise<Iterable<Feature>>;
 
 export interface EnterpriseOptions {
-  /** Product slug this deployment belongs to, e.g. "klar". */
+  /** Product slug this deployment belongs to, e.g. "my-app". */
   product: string;
   /** Resolves the set of features an org is entitled to (billing/plan lookup). */
   resolveEntitlements: ResolveEntitlements;
@@ -224,7 +224,9 @@ export interface EnterpriseOptions {
      * This is the supported way to opt in: the preset builds the upstream
      * plugin with the enterprise validator, header list and expiry bound
      * already in place. A key authenticates to `API_KEY_ALLOWED_PATHS` only
-     * (`/get-session` and `/api-key/verify`); every other endpoint —
+     * (`/get-session` over HTTP) plus upstream's own server-side
+     * `auth.api.verifyApiKey` call, which has no HTTP route; every other
+     * endpoint —
      * management, credential minting, every write, every other read and any
      * endpoint of a plugin you add — answers `403 API_KEY_NOT_ALLOWED_HERE`
      * whichever way the key is carried (`isApiKeyRefusedPath` in

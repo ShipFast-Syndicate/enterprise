@@ -111,7 +111,7 @@ export const VERIFIED_PROVIDER_SCAN_MAX = 5000;
  * `logger.error`) on every path that needs the answer — read and write —
  * rather than a silently truncated match set that could let an unmatched
  * domain through. An indexed exact-domain query is the follow-up for that
- * scale; no pilot is near it.
+ * scale; no known deployment is near it.
  */
 export async function listVerifiedProviders(
   ctx: GenericEndpointContext,

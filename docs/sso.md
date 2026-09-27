@@ -154,8 +154,10 @@ Forms:
   issuer's origin, or match an entry — by its full value or by its origin.
   An IdP that serves endpoints from several origins needs those origins
   listed (Google, for instance, issues from `https://accounts.google.com`
-  but exchanges tokens at `https://oauth2.googleapis.com`). For SAML, list
-  the IdP's `entityID` and entry-point origin, **and pin its certificates
+  but exchanges tokens at `https://oauth2.googleapis.com`). For SAML, the
+  provider's `issuer` string — the service provider's id under upstream —
+  must itself match an entry like any issuer; list it, the IdP's
+  `entityID` and entry-point origin, **and pin its certificates
   — fail closed**: with an array allow-list, a SAML provider whose entity
   id has no pins (including the case where `samlCertificateFingerprints`
   is not set at all), one of whose certificates is not pinned, or from
@@ -179,7 +181,8 @@ after providers were registered also refuses the rows written before. A
 refusal at write time is `403 SSO_ISSUER_NOT_ALLOWED` and nothing is stored;
 at sign-in no session is minted, the callback redirects with
 `error=SSO_ISSUER_NOT_ALLOWED`, and the attempt is audited as
-`auth.sso_sign_in_failed` like every other SSO refusal (the refused row's
+`auth.sign_in_refused` (`metadata.code: "SSO_ISSUER_NOT_ALLOWED"`) in the
+provider's organization, like every other policy refusal (the refused row's
 `providerId` is logged at warn so it can be fixed or removed). Absent,
 anything is accepted (upstream behaviour).
 
@@ -235,16 +238,12 @@ entry).
 answer `409 SSO_DOMAIN_TAKEN` when the domain list overlaps — equal, or a
 subdomain in either direction — a domain **another** organization has
 already verified. The refusal names only the caller's own colliding entries,
-never the other organization's verified list (a tenant who registers one
-domain it happens to know must not learn every domain the victim org has
-verified). An org may register several providers for its own domains.
-The check is at verification time too, so a provider registered _before_
-another org verified the same domain cannot be verified afterwards. Upstream
-never checked this: any tenant could register a second, unverified provider
-for a domain some other org had verified, and because upstream's e-mail
+never the other organization's verified list. An org may register several
+providers for its own domains. The check is at verification time too, so a
+provider registered _before_ another org verified the same domain cannot be
+verified afterwards. Upstream does not check this, and its e-mail
 `/sign-in/sso` resolves the provider with an exact `findOne({ domain })`
-over unverified rows too, the squat row won that lookup and broke the
-legitimate org's e-mail sign-in ("domain has not been verified").
+that also considers unverified rows — hence the pinning below.
 
 **E-mail sign-in is pinned.** `POST /sign-in/sso { email }` (or `{ domain }`)
 without a `providerId` is pinned by this layer to the verified provider that
@@ -323,18 +322,17 @@ behaviour, unchanged).
 An SSO sign-in is honoured only when the signing provider is domain-verified
 **for the user's e-mail domain** — applied at JIT user creation _and_ at
 every session an SSO callback mints (`src/server/policy/sso-jit.ts`,
-`src/server/policy/enforcement.ts`). Upstream `@better-auth/sso` does not
-bind the create branch: a tenant's verified IdP could assert `ceo@acme.test`
-and mint that account on the deployment — locking the real user out of their
-own IdP (the account is linked to the wrong provider), satisfying acme's
-`ssoEnforced`, and accepting acme's invitations. The fix:
+`src/server/policy/enforcement.ts`). Upstream `@better-auth/sso` binds
+account _linking_ to a trusted provider but not account _creation_; this
+layer binds both, and every session a callback mints:
 
 - **`SSO_DOMAIN_NOT_ALLOWED`** (the callback redirects with
   `error=SSO_DOMAIN_NOT_ALLOWED`): the provider is not verified for that
   e-mail domain. No user row is written (the callback's transaction rolls
   back) and no session is minted. This applies to _existing_ users too — an
-  `account` row that a foreign IdP linked before the upgrade stays in the
-  database but can no longer sign in; see the detection SQL in
+  `account` row linked before the upgrade to a provider that is not verified
+  for the user's domain stays in the database but can no longer sign in; see
+  the detection SQL in
   [`security.md`](./security.md#upgrading-from-10x).
 - **`SSO_PROVIDER_UNRESOLVED`**: the signing provider could not be named —
   neither the route's `providerId` nor the server-trusted OAuth state
@@ -345,9 +343,9 @@ own IdP (the account is linked to the wrong provider), satisfying acme's
   round-trip would prove. `sso.trustVerifiedDomainEmail: false` leaves
   upstream's own claim handling in charge (the binding still applies).
 - **`ssoEnforced`** is satisfied only by the enforcing org's **own** IdP
-  (`SSO_REQUIRED`, "through its own identity provider"): another tenant
-  flipping their org to `ssoEnforced` does not satisfy yours for a user they
-  linked to their IdP.
+  (`SSO_REQUIRED`, "through its own identity provider"): a sign-in through
+  another organization's provider does not satisfy it, whatever that
+  organization's own policy says.
 
 `sso.domainBinding: "off"` restores the upstream behaviour — every tenant's
 IdP can sign in and create any e-mail address on the deployment — and logs a
@@ -368,9 +366,9 @@ them and let them sign in with another allowed method.
 
 `/sso/register` requires `organizationId` in the body (`400 ORG_REQUIRED`
 from the gate, before any fallback to the session's active organization).
-Upstream ran its owner/admin check only when the field was present, so any
-signed-in user could create a "personal" (`organizationId: null`) provider
-claiming any domain. Such rows cannot be domain-verified through this layer,
+Upstream runs its owner/admin check only when the field is present and
+otherwise stores a "personal" (`organizationId: null`) provider; this layer
+no longer lets one be created. Existing rows cannot be domain-verified through this layer,
 are skipped by every org-scoped read, and are refused by the test-login
 finish. `/sso/update-provider` and `/sso/delete-provider` are gated on the
 `sso` entitlement of the provider's own organization, so a provider without
