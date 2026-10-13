@@ -1,0 +1,78 @@
+# Studio release profile (studio-release-profile/v1) for the @alphabros/enterprise package.
+# Package release class: the candidate is a packed tarball verified in an isolated consumer,
+# then published from a semantic-release tag on main with npm provenance.
+schema: studio-release-profile/v1
+project: enterprise
+component: "@alphabros/enterprise"
+owner: bguillaume
+repository: ShipFast-Syndicate/enterprise
+working_directory: "."
+inherits: null
+release_class: package
+source_selection:
+  kind: tag
+  selector_ref: "v* tag created by semantic-release on main (.github/workflows/release.yml, job release)"
+  revision_or_artifact_proof_ref: "npm provenance attestation (SLSA v1) linking the published tarball to the tag commit and the release.yml run"
+environments:
+  qa:
+    branch_applicability: not-applicable
+    branch_rationale_ref: "Package: no QA deployment branch. The candidate tree is packed and installed into an isolated scratch consumer."
+    branch: null
+    provider: local
+    resource_ref: "isolated scratch consumer: packed tarball + the pinned peer set from package.json peerDependencies"
+    runtime_ref: "Node >= 22 (package.json engines)"
+  production:
+    branch_applicability: required
+    branch_rationale_ref: "release.yml publishes only from a v* tag at the tip of main"
+    branch: main
+    provider: npm
+    resource_ref: "registry.npmjs.org @alphabros/enterprise, published by the npm deployment environment (required reviewer)"
+    runtime_ref: "consumer products: Node >= 22 and Cloudflare Workers with nodejs_compat (docs/sso.md)"
+runtime:
+  applicability: not-applicable
+  rationale_ref: "A library has no runtime of its own. Each consumer product verifies the package in its own runtime during its own release."
+migrations:
+  applicability: not-applicable
+  rationale_ref: "The package emits SQL into a consumer's migration folder (ab-enterprise migrate) and applies nothing itself. Each consumer release rehearses the emitted migration on its hosted engine."
+  manifest_path: src/schema/sql
+qa:
+  runner_checks_ref: ".github/workflows/ci.yml: ci / summary (contracts, node quality with tests and coverage, semgrep, trivy, gitleaks, audit, build)"
+  browser_applicability: not-applicable
+  rationale_ref: "The Lit portal has no standalone runtime: it renders only inside a host that supplies the --ab-* tokens and the auth routes. Component behaviour is covered by the happy-dom tests in test/portal; browser QA runs in each embedding product's release."
+  identity_applicability: not-applicable
+  identity_rationale_ref: "No hosted QA environment and no sign-in journey of its own"
+  tenant_project_applicability: not-applicable
+  tenant_project_rationale_ref: "No hosted QA environment"
+  cleanup_applicability: not-applicable
+  cleanup_rationale_ref: "The isolated consumer is a disposable local directory"
+  evidence_recorder_ref: "bros-brain knowledge/releases/enterprise/<release-id>/"
+  required_checks:
+    - "ci / summary green on the release PR to main"
+    - "pnpm pack tarball installs into an isolated consumer with the pinned peer set"
+    - "every export (server, schema, client, portal) and the ab-enterprise bin load from the installed tarball"
+    - "a consumer TypeScript file compiles against the published types"
+    - "registry readback after publish: version, latest dist-tag, provenance attestation"
+protection:
+  applicability: required
+  rationale_ref: "Publication is gated, not access-protected: the package is public"
+  qa_expectation_ref: null
+  production_expectation_ref: "npm environment requires reviewer bguillaume; the main rulesets require a PR and ci / summary"
+revision_proof:
+  provider_adapter: npm-provenance
+  candidate_to_artifact_ref: "npm view @alphabros/enterprise@<version> dist.attestations"
+  merge_lineage_ref: "release PR develop -> main merge commit, then the v<version> tag on main"
+backup_restore:
+  applicability: not-applicable
+  rationale_ref: "npm versions are immutable. Recovery is a new patch release plus npm deprecate of the faulty version."
+maintenance:
+  required: false
+  maximum_minutes: null
+  live_switch_applicability: not-applicable
+  live_switch_rationale_ref: "No live service"
+  scheduler_applicability: not-applicable
+  scheduler_rationale_ref: "No scheduler"
+production_acceptance:
+  automated_checks_ref: "registry readback and an install of the published version into an isolated consumer"
+  human_acceptance_ref: "maintainer confirms the release notes, the GitHub release and the advisories"
+evidence_freshness:
+  dependency_rules_ref: "Consumer checks hold for the exact tree only; any change to src/, package.json, pnpm-lock.yaml or tsup.config.ts invalidates them"
