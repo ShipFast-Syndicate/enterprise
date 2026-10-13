@@ -27,6 +27,9 @@ import {
 import type { GenericEndpointContext } from "better-auth";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
+import { orgIdSchema } from "../org-id";
+import { auditId } from "../audit/bounds";
+import { domainMatches, emailDomain, normalizeProviderDomains } from "../policy/domains";
 import { getOrgPolicy, requireOrgMember, requireOwnerOrAdmin } from "../policy/store";
 import { forwardJson, forwardToAuth, relayStatus } from "./forward";
 
@@ -126,7 +129,7 @@ function acsUrl(ctx: GenericEndpointContext, row: SsoProviderRow): string {
   return `${ctx.context.baseURL}/sso/saml2/sp/acs/${row.providerId}`;
 }
 
-const providersQuerySchema = z.object({ orgId: z.string() });
+const providersQuerySchema = z.object({ orgId: orgIdSchema });
 
 function buildProvidersEndpoint() {
   return createAuthEndpoint(
@@ -185,7 +188,7 @@ function buildProvidersEndpoint() {
 // re-declaring its full, evolving zod schema here — upstream is the
 // authoritative validator once forwarded (see `./forward.ts`); this schema
 // only pins down the one field *our* membership/role check needs.
-const registerBodySchema = z.object({ organizationId: z.string() }).catchall(z.unknown());
+const registerBodySchema = z.object({ organizationId: orgIdSchema }).catchall(z.unknown());
 
 /** Strips secret/private material from a (possibly error) upstream `/sso/register` JSON response before it's relayed to the portal. No-op on an error body (no `oidcConfig`/`samlConfig` keys to strip). */
 function redactRegisterResponse(data: Record<string, unknown>): Record<string, unknown> {
@@ -230,14 +233,35 @@ function buildRegisterEndpoint() {
       await requireOwnerOrAdmin(fullCtx, organizationId);
       await requireFeature(fullCtx, organizationId, "sso");
 
-      const { status, data } = await forwardJson(fullCtx, "POST", "/sso/register", ctx.body);
+      // Upstream `/sso/register` stores `domain` verbatim and matches it as a
+      // comma-separated, case-insensitive list; the enterprise read paths
+      // now match the same way (`../policy/domains.ts`, F-04). Storing the
+      // normalised form (trimmed, lower-cased, de-duplicated) keeps what an
+      // admin sees in the portal identical to what both halves match on —
+      // and refuses a list that neither half could ever match, instead of
+      // persisting a provider that silently authorises nobody.
+      const body: Record<string, unknown> = { ...ctx.body };
+      if (body.domain !== undefined) {
+        const domains =
+          typeof body.domain === "string" ? normalizeProviderDomains(body.domain) : null;
+        if (!domains) {
+          throw new APIError("BAD_REQUEST", {
+            code: "SSO_DOMAIN_INVALID",
+            message:
+              "domain must be a comma-separated list of plain hostnames (e.g. acme.test, acme-two.test).",
+          });
+        }
+        body.domain = domains.join(",");
+      }
+
+      const { status, data } = await forwardJson(fullCtx, "POST", "/sso/register", body);
       relayStatus(ctx, status);
       return ctx.json(data ? redactRegisterResponse(data) : data);
     },
   );
 }
 
-const testLoginStartBodySchema = z.object({ orgId: z.string(), providerId: z.string() });
+const testLoginStartBodySchema = z.object({ orgId: orgIdSchema, providerId: z.string() });
 
 const TEST_LOGIN_PENDING_TTL_MS = 10 * 60 * 1000;
 
@@ -313,11 +337,6 @@ function buildTestLoginStartEndpoint() {
 
 const testLoginFinishQuerySchema = z.object({ providerId: z.string() });
 
-function emailDomain(email: string): string | null {
-  const at = email.lastIndexOf("@");
-  return at === -1 ? null : email.slice(at + 1).toLowerCase();
-}
-
 // Every check on this endpoint is local, and the org it acts on is derived
 // from the **provider row**, never from the session (C-1).
 //
@@ -382,9 +401,13 @@ function buildTestLoginFinishEndpoint() {
         model: "ssoProvider",
         where: [{ field: "providerId", value: providerId }],
       });
-      const domains = (provider?.domain ?? "").split(",").map((d) => d.trim().toLowerCase());
-      const userDomain = emailDomain(session.user.email);
-      if (!provider || !userDomain || !domains.includes(userDomain)) throw fail("domain_mismatch");
+      // Same matcher as every other enterprise read path (`domainMatches`,
+      // `../policy/domains.ts`): comma lists, any case, subdomains — an admin
+      // on `eu.acme.test` passes the test login for an `acme.test` provider
+      // exactly as upstream would let them sign in through it (F-04).
+      if (!provider || !domainMatches(emailDomain(session.user.email), provider.domain)) {
+        throw fail("domain_mismatch");
+      }
 
       // The org this whole request is about. `enterprisePreset` only ever
       // registers org-scoped providers, so a row without one is a hand-made
@@ -419,13 +442,19 @@ function buildTestLoginFinishEndpoint() {
       // path to forward through): `writeAudit` is `../audit/chain.ts`'s
       // public, framework-agnostic append primitive, safe to call directly.
       const { writeAudit } = await import("../audit/chain");
+      const { sessionActor } = await import("../audit/plugin");
+      const actor = sessionActor(session);
       await writeAudit(fullCtx, {
         orgId,
-        actorType: "user",
-        actorId: session.user.id,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        metadata: actor.metadata,
         action: "sso.test_login_passed",
         targetType: "sso_provider",
-        targetId: providerId,
+        // The query value, recorded the way every other provider id is: as
+        // itself when it is a short token, else `(unrecorded)`. `writeAudit`
+        // bounds the row again whatever a writer passes.
+        targetId: auditId(providerId),
       }).catch((err) => {
         ctx.context.logger.error("enterprise-api: failed to audit sso.test_login_passed", err);
       });

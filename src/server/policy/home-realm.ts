@@ -20,44 +20,33 @@
 import type { GenericEndpointContext } from "better-auth";
 import { createAuthEndpoint } from "better-auth/api";
 import * as z from "zod";
+import { findOrgsByEmailDomain } from "./domains";
+
+export { findOrgsByEmailDomain, type EmailDomainMatch } from "./domains";
 
 export const HOME_REALM_PATH = "/enterprise/home-realm";
 
-function getEmailDomain(email: string): string | null {
-  const at = email.lastIndexOf("@");
-  if (at === -1 || at === email.length - 1) return null;
-  return email.slice(at + 1).toLowerCase();
-}
-
-interface SsoProviderRow {
-  providerId: string;
-  organizationId: string | null;
-}
-
 /**
- * `ssoProvider` where `domain` = the email's domain (case-insensitive) and
- * `domainVerified` = true. `domain` is a required, non-unique field on
- * `ssoProvider` (`node_modules/@better-auth/sso/dist/index.mjs`'s schema) —
- * multiple providers could in principle claim the same verified domain, in
- * which case the first match wins; provider registration/domain-verification
- * (upstream `sso()`, gated `"sso"` by `./gate.ts`) is the place that would
- * need to prevent that ambiguity, not this read path.
+ * The first (most specific domain, then lowest `providerId`) org-scoped,
+ * domain-verified `ssoProvider` whose `domain` list authorizes the email's
+ * domain — or `null`. A thin wrapper over `findOrgsByEmailDomain`
+ * (`./domains.ts`), kept for the public export and the callers that only
+ * need one answer (this file's `/enterprise/home-realm`).
+ *
+ * Matching follows upstream `@better-auth/sso` semantics — comma-separated
+ * lists, case-insensitive, subdomains — instead of the exact, case-sensitive
+ * `findOne({domain})` it used to be (F-04), so a provider registered as
+ * `"Acme.test, acme-two.test"` now routes `x@eu.acme.test` to SSO the same
+ * way upstream's own `/sign-in/sso {email}` already did. Multiple providers
+ * can still claim overlapping verified domains; preventing that ambiguity is
+ * the registration path's job, not this read path's.
  */
 export async function findOrgByEmailDomain(
   ctx: GenericEndpointContext,
   email: string,
 ): Promise<{ orgId: string; providerId: string } | null> {
-  const domain = getEmailDomain(email);
-  if (!domain) return null;
-  const provider = await ctx.context.adapter.findOne<SsoProviderRow>({
-    model: "ssoProvider",
-    where: [
-      { field: "domain", value: domain },
-      { field: "domainVerified", value: true },
-    ],
-  });
-  if (!provider?.organizationId) return null;
-  return { orgId: provider.organizationId, providerId: provider.providerId };
+  const first = (await findOrgsByEmailDomain(ctx, email))[0];
+  return first ? { orgId: first.orgId, providerId: first.providerId } : null;
 }
 
 const homeRealmBodySchema = z.object({ email: z.email() });

@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1750000000000,
+      "tag": "0000_base",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790459760899,
+      "tag": "0001_enterprise",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790459820899,
+      "tag": "0002_scim_1_7",
+      "breakpoints": true
+    }
+  ]
+}

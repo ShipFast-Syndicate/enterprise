@@ -15,6 +15,7 @@ import { drizzle } from "drizzle-orm/libsql";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import { applyMigration, enterpriseSchema } from "../../src/schema";
 import { enterprisePreset } from "../../src/server/preset";
+import { flushAuditWrites } from "../../src/server/audit/background";
 import type { EnterpriseOptions, Feature } from "../../src/server/types";
 
 const databases: { client: Client; directory: string }[] = [];
@@ -41,7 +42,14 @@ function sqlColumnType(type: string): string {
   return type === "number" || type === "boolean" || type === "date" ? "INTEGER" : "TEXT";
 }
 
-function buildDynamicSchema(authOptions: BetterAuthOptions) {
+export interface DynamicSchema {
+  // One distinctly-typed `sqliteTable` per model — see `buildDynamicSchema`.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  drizzleSchema: Record<string, any>;
+  ddl: string[];
+}
+
+function buildDynamicSchema(authOptions: BetterAuthOptions): DynamicSchema {
   const tables = getAuthTables(authOptions);
   // Each `sqliteTable(...)` call below returns a distinctly-shaped type (its
   // own column set), so the map that collects them across every model can't
@@ -183,6 +191,25 @@ export async function makeAuth(
     // caller (better-auth defaults `trustedOrigins` to just the configured
     // `baseURL` when this is omitted).
     trustedOrigins?: string[];
+    // Replaces the preset's upstream `api-key` plugin in place (same slot,
+    // same order) — for `test/security/gap1-api-keys.test.ts`'s opt-in
+    // `enableSessionForAPIKeys` recipe. Appending a second `apiKey()` via
+    // `plugins` would register every `/api-key/*` endpoint twice.
+    apiKeyPlugin?: BetterAuthPlugin;
+    // Extra `rateLimit.customRules` merged over `TEST_RATE_LIMIT`'s — for a
+    // file that drives one plugin-rate-limited path (upstream `twoFactor()`
+    // caps `/two-factor/*` at 3 per 10 s per IP, and the limiter's store is
+    // shared across every `makeAuth()` of a file) more often than the
+    // plugin's own rule allows, the same way the sign-in special rule is
+    // relaxed above. Custom rules always win for a matching path.
+    rateLimitCustomRules?: NonNullable<BetterAuthOptions["rateLimit"]>["customRules"];
+    // Replaces tables of the derived schema before the database is built —
+    // for `./product-auth.ts`, which swaps in hand-maintained product tables
+    // (a `session` without any plugin-declared column, seconds timestamps)
+    // the way every product's Drizzle schema actually looks. Receives the
+    // drizzle table map (keyed by model name) and the upstream DDL list; the
+    // package's own `applyMigration` still runs afterwards.
+    tables?: (built: DynamicSchema) => DynamicSchema;
   } = {},
 ) {
   const entitled = new Set<Feature>([
@@ -193,23 +220,40 @@ export async function makeAuth(
     "api_keys",
     "teams",
   ]);
+  const {
+    apiKeyPlugin,
+    plugins: extraPlugins,
+    trustedOrigins,
+    rateLimitCustomRules,
+    tables,
+    ...enterpriseOverrides
+  } = overrides;
   const opts: EnterpriseOptions = {
     product: "test",
     secretsKey: "s".repeat(32),
     scimCredentialHashSecret: "catalog-test-key-".repeat(3),
     resolveEntitlements: async () => entitled,
-    ...overrides,
+    ...enterpriseOverrides,
   };
+  const presetPlugins = enterprisePreset(opts).map((plugin) =>
+    apiKeyPlugin && plugin.id === "api-key" ? apiKeyPlugin : plugin,
+  );
   const baseOptions: BetterAuthOptions = {
     secret: "x".repeat(32),
     baseURL: "http://localhost:3000",
     emailAndPassword: { enabled: true },
-    rateLimit: TEST_RATE_LIMIT,
-    plugins: [...enterprisePreset(opts), ...(overrides.plugins ?? [])],
-    ...(overrides.trustedOrigins ? { trustedOrigins: overrides.trustedOrigins } : {}),
+    rateLimit: rateLimitCustomRules
+      ? {
+          ...TEST_RATE_LIMIT,
+          customRules: { ...TEST_RATE_LIMIT.customRules, ...rateLimitCustomRules },
+        }
+      : TEST_RATE_LIMIT,
+    plugins: [...presetPlugins, ...(extraPlugins ?? [])],
+    ...(trustedOrigins ? { trustedOrigins } : {}),
   };
 
-  const { drizzleSchema, ddl } = buildDynamicSchema(baseOptions);
+  const derived = buildDynamicSchema(baseOptions);
+  const { drizzleSchema, ddl } = tables ? tables(derived) : derived;
   // Interactive libsql transactions use separate connections; file-backed SQLite
   // keeps the same database visible after commit. Each test gets its own file.
   const directory = mkdtempSync(join(tmpdir(), "enterprise-auth-"));
@@ -220,6 +264,19 @@ export async function makeAuth(
     database: drizzleAdapter(db, { provider: "sqlite", transaction: true }),
     ...baseOptions,
   });
+  // Audit rows about an address the caller chose (failed/refused/2FA-pending
+  // sign-ins, magic-link and password-reset requests) are written off the
+  // response path (`src/server/audit/background.ts`). The test handler waits
+  // for them after every response — what a product's
+  // `advanced.backgroundTasks` (e.g. `waitUntil`) does for the runtime — so
+  // assertions read a settled chain; `rawHandler` answers without waiting,
+  // for the tests that measure exactly that.
+  const rawHandler = auth.handler.bind(auth);
+  auth.handler = async (request: Request) => {
+    const response = await rawHandler(request);
+    await flushAuditWrites();
+    return response;
+  };
   await applyMigrations(ddl, client);
   // Real migration (ruling (a)): creates org_policy/audit_event/scim_group
   // and adds the two studio_ref columns, now that user/organization exist.
@@ -294,7 +351,7 @@ export async function makeAuth(
       ),
   };
 
-  return { auth, db, client, api, entitled };
+  return { auth, db, client, api, entitled, rawHandler };
 }
 
 export type TestAuth = Awaited<ReturnType<typeof makeAuth>>;

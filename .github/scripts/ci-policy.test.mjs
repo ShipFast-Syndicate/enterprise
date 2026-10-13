@@ -78,15 +78,17 @@ test("only documented event skips are accepted", () => {
   needs.base.result = "skipped";
   needs.release.result = "skipped";
   for (const eventName of ["push", "workflow_dispatch"]) checkSummary(needs, { eventName });
+  needs.base.result = "success";
+  const dependabot = { eventName: "pull_request", author: "dependabot[bot]", base: "develop" };
+  checkSummary(needs, dependabot);
+  // Dependency updates run the Node quality job too; a skipped one never passes.
   needs.node.result = "skipped";
   assert.throws(() => checkSummary(needs, { eventName: "push", author: "dependabot[bot]" }));
-  needs.base.result = "success";
-  checkSummary(needs, { eventName: "pull_request", author: "dependabot[bot]", base: "develop" });
+  assert.throws(() => checkSummary(needs, dependabot));
   assert.throws(() => checkSummary(needs, { ...event, base: "develop" }));
+  needs.node.result = "success";
   needs.audit.result = "skipped";
-  assert.throws(() =>
-    checkSummary(needs, { eventName: "pull_request", author: "dependabot[bot]", base: "develop" }),
-  );
+  assert.throws(() => checkSummary(needs, dependabot));
 });
 
 test("release requires both current exact-head QA states, never an old success", () => {
@@ -233,7 +235,8 @@ const workflow = parse(
 const publicActions = new Set([
   "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
   "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
-  "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
+  // Verified upstream signed v6.1.0 tag d9184bf108216479bc5a137cc391f4d7b14c870b.
+  "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413",
   "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
   "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
 ]);
@@ -257,6 +260,16 @@ test("public release uses a local job and confines registry authority to protect
   }
   const token = release.jobs.release.steps.find((step) => step.id === "release-token");
   assert.equal(token.with.repositories, "${{ github.event.repository.name }}");
+  // The minted token must request an explicit, minimal permission set; without
+  // any `permission-*` input it would inherit every installation permission.
+  const requested = Object.fromEntries(
+    Object.entries(token.with).filter(([key]) => key.startsWith("permission-")),
+  );
+  assert.deepEqual(requested, {
+    "permission-contents": "write",
+    "permission-issues": "write",
+    "permission-pull-requests": "write",
+  });
   const checkout = release.jobs.release.steps.find((step) =>
     step.uses?.startsWith("actions/checkout@"),
   );
@@ -277,10 +290,7 @@ function assertClosure(caller, workflow) {
     for (const permission of Object.values(configuration.permissions ?? {}))
       assert.equal(permission, "read");
   }
-  assert.equal(
-    workflow.jobs.node.if,
-    "github.event_name != 'pull_request' || github.event.pull_request.user.login != 'dependabot[bot]'",
-  );
+  assert.equal(workflow.jobs.node.if, undefined);
   assert.equal(workflow.jobs.base.if, "github.event_name == 'pull_request'");
   assert.equal(
     workflow.jobs.release.if,
@@ -290,7 +300,7 @@ function assertClosure(caller, workflow) {
     assert.equal(job["runs-on"], "ubuntu-latest");
     assert.equal(job.uses, undefined);
     assert.equal(job["continue-on-error"], undefined);
-    if (!["node", "base", "release", "summary"].includes(name)) assert.equal(job.if, undefined);
+    if (!["base", "release", "summary"].includes(name)) assert.equal(job.if, undefined);
     for (const step of job.steps) {
       assert.equal(step["continue-on-error"], undefined);
       if (step.uses) assert.ok(publicActions.has(step.uses), `Unverified action: ${step.uses}`);

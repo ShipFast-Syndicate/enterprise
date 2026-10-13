@@ -1,0 +1,21 @@
+name: Dependabot Auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+  actions: read
+
+jobs:
+  automerge:
+    uses: ./.github/workflows/dependabot-merge-gate.yml
+    with:
+      runs-on: '["ubuntu-latest"]'

@@ -1,7 +1,7 @@
 // Alpha Bros enterprise layer — migration runner.
 //
-// `applyMigration` executes `sql/0001_enterprise.sql`'s statements against
-// a live client. The `CREATE TABLE`/`CREATE INDEX` statements are plain
+// `applyMigration` executes every `MIGRATION_FILES` entry's statements, in
+// order, against a live client. The `CREATE TABLE`/`CREATE INDEX` statements are plain
 // `IF NOT EXISTS` and safe to re-run as-is; the two `ALTER TABLE … ADD
 // COLUMN studio_ref` statements are not — SQLite has no `ADD COLUMN IF NOT
 // EXISTS` — so each is guarded here with a `PRAGMA table_info` check first
@@ -26,7 +26,18 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export function migrationFilePath(file = "0001_enterprise.sql"): string {
+/**
+ * Every migration this package ships, in the order they apply — the one list
+ * `applyMigration` runs and `ab-enterprise migrate --out` emits (`../cli`).
+ * `0003_require2fa.sql` is data only (see its header).
+ */
+export const MIGRATION_FILES = [
+  "0001_enterprise.sql",
+  "0002_scim_1_7.sql",
+  "0003_require2fa.sql",
+] as const;
+
+export function migrationFilePath(file: string = MIGRATION_FILES[0]): string {
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [join(here, "sql", file), join(here, "..", "..", "sql", file)];
   const found = candidates.find((candidate) => existsSync(candidate));
@@ -119,9 +130,9 @@ async function tableInfo(client: Client, table: string) {
 }
 
 export async function applyMigration(client: Client): Promise<void> {
-  const sql = ["0001_enterprise.sql", "0002_scim_1_7.sql"]
-    .map((file) => readFileSync(migrationFilePath(file), "utf8"))
-    .join("\n");
+  const sql = MIGRATION_FILES.map((file) => readFileSync(migrationFilePath(file), "utf8")).join(
+    "\n",
+  );
 
   for (const statement of splitStatements(sql)) {
     const addColumn = ADD_COLUMN_STATEMENT.exec(statement);

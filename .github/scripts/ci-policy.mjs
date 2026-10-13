@@ -31,9 +31,6 @@ export function checkSummary(needs, event) {
   for (const job of requiredJobs) {
     const result = needs[job]?.result;
     const deliberateSkip =
-      (job === "node" &&
-        event.eventName === "pull_request" &&
-        event.author === "dependabot[bot]") ||
       (job === "base" && event.eventName !== "pull_request") ||
       (job === "release" && (event.eventName !== "pull_request" || event.base !== "main"));
     if (result !== "success" && !(result === "skipped" && deliberateSkip)) {

@@ -88,6 +88,10 @@ describe("<ab-api-keys>", () => {
     const form = el.shadowRoot!.querySelector("form")!;
     form.querySelector<HTMLInputElement>('[name="name"]')!.value = "CI";
     const select = form.querySelector<HTMLSelectElement>('[name="expiresIn"]')!;
+    // Keys expire by default (90 days, matching the server's default) — the
+    // form never pre-selects "no expiry".
+    expect(select.value).toBe(String(90 * 24 * 60 * 60));
+    expect([...select.options].map((o) => o.textContent)).not.toContain("No expiry");
     select.value = String(30 * 24 * 60 * 60);
     form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
 
@@ -110,7 +114,7 @@ describe("<ab-api-keys>", () => {
     expect(el.shadowRoot!.textContent).toContain("CI");
   });
 
-  it("create with no name/expiry omits both fields from the body", async () => {
+  it("create with no name and the 'Server default' lifetime omits both fields from the body", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(200, { apiKeys: [], total: 0 }))
@@ -122,6 +126,9 @@ describe("<ab-api-keys>", () => {
     await vi.waitFor(() => expect(el.shadowRoot!.querySelector("form")).not.toBeNull());
 
     const form = el.shadowRoot!.querySelector("form")!;
+    // The form defaults to 90 days now; "Server default" (`""`) is the one
+    // entry that leaves the lifetime to `apiKeys.defaultExpiresInS`.
+    form.querySelector<HTMLSelectElement>('[name="expiresIn"]')!.value = "";
     form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
 
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));

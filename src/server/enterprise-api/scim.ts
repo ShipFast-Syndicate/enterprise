@@ -5,11 +5,12 @@ import type { GenericEndpointContext } from "better-auth";
 import type { SCIMPlugin } from "@better-auth/scim";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
+import { orgIdSchema } from "../org-id";
 import { requireOwner, requireOwnerOrAdmin } from "../policy/store";
 import { scimConnectionLabel as label } from "../scim-connection";
 import { writeAudit } from "../audit/chain";
+import { sessionActor } from "../audit/plugin";
 
-const orgIdSchema = z.string().min(1).max(100);
 const body = z.object({ orgId: orgIdSchema, providerId: z.string().trim().min(1).max(64) });
 const scopes = [
   "scim.users.read",
@@ -99,10 +100,12 @@ function mintEndpoint(rotate: boolean) {
             },
           });
         }
+        const actor = sessionActor(ctx.context.session);
         await writeAudit(full, {
           orgId,
-          actorType: "user",
-          actorId: policy.actorId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          metadata: actor.metadata,
           action: rotate ? "scim.token_rotated" : "scim.token_created",
           targetType: "scim_connection",
           targetId: result.connection.connectionId,
@@ -155,7 +158,8 @@ export function buildScimEndpoints() {
       async (ctx) => {
         const full = ctx as unknown as GenericEndpointContext;
         const { orgId, providerId } = ctx.body;
-        await authorize(full, orgId);
+        // F-07: decommission is owner-only (see `../gate.ts` OWNER_ONLY_PATHS).
+        await authorize(full, orgId, true);
         const connection = await findConnection(full, orgId, providerId);
         const result = await api(full).decommissionSCIMManagedConnection({
           body: {
@@ -169,8 +173,8 @@ export function buildScimEndpoints() {
         if (connection.status === "active")
           await writeAudit(full, {
             orgId,
-            actorType: "user",
-            actorId: ctx.context.session.user.id,
+            // Impersonation-aware (F-12): `actorType`, `actorId`, `metadata`.
+            ...sessionActor(ctx.context.session),
             action: "scim.token_revoked",
             targetType: "scim_connection",
             targetId: connection.connectionId,

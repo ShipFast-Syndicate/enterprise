@@ -32,9 +32,16 @@ machine (`WizardStep` in `src/portal/ab-sso-wizard.ts`):
    on**, so an org can never lock itself out of its own SSO setup.
 6. **`done`**.
 
-Every step writes an `audit_event` row (via the underlying
-`/enterprise/sso/*` endpoints and `/enterprise/policy/set`, both wrapped by
-`auditLog()`).
+Every step that changes something writes an `audit_event` row into the
+provider's own organization — whatever organization the admin's session has
+active: `sso.provider_registered` (step 2, via `/sso/register`),
+`sso.domain_verification_requested` and `sso.domain_verified` (step 3),
+`sso.test_login_passed` (step 4) and `policy.updated` (step 5). Later changes
+to the provider are recorded too (`sso.provider_updated` with the changed keys,
+never a value; `sso.provider_deleted` with the number of linked accounts it took
+with it), and every SSO sign-in lands in the provider's org and the user's own
+(`auth.sso_sign_in`, `auth.sso_sign_in_failed`, `auth.sign_in_refused`) — see
+`docs/security.md`, "Audit log coverage".
 
 ### Who may do which step
 
@@ -64,7 +71,7 @@ message) are shown **only** in the `test-login` step, per the design's error
 handling rule — every other step renders through the same generic error UI
 every other portal component uses.
 
-## Trust the OIDC provider origin
+## OIDC provider origins (`trustedOrigins`) and the issuer allow-list
 
 Better Auth 1.7 validates the discovery URL and the endpoint origins advertised
 by its discovery document against the application's trusted origins. Before
@@ -80,11 +87,172 @@ Include any additional origins used by the provider's discovery endpoints,
 and deploy the configuration to the environment where registration will run.
 The application's own origin remains trusted automatically.
 
-Entering an issuer in the portal does not grant it server-side trust. An
-`Untrusted OIDC discovery URL` response means the operator must review and
-configure that origin. Keep the allowlist narrow: these are Better Auth trust
-settings, and explicitly trusting private-network IdPs also changes their SSRF
-validation boundary. Do not use a wildcard to make arbitrary issuers pass.
+**`trustedOrigins` is not an issuer allow-list.** It is Better Auth's SSRF
+boundary for the discovery and token/JWKS endpoints a provider points at (an
+`Untrusted OIDC discovery URL` response means an operator must review and
+configure that origin), and it doubles as Better Auth's redirect/callback
+allow-list. The `issuer` an org admin enters is stored as entered, and a
+provider whose endpoints already sit on a trusted origin (or that skips
+discovery with explicit endpoints) registers whatever its issuer string says.
+Keep the list narrow — explicitly trusting private-network IdPs also changes
+their SSRF validation boundary, and every origin on it is also a permitted
+redirect target — but do not rely on it to restrict _which_ IdPs tenants may
+use.
+
+To restrict which identity providers tenants may register, set
+`sso.allowedIssuers` on `EnterpriseOptions`: an array of exact strings
+and/or `RegExp`s, or a predicate
+`(issuer, { organizationId, endpoints, samlCertFingerprints }) => boolean | Promise<boolean>`.
+
+The list binds the **IdP**, not merely the `issuer` string — and what
+"the IdP" is differs by protocol:
+
+- **OIDC.** Upstream verifies an id_token's `iss` against the stored issuer
+  but fetches the signing keys from the tenant-supplied `jwksEndpoint`, so
+  a tenant allowed to write `issuer: "https://idp.allowed.example"` could
+  point every endpoint (`skipDiscovery`) at an IdP of their own and sign in
+  through it under the "allowed" string. The list is applied to the issuer
+  **and** to `discoveryEndpoint`, `authorizationEndpoint`, `tokenEndpoint`,
+  `jwksEndpoint` and `userInfoEndpoint`. The endpoints _are_ the trust
+  root: whoever serves the JWKS signs the tokens.
+- **SAML.** The trust root is the **signing certificate**, not a URL. An
+  assertion is verified against the certificate the tenant supplied —
+  inline (`cert`, `idpMetadata.cert`) or embedded in an
+  `idpMetadata.metadata` document — so a tenant can claim an allowed
+  `entityID` and `entryPoint` word for word while supplying a keypair of
+  their own, and the URL strings alone would let that through. The list is
+  applied to the issuer (which upstream treats as the _service provider's_
+  id), `entryPoint`, `idpMetadata.entityID`, the
+  `singleSignOnService`/`singleLogoutService` locations and the
+  `entityID`/locations inside a metadata document, **and every
+  certificate the configuration carries must be pinned**:
+  `sso.samlCertificateFingerprints` maps the IdP's entity id
+  (`idpMetadata.entityID`, or the metadata document's `entityID`) to the
+  SHA-256 fingerprints of its signing certificates (DER form — what
+  `openssl x509 -in idp.pem -noout -fingerprint -sha256` prints; hex,
+  colons optional, case-insensitive). The set that must be pinned is not
+  re-derived by a parser of this layer's own: it is the **union** of (a)
+  the signing certificates samlify itself returns for the configuration —
+  built with the same `IdentityProvider(...)` inputs `@better-auth/sso`
+  uses at the ACS (the metadata document when `idpMetadata.metadata` is
+  set, otherwise `idpMetadata.cert`, falling back to `cert`) and read back
+  with `getX509Certificate("signing")` — and (b) every certificate the
+  configuration carries in a signing position: `cert`, `idpMetadata.cert`
+  and each `KeyDescriptor` of the metadata document with `use="signing"`
+  or no `use`. A `use="encryption"` descriptor is left out only when
+  samlify does not treat it as a signing certificate — samlify reads a
+  document with a single `KeyDescriptor` as one shared certificate for
+  both uses whatever its `use` says, so a lone `encryption` descriptor is
+  pinned like any other. When samlify cannot build the IdP from the
+  configuration, or returns no signing certificate, the provider is refused
+  (fail closed). List every certificate during a rotation.
+
+Forms:
+
+- **Array form.** The issuer must match an entry (exact string, or a
+  `RegExp` test). Each endpoint must then be the issuer itself, sit on the
+  issuer's origin, or match an entry — by its full value or by its origin.
+  An IdP that serves endpoints from several origins needs those origins
+  listed (Google, for instance, issues from `https://accounts.google.com`
+  but exchanges tokens at `https://oauth2.googleapis.com`). For SAML, the
+  provider's `issuer` string — the service provider's id under upstream —
+  must itself match an entry like any issuer; list it, the IdP's
+  `entityID` and entry-point origin, **and pin its certificates
+  — fail closed**: with an array allow-list, a SAML provider whose entity
+  id has no pins (including the case where `samlCertificateFingerprints`
+  is not set at all), one of whose certificates is not pinned, or from
+  which no certificate can be read, is refused. The pins are ignored
+  without an allow-list.
+- **Predicate form.** Called once with the issuer and
+  `{ organizationId, endpoints, samlCertFingerprints }` (the fingerprints
+  normalised to lowercase hex, empty for OIDC) and decides alone; a throw
+  or a non-`true` verdict refuses. Unreadable endpoints or certificates
+  are refused before the predicate is consulted.
+
+It is checked on `/sso/register`; on `/sso/update-provider` whenever
+`issuer`, `oidcConfig` or `samlConfig` is sent — against the provider as it
+would be stored after the update, so an endpoint swap with the issuer
+untouched, an issuer change over endpoints the list no longer covers, or a
+SAML certificate swap (`cert`, `idpMetadata.cert`, or a replaced metadata
+document) is refused; **and at every SSO sign-in against the stored row**
+(the SAML ACS and the OIDC callback, before any user row or session is
+written), so an operator who configures or tightens the list or the pins
+after providers were registered also refuses the rows written before. A
+refusal at write time is `403 SSO_ISSUER_NOT_ALLOWED` and nothing is stored;
+at sign-in no session is minted, the callback redirects with
+`error=SSO_ISSUER_NOT_ALLOWED`, and the attempt is audited as
+`auth.sign_in_refused` (`metadata.code: "SSO_ISSUER_NOT_ALLOWED"`) in the
+provider's organization, like every other policy refusal (the refused row's
+`providerId` is logged at warn so it can be fixed or removed). Absent,
+anything is accepted (upstream behaviour).
+
+The allow-list restricts _which identity providers_ may exist on the
+deployment. It is not a per-tenant control over _whose accounts_ an IdP may
+sign in — that remains [domain binding](#domain-binding-ssodomainbinding-default-verified-domain),
+which is on by default and independent of the list.
+
+```ts
+enterprisePreset({
+  // ...
+  sso: {
+    allowedIssuers: [
+      /^https:\/\/[a-z0-9-]+\.okta\.com$/,
+      "https://login.microsoftonline.com/common/v2.0",
+      // Google issues from accounts.google.com but serves its endpoints
+      // from other origins — list them.
+      "https://accounts.google.com",
+      "https://oauth2.googleapis.com",
+      "https://www.googleapis.com",
+      "https://openidconnect.googleapis.com",
+      // A SAML IdP: its entityID (upstream's `issuer` is the SP id — list
+      // that too if it differs) …
+      "https://idp.acme.example/saml",
+    ],
+    // … and the SHA-256 fingerprints of its signing certificates, keyed by
+    // that entityID. Without this entry every SAML provider claiming it is
+    // refused (fail closed).
+    samlCertificateFingerprints: {
+      "https://idp.acme.example/saml": [
+        "3A:1F:…:9C", // openssl x509 -in idp.pem -noout -fingerprint -sha256
+        "b0c4…e2", // the next certificate during a rotation
+      ],
+    },
+  },
+});
+```
+
+## Domain ownership and uniqueness
+
+A provider's `domain` is a comma-separated list of hostnames, matched
+case-insensitively and including subdomains — `acme.test` covers
+`eu.acme.test` mail. Both halves of the system (upstream's own matching and
+this layer's home-realm, policy resolution and JIT guards) apply exactly
+these rules (`src/server/policy/domains.ts`), and `/sso/register` and
+`/sso/update-provider` now store the **normalised** list (trimmed,
+lower-cased, de-duplicated, trailing dot dropped), refusing one that could
+never match (`400 SSO_DOMAIN_INVALID` — a URL, a path, whitespace inside an
+entry).
+
+**One organization per verified domain.** `/sso/register`,
+`/sso/update-provider` (when the domain changes) and `/sso/verify-domain`
+answer `409 SSO_DOMAIN_TAKEN` when the domain list overlaps — equal, or a
+subdomain in either direction — a domain **another** organization has
+already verified. The refusal names only the caller's own colliding entries,
+never the other organization's verified list. An org may register several
+providers for its own domains. The check is at verification time too, so a
+provider registered _before_ another org verified the same domain cannot be
+verified afterwards. Upstream does not check this, and its e-mail
+`/sign-in/sso` resolves the provider with an exact `findOne({ domain })`
+that also considers unverified rows — hence the pinning below.
+
+**E-mail sign-in is pinned.** `POST /sign-in/sso { email }` (or `{ domain }`)
+without a `providerId` is pinned by this layer to the verified provider that
+`findOrgsByEmailDomain` ranks first — most specific matched domain, then
+`providerId` — but only when every provider at that specificity belongs to
+one organization. If two orgs hold verified rows for the same domain (legacy
+data written before this rule), the request is left to upstream's own lookup
+and the ambiguity is logged at `warn`; de-duplicate such rows before
+upgrading (query in [`security.md`](./security.md#upgrading-from-10x)).
 
 ## DNS record
 
@@ -148,6 +316,74 @@ verified domain, the user is created and auto-joins that domain's
 organization with the default role `member` in one step. A pending
 invitation takes precedence over domain-based auto-join (upstream's own
 behaviour, unchanged).
+
+### Domain binding (`sso.domainBinding`, default `"verified-domain"`)
+
+An SSO sign-in is honoured only when the signing provider is domain-verified
+**for the user's e-mail domain** — applied at JIT user creation _and_ at
+every session an SSO callback mints (`src/server/policy/sso-jit.ts`,
+`src/server/policy/enforcement.ts`). Upstream `@better-auth/sso` binds
+account _linking_ to a trusted provider but not account _creation_; this
+layer binds both, and every session a callback mints:
+
+- **`SSO_DOMAIN_NOT_ALLOWED`** (the callback redirects with
+  `error=SSO_DOMAIN_NOT_ALLOWED`): the provider is not verified for that
+  e-mail domain. No user row is written (the callback's transaction rolls
+  back) and no session is minted. This applies to _existing_ users too — an
+  `account` row linked before the upgrade to a provider that is not verified
+  for the user's domain stays in the database but can no longer sign in; see
+  the detection SQL in
+  [`security.md`](./security.md#upgrading-from-10x).
+- **`SSO_PROVIDER_UNRESOLVED`**: the signing provider could not be named —
+  neither the route's `providerId` nor the server-trusted OAuth state
+  (the shared `/sso/callback`) identifies one, or they disagree. Fail-closed
+  canary; it should never fire on the routes this preset registers.
+- **`emailVerified: true`** on a domain-bound JIT user: the IdP owns that
+  domain and vouched for the address, which is exactly what an e-mail
+  round-trip would prove. `sso.trustVerifiedDomainEmail: false` leaves
+  upstream's own claim handling in charge (the binding still applies).
+- **`ssoEnforced`** is satisfied only by the enforcing org's **own** IdP
+  (`SSO_REQUIRED`, "through its own identity provider"): a sign-in through
+  another organization's provider does not satisfy it, whatever that
+  organization's own policy says.
+
+`sso.domainBinding: "off"` restores the upstream behaviour — every tenant's
+IdP can sign in and create any e-mail address on the deployment — and logs a
+warning naming the advisory at construction. **`"off"` is only safe when
+`sso.allowedIssuers` is configured and, for SAML,
+`sso.samlCertificateFingerprints` pins the IdP signing certificates**: with
+the binding off, which identity providers exist on the deployment is the
+only thing that limits whose accounts an IdP may sign in, and the
+allow-list with its pins is the only control over that. A second one-time
+warning is logged through the auth logger when the binding is off and
+`allowedIssuers` is not configured. It is an operator-level switch on
+purpose: a per-org allow-list of "external" domains would be controlled by
+the very tenant the binding protects against. Contractors on external mail
+domains (gmail etc.) therefore cannot use a tenant's SSO in 1.1.0; invite
+them and let them sign in with another allowed method.
+
+### Providers belong to organizations
+
+`/sso/register` requires `organizationId` in the body (`400 ORG_REQUIRED`
+from the gate, before any fallback to the session's active organization).
+Upstream runs its owner/admin check only when the field is present and
+otherwise stores a "personal" (`organizationId: null`) provider; this layer
+no longer lets one be created. Existing rows cannot be domain-verified through this layer,
+are skipped by every org-scoped read, and are refused by the test-login
+finish. `/sso/update-provider` and `/sso/delete-provider` are gated on the
+`sso` entitlement of the provider's own organization, so a provider without
+one is refused there too (`403 NOT_ORG_MEMBER`); docs/security.md, "SSO
+providers without an organization", has the operator path for such rows.
+
+### Invitations require a verified e-mail
+
+The preset sets `organization({ requireEmailVerificationOnInvitation: true })`:
+accepting or rejecting an invitation requires the session's e-mail to be
+verified (`403 EMAIL_VERIFICATION_REQUIRED_BEFORE_ACCEPTING_OR_REJECTING_INVITATION`,
+upstream's code). A domain-bound SSO user is verified and claims the invited
+role at once; a password sign-up without a verification e-mail is not. Opt
+out with `organization.requireEmailVerificationOnInvitation: false` only when
+every sign-up path in the product verifies e-mail some other way.
 
 ## Home-realm discovery (email-first login)
 

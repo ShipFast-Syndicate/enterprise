@@ -44,3 +44,14 @@ description = "Historic self-signed SAML test key pair, removed in cb6abea"
 condition = "AND"
 commits = ["c8ec57eb400f35291b04203bd79d3b44c72c3ec7"]
 paths = ['''^test/helpers/fixtures/saml-keys\.ts$''']
+
+# The built-in `generic-api-key` rule matches a test title in cd0eb5b
+# (`test/security/ghsa-policy-bypass.test.ts`, "classifies sign-up as
+# password, 2FA/impersonation as continuations, …"): prose next to the word
+# "password", not a credential. History is scanned, so the commit stays
+# reachable. Same narrowing as above: that path at that commit only.
+[[allowlists]]
+description = "Test-title prose matched by generic-api-key in cd0eb5b"
+condition = "AND"
+commits = ["cd0eb5b517b473e056a40c48c69d0045db3e97bf"]
+paths = ['''^test/security/ghsa-policy-bypass\.test\.ts$''']

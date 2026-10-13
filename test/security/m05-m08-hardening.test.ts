@@ -42,7 +42,9 @@ describe("M-05 — audit export is bounded", () => {
     expect(ok.status).toBe(200);
     expect(DEFAULT_EXPORT_ROW_CAP).toBe(100_000);
 
-    await seedAuditRows(t, orgId, 4, 3); // now 7 rows total, over the cap of 3
+    // The export above appended its own `audit.exported` row (seq 4, PR-6),
+    // so the next seeded rows start after it: 8 rows total, over the cap of 3.
+    await seedAuditRows(t, orgId, 4, 4);
 
     const tooBig = await t.api.get(`/enterprise/audit/export?orgId=${orgId}`, { cookie });
     expect(tooBig.status).toBe(413);

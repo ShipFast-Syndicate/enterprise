@@ -32,11 +32,11 @@ Better Auth 1.7.3 reverted the account issuer-column change. A direct 1.6 to
 for duplicate `(providerId, accountId)` pairs and validate any Microsoft OAuth
 identity transition against the actual product's providers.
 
-For the first Nomi pilot, staging had no active SCIM integrations or enterprise
-tables at inventory time. Its additive migration can therefore install the new
-models without converting live SCIM resources. Recheck this condition at rollout.
+A deployment with no active SCIM integrations and no enterprise tables yet can
+install the new models with the additive migration alone, without converting
+live SCIM resources. Check this condition at rollout.
 
-Rollback: disable the enterprise pilot, restore the prior dependency/deployment
+Rollback: disable the enterprise layer, restore the prior dependency/deployment
 set, and restore the verified backup if live provisioning has changed data.
 Do not roll back only the package after enabling new SCIM clients; old tokens and
 new connection identities are incompatible.

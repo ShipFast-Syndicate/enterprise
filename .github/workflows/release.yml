@@ -32,7 +32,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22"
@@ -47,6 +47,15 @@ jobs:
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           # Keep the installation token scoped to this repository.
           repositories: ${{ github.event.repository.name }}
+          # Request only what the release plugins use instead of inheriting
+          # every permission of the App installation (metadata: read is
+          # implicit): contents for the release commit, tag, notes and GitHub
+          # release (@semantic-release/git, @semantic-release/github);
+          # issues and pull-requests for the released comments/labels and the
+          # failure issue (@semantic-release/github). Nothing else.
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
       - name: Run semantic-release
         env:
           GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
@@ -111,7 +120,7 @@ jobs:
           [[ "$TAG" =~ $SEMVER_RE ]] || { echo "refusing suspicious tag: $TAG"; exit 1; }
           git checkout "refs/tags/$TAG" --
 
-      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         if: steps.check.outputs.released == 'true'
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7

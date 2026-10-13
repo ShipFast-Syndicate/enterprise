@@ -24,8 +24,12 @@ Branch protection continues to use `ci / summary`. This job requires:
   `release_grant` override.
 
 Failures, cancellations, missing reports and unexpected skipped jobs block the
-summary. The existing Dependabot policy skips only the Node quality job; security
-scans, dependency audit, build and CI contract tests still run. E2E and migration
+summary. Dependabot PRs run the full set, including the Node quality job (lint,
+typecheck, formatting, tests and coverage); none of these jobs use secrets. The
+Dependabot merge gate only merges patch/minor updates on a green exact head, and
+never merges the `better-auth` group or tooling the release job executes
+(semantic-release and its plugins, tsup, esbuild, typescript, the release job's
+actions): those PRs are opened and tested, then wait for a maintainer. E2E and migration
 dry-run jobs were disabled for this package and remain disabled. There is no
 numeric coverage threshold configured; the coverage command must succeed.
 
@@ -52,3 +56,28 @@ Hosted placement in this source does not restrict what an altered workflow can
 request. The workflow contract tests detect drift; a PR can edit those tests too.
 Organization runner-group admission and fork approval remain separate
 administrative controls.
+
+## Release checklist (maintainers)
+
+Releases are cut by semantic-release on `main`; the version comes from the commit history
+(`feat` → minor, `fix` → patch, a `BREAKING CHANGE` footer → major). Before merging a release
+into `main`:
+
+1. On the exact commit to be merged, run the same gates CI runs:
+   `pnpm install --frozen-lockfile`, `pnpm lint`, `pnpm typecheck`,
+   `pnpm exec prettier --check .`, `pnpm test`, `pnpm build`,
+   `python3 .github/scripts/dependabot-gate.test.py` and
+   `node --test .github/scripts/*.test.mjs` (the glob, not the directory).
+2. `npm pack --dry-run` and compare the file list with the previous release's tarball — the
+   `files` set (`dist`, `sql`, `LICENSE`, `README.md`) should not change unexpectedly.
+3. `pnpm audit --prod`.
+4. `pnpm exec semantic-release --dry-run` with a read-only token, and confirm the computed
+   version. A squash or merge commit's type decides the bump: keep the commit types of the
+   changes, and never add a `BREAKING CHANGE` footer to a release that is not meant to be a
+   major.
+5. Confirm the release job's GitHub token carries only the permissions semantic-release needs
+   (`contents`, `issues`, `pull-requests`), and that the `npm` environment still requires
+   approval.
+6. After the publish: deprecate superseded versions when the release notes say so
+   (`npm deprecate "@alphabros/enterprise@<range>" "<message>"`), and check the provenance
+   statement on npm names the tagged release commit.

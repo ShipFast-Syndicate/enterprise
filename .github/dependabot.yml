@@ -1,9 +1,12 @@
 # Auth peers must move together. Group compatible updates and retain security alerts.
+# Security scan policy: allow new versions to age; security updates are exempt.
+# The better-auth and release-tooling groups (and the actions the release job
+# runs) are still opened as PRs, but the merge gate never merges them without a
+# maintainer: see MAINTAINER_* in .github/workflows/dependabot-merge-gate.yml.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
-    # Security scan policy: allow new versions to age; security updates are exempt.
     cooldown:
       default-days: 7
     schedule:
@@ -15,11 +18,36 @@ updates:
     groups:
       dev-tooling:
         dependency-type: development
-        patterns: ["*"]
-        exclude-patterns: ["better-auth", "@better-auth/*", "better-call", "@better-fetch/*"]
+        patterns:
+          - "*"
+        exclude-patterns:
+          - better-auth
+          - "@better-auth/*"
+          - better-call
+          - "@better-fetch/*"
+          - semantic-release
+          - "@semantic-release/*"
+          - "conventional-changelog-*"
+          - tsup
+          - esbuild
+          - typescript
+      # Everything the release job executes; held for maintainer review.
+      release-tooling:
+        patterns:
+          - semantic-release
+          - "@semantic-release/*"
+          - "conventional-changelog-*"
+          - tsup
+          - esbuild
+          - typescript
       better-auth:
-        patterns: ["better-auth", "@better-auth/*", "better-call", "@better-fetch/*"]
-    labels: ["dependencies"]
+        patterns:
+          - better-auth
+          - "@better-auth/*"
+          - better-call
+          - "@better-fetch/*"
+    labels:
+      - dependencies
   - package-ecosystem: github-actions
     directory: /
     cooldown:
@@ -29,4 +57,9 @@ updates:
       day: monday
       time: "06:30"
       timezone: Europe/Paris
-    labels: ["dependencies", "ci"]
+    labels:
+      - dependencies
+      - ci
+    ignore:
+      - dependency-name: ShipFast-Syndicate/.github*
+      - dependency-name: Alphabros/.github*

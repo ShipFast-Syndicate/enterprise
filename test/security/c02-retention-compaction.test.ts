@@ -60,7 +60,7 @@ describe("C-02 — retention compaction keeps the chain verifiable", () => {
     expect(rows.length).toBe(2); // one anchor + the one surviving row
 
     // The whole point of the finding: this used to be {ok:false, brokenAtSeq:3}.
-    expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+    expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
   });
 
   it("compacting twice still verifies (the previous anchor is swept with the prefix)", async () => {
@@ -81,7 +81,7 @@ describe("C-02 — retention compaction keeps the chain verifiable", () => {
 
     const rows = await auditRows(t, orgId);
     expect(rows.filter((r) => r.action === "audit.retention_compacted").length).toBe(1);
-    expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+    expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
   });
 
   it("a real edit inside the surviving window is still caught after compaction", async () => {
@@ -215,13 +215,13 @@ describe("C-02 — retention compaction keeps the chain verifiable", () => {
         "member.invited",
         "member.invited",
       ]);
-      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
 
       // …and the next compaction sweeps the stale anchor with the prefix.
       const retry = await t.api.post("/enterprise/audit/compact", { orgId }, { cookie });
       expect(retry.status).toBe(200);
       expect(await actions(t, orgId)).toEqual(["audit.retention_compacted", "member.invited"]);
-      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
     });
 
     it("crashing after the delete, before the anchor is marked complete: the pending anchor still anchors the chain", async () => {
@@ -242,7 +242,7 @@ describe("C-02 — retention compaction keeps the chain verifiable", () => {
       // the expired prefix is gone. The anchor written *first* is what keeps
       // the chain verifiable.
       expect(await actions(t, orgId)).toEqual(["audit.retention_compacting", "member.invited"]);
-      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
     });
 
     // Same bug as the completed-anchor test above, reached through the I-4
@@ -269,10 +269,10 @@ describe("C-02 — retention compaction keeps the chain verifiable", () => {
       ).rejects.toThrow("simulated crash");
 
       expect(await actions(t, orgId)).toEqual(["audit.retention_compacting"]);
-      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
 
       await inviteMember(t, cookie, orgId, "one@acme.test");
-      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
 
       // Age the new row out too (whatever `seq` the write path gave it —
       // deliberately not assumed here) and run a real (non-crashing)
@@ -284,7 +284,7 @@ describe("C-02 — retention compaction keeps the chain verifiable", () => {
       const retry = await t.api.post("/enterprise/audit/compact", { orgId }, { cookie });
       expect(retry.status).toBe(200);
       expect(await actions(t, orgId)).toEqual(["audit.retention_compacted"]);
-      expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+      expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
     });
   });
 
@@ -315,11 +315,11 @@ describe("C-02 — retention compaction keeps the chain verifiable", () => {
     expect(afterCompaction[0]!.action).toBe("audit.retention_compacted");
 
     await inviteMember(t, cookie, orgId, "three@acme.test");
-    expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+    expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
 
     // A second write on top of the first must still check out too.
     await inviteMember(t, cookie, orgId, "four@acme.test");
-    expect(await verify(t, cookie, orgId)).toEqual({ ok: true });
+    expect(await verify(t, cookie, orgId)).toEqual({ ok: true, keyed: false });
   });
 
   it("POST /enterprise/audit/compact is owner/admin-only and feature-gated", async () => {
