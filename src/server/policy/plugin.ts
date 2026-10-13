@@ -9,18 +9,24 @@
 // - `./store.ts` — the `OrgPolicy` shape, defaults, and org-membership/role
 //   reads (`getOrgPolicy`, `getMemberRoles`, `requireOrgMember`,
 //   `requireOwnerOrAdmin`, `isOrgOwner`).
-// - `./enforcement.ts` — sign-in `hooks.before`, the `databaseHooks.
-//   session.create.before` backstop, and `resolvePolicyOrgForUser` (the
-//   membership-first, domain-fallback org resolver both enforcement points
-//   share).
+// - `./enforcement.ts` — the `/magic-link/verify` `hooks.before`
+//   pre-flight, the `databaseHooks.session.create.before` backstop, the
+//   `databaseHooks.session.update.before` refresh clamp, and
+//   `resolvePolicyOrgsForUser` (the union-of-orgs resolver every
+//   enforcement point feeds into `getEffectivePolicy`).
 // SCIM deactivation runs in the native identity transaction (../scim.ts).
 // - `./home-realm.ts` — `findOrgByEmailDomain` and the public
 //   `/enterprise/home-realm` endpoint.
+// - `./sso-jit.ts` — the SSO domain binding (`databaseHooks.user.create.
+//   before`, composed with `./scim-required.ts`'s guard below) and the
+//   provider resolution `./enforcement.ts`'s session backstop shares.
 //
-// `require2fa` (the `hooks.after` on `/get-session`) lives here rather than
-// in `./enforcement.ts`: it only ever decorates a response, never blocks a
-// request, so it doesn't fit "enforcement" and is closely tied to this
-// file's other endpoint-shaped concerns.
+// `require2fa` is enforced in `./enforcement.ts` (the session-creation rule
+// and the enrolment gate, both wired below); what lives here is its
+// `/get-session` face (`null` for a session that does not stand, else the
+// `enterprise.{require2fa, twoFactorEnabled, enrollmentRequired}`
+// annotation) and the `/enterprise/policy/set` precondition that the admin
+// enabling it can still sign in afterwards.
 //
 // `org_policy`'s primary key is `org_id`, not `id` — see `./store.ts`'s
 // header comment for the full explanation (why the `schema` below omits an
@@ -36,24 +42,42 @@ import {
 } from "better-auth/api";
 import * as z from "zod";
 import { requireFeature } from "../entitlements";
+import { orgIdSchema } from "../org-id";
 import type { EnterpriseOptions } from "../types";
-import { buildSessionCreateBeforeHook, buildSignInBeforeHook } from "./enforcement";
-import { findOrgByEmailDomain, HOME_REALM_RATE_LIMIT, homeRealmEndpoint } from "./home-realm";
-import { buildScimRequiredUserCreateBeforeHook } from "./scim-required";
 import {
-  ALLOWED_METHOD_VALUES,
+  buildSessionCreateBeforeHook,
+  buildSessionUpdateBeforeHook,
+  buildSignInBeforeHook,
+  buildTwoFactorEnrollmentGate,
+  resolvePolicyOrgsForUser,
+  resolveTwoFactorStanding,
+  twoFactorSatisfiedBy,
+} from "./enforcement";
+import {
+  findOrgByEmailDomain,
+  findOrgsByEmailDomain,
+  HOME_REALM_RATE_LIMIT,
+  homeRealmEndpoint,
+} from "./home-realm";
+import { buildScimRequiredUserCreateBeforeHook } from "./scim-required";
+import { buildDomainBindingUserCreateBeforeHook, composeUserCreateBeforeHooks } from "./sso-jit";
+import {
+  allowedMethodValues,
+  anyOrgRequiresTwoFactor,
   findPolicyRow,
+  getEffectivePolicy,
   getOrgPolicy,
   isOrgOwner,
   requireOwner,
   requireOwnerOrAdmin,
   toOrgPolicy,
+  twoFactorEnrollmentState,
   type OrgPolicy,
 } from "./store";
 
 export type { OrgPolicy } from "./store";
 export { ALLOWED_METHOD_VALUES } from "./store";
-export { deriveSessionCreateMethod } from "./enforcement";
+export { classifySessionCreate, deriveSessionCreateMethod } from "./enforcement";
 
 // --- SSO-enforcement preconditions (controller ruling (b)) -----------------
 
@@ -95,19 +119,29 @@ export async function getPolicyPreconditions(
 
 // --- policy endpoints --------------------------------------------------
 
-const getPolicyQuerySchema = z.object({ orgId: z.string() });
+const getPolicyQuerySchema = z.object({ orgId: orgIdSchema });
 
-const setPolicyBodySchema = z.object({
-  orgId: z.string(),
-  require2fa: z.boolean().optional(),
-  ssoEnforced: z.boolean().optional(),
-  breakGlassUserId: z.string().nullable().optional(),
-  sessionMaxAgeS: z.number().int().positive().nullable().optional(),
-  allowedMethods: z.array(z.enum(ALLOWED_METHOD_VALUES)).min(1).optional(),
-  groupRoleMap: z.record(z.string(), z.enum(["owner", "admin", "member"])).optional(),
-});
+/**
+ * `allowedMethods` accepts the closed `ALLOWED_METHOD_VALUES` set plus the
+ * method names the product declared in `policy.signInMethods`
+ * (`allowedMethodValues`, `./store.ts`) — the only way an org can list a
+ * sign-in plugin this preset does not ship.
+ */
+function buildSetPolicyBodySchema(opts: EnterpriseOptions) {
+  const methods = allowedMethodValues(opts) as [string, ...string[]];
+  return z.object({
+    orgId: orgIdSchema,
+    require2fa: z.boolean().optional(),
+    ssoEnforced: z.boolean().optional(),
+    breakGlassUserId: z.string().nullable().optional(),
+    sessionMaxAgeS: z.number().int().positive().nullable().optional(),
+    allowedMethods: z.array(z.enum(methods)).min(1).optional(),
+    groupRoleMap: z.record(z.string(), z.enum(["owner", "admin", "member"])).optional(),
+  });
+}
 
-function buildPolicyEndpoints() {
+function buildPolicyEndpoints(opts: EnterpriseOptions) {
+  const setPolicyBodySchema = buildSetPolicyBodySchema(opts);
   const getPolicy = createAuthEndpoint(
     "/enterprise/policy",
     { method: "GET", use: [sessionMiddleware], query: getPolicyQuerySchema },
@@ -188,6 +222,37 @@ function buildPolicyEndpoints() {
         allowedMethods: patch.allowedMethods ?? current.allowedMethods,
         groupRoleMap: patch.groupRoleMap ?? current.groupRoleMap,
       };
+
+      // Turning `require2fa` on is done by someone it will apply to, and it
+      // re-judges every session of the org's members that predates the flip —
+      // the caller's own included (`twoFactorStanding`): only a caller who can
+      // get back in afterwards may do it, or the org is locked out with
+      // nobody left to switch it off. Two ways back in: the caller has
+      // enrolled a second factor (their next password sign-in is challenged;
+      // their current session keeps standing), or an SSO sign-in satisfies
+      // the requirement (`policy.twoFactor.satisfiedBy` includes `sso`) and
+      // this org owns a verified SSO provider for the caller's e-mail domain
+      // (`findOrgsByEmailDomain`, the same match the sign-in path uses) — the
+      // caller signs in again through it. Anyone else — a magic-link or
+      // social-only admin in particular, who could never sign in under the
+      // requirement — is refused and the row is left as it was.
+      if (next.require2fa && !current.require2fa) {
+        const caller = fullCtx.context.session?.user;
+        const state = caller ? await twoFactorEnrollmentState(fullCtx, caller.id) : null;
+        const canReturnThroughSso =
+          !!caller?.email &&
+          twoFactorSatisfiedBy(opts).includes("sso") &&
+          (await findOrgsByEmailDomain(fullCtx, caller.email)).some(
+            (match) => match.orgId === orgId,
+          );
+        if (!state || (!state.twoFactorEnabled && !canReturnThroughSso)) {
+          throw new APIError("BAD_REQUEST", {
+            code: "REQUIRE_2FA_PRECONDITION",
+            message:
+              "Requiring two-factor authentication needs the caller to have enrolled a second factor, or to sign in through this organization's verified SSO provider.",
+          });
+        }
+      }
 
       if (next.ssoEnforced) {
         const { verifiedProvider } = await getPolicyPreconditions(fullCtx, orgId);
@@ -278,25 +343,71 @@ async function getEndpointJson(ctx: { context: { returned?: unknown } }): Promis
   return returned;
 }
 
-function buildRequire2faAfterHook() {
+/**
+ * `/get-session` under `require2fa` — the session every product authorizes
+ * its own routes with (`auth.api.getSession({ headers })` runs this same
+ * endpoint and its hooks). When some org with a claim on the user requires a
+ * second factor — the **effective** policy (`resolvePolicyOrgsForUser`:
+ * memberships, active org and verified-domain claims), not only the session's
+ * active organization, which nothing sets by default — the session is judged
+ * the way the enrolment gate judges it (`resolveTwoFactorStanding`):
+ *
+ * - a session that does not stand and cannot be brought to stand (a
+ *   no-password user's session that was never judged under the requirement)
+ *   is answered with `null`, exactly as upstream answers for no session: the
+ *   product sees a signed-out visitor, with no flag to read and nothing to
+ *   get wrong;
+ * - otherwise the response is annotated with
+ *   `enterprise: { require2fa, twoFactorEnabled, enrollmentRequired }`, where
+ *   `enrollmentRequired` is the enrolment-only session the gate confines (a
+ *   password holder who has not enrolled) — the flag a product's enrolment
+ *   redirect keys on.
+ *
+ * Left untouched when no policy requires 2FA. Never reached for an API key
+ * under the opt-in mock session: upstream's api-key before-hook answers
+ * `/get-session` itself and better-auth runs no after-hook then. A key's
+ * owner is judged before that, in `enterpriseApiKeyValidator` and
+ * `apiKeySessionStanding` (`../api-keys.ts`).
+ */
+function buildRequire2faAfterHook(opts: EnterpriseOptions) {
   return {
     matcher: (ctx: { path?: string }) => ctx.path === "/get-session",
     handler: createAuthMiddleware(async (ctx) => {
       const response = (await getEndpointJson(ctx)) as {
-        user: { twoFactorEnabled?: boolean };
-        session: { activeOrganizationId?: string | null };
+        user: { id: string; email: string; twoFactorEnabled?: boolean };
+        session: Record<string, unknown> & { activeOrganizationId?: string | null };
       } | null;
-      if (!response?.user) return;
-      const orgId = response.session?.activeOrganizationId;
-      if (!orgId) return;
+      if (!response?.user?.id || !response.user.email) return;
 
       const fullCtx = ctx as unknown as GenericEndpointContext;
-      const policy = await getOrgPolicy(fullCtx, orgId);
-      if (!policy.require2fa) return;
+      // Same cheap probe as the gate: nothing to judge on a deployment where
+      // no organization requires a second factor.
+      if (!(await anyOrgRequiresTwoFactor(fullCtx))) return;
+      const orgIds = await resolvePolicyOrgsForUser(fullCtx, {
+        userId: response.user.id,
+        email: response.user.email,
+        activeOrganizationId: response.session?.activeOrganizationId ?? null,
+      });
+      if (orgIds.length === 0) return;
+      const eff = await getEffectivePolicy(fullCtx, orgIds, response.user.id, opts);
+      if (!eff.require2fa) return;
 
+      const state = await twoFactorEnrollmentState(fullCtx, response.user.id);
+      const standing = await resolveTwoFactorStanding(
+        fullCtx,
+        response.session ?? {},
+        response.user.id,
+        eff,
+        state,
+      );
+      if (standing === "two-factor-required") return ctx.json(null);
       return ctx.json({
         ...response,
-        enterprise: { require2fa: true, twoFactorEnabled: !!response.user.twoFactorEnabled },
+        enterprise: {
+          require2fa: true,
+          twoFactorEnabled: state.twoFactorEnabled,
+          enrollmentRequired: standing === "enrollment-required",
+        },
       });
     }),
   };
@@ -331,11 +442,15 @@ export function orgPolicy(opts: EnterpriseOptions) {
         },
       },
     },
-    endpoints: { ...buildPolicyEndpoints(), enterpriseHomeRealm: homeRealmEndpoint },
+    endpoints: { ...buildPolicyEndpoints(opts), enterpriseHomeRealm: homeRealmEndpoint },
     rateLimit: [HOME_REALM_RATE_LIMIT],
     hooks: {
-      before: [buildSignInBeforeHook()],
-      after: [buildRequire2faAfterHook()],
+      // The enrolment gate runs on every request outside its allow-list
+      // (`TWO_FACTOR_ENROLLMENT_ALLOWED_PATHS`), after `../gate.ts`'s hooks
+      // (the preset mounts that plugin first): a request an API key or a
+      // missing entitlement already refused never reaches it.
+      before: [buildSignInBeforeHook(opts), buildTwoFactorEnrollmentGate(opts)],
+      after: [buildRequire2faAfterHook(opts)],
     },
     // `databaseHooks` is wired via `init()` returning `{options:
     // {databaseHooks}}` — the better-auth convention every plugin that
@@ -356,14 +471,25 @@ export function orgPolicy(opts: EnterpriseOptions) {
           databaseHooks: {
             session: {
               create: {
-                before: buildSessionCreateBeforeHook(),
+                before: buildSessionCreateBeforeHook(opts),
+              },
+              // F-05: `/get-session`'s refresh rewrites `expiresAt` to the
+              // global lifetime; the clamp keeps it within `sessionMaxAgeS`.
+              update: {
+                before: buildSessionUpdateBeforeHook(opts),
               },
             },
-            // Task 8, controller ruling (e): "SSO only for SCIM-active
-            // users" — see `./scim-required.ts`'s header comment.
+            // One `user.create.before` slot, two guards, in this order:
+            // the SSO domain binding (F-01, `./sso-jit.ts` — the signing
+            // provider must be verified for the new user's e-mail domain,
+            // and the row is stored `emailVerified: true`), then Task 8's
+            // "SSO only for SCIM-active users" (`./scim-required.ts`).
             user: {
               create: {
-                before: buildScimRequiredUserCreateBeforeHook(),
+                before: composeUserCreateBeforeHooks(
+                  buildDomainBindingUserCreateBeforeHook(opts),
+                  buildScimRequiredUserCreateBeforeHook(),
+                ),
               },
             },
           },

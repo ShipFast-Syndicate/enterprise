@@ -164,3 +164,61 @@ describe("findOrgByEmailDomain via the home-realm endpoint (case-insensitivity)"
     expect(await res.json()).toEqual({ method: "sso", providerId: "okta" });
   });
 });
+
+// F-04 — upstream `@better-auth/sso` matches a provider's `domain` as a
+// comma-separated, case-insensitive list with subdomains; the enterprise
+// resolver used an exact `findOne({domain})`, so a multi-domain or
+// mixed-case provider (and every subdomain user) silently got `local` here
+// while upstream's own `/sign-in/sso {email}` routed them to SSO.
+describe("findOrgByEmailDomain via the home-realm endpoint (upstream domain-list parity, F-04)", () => {
+  it("routes the primary, the secondary, a subdomain and an upper-cased address of a comma-list provider to SSO", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    await insertVerifiedProvider(t, orgId, "Acme.test, acme-two.test", "okta");
+    const headers = isolatedIpHeaders();
+
+    for (const email of [
+      "x@acme.test",
+      "x@acme-two.test",
+      "x@eu.acme.test",
+      "x@ACME.TEST",
+      "x@Acme-Two.test",
+    ]) {
+      const res = await t.api.post("/enterprise/home-realm", { email }, headers);
+      expect([email, await res.json()]).toEqual([email, { method: "sso", providerId: "okta" }]);
+    }
+  });
+
+  it("does not treat a look-alike domain as a subdomain (evilacme.test vs acme.test)", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId } = await createOrg(t, cookie);
+    await insertVerifiedProvider(t, orgId, "acme.test", "okta");
+
+    const res = await t.api.post(
+      "/enterprise/home-realm",
+      { email: "x@evilacme.test" },
+      isolatedIpHeaders(),
+    );
+
+    expect(await res.json()).toEqual({ method: "local" });
+  });
+
+  it("prefers the provider whose list entry is most specific when two orgs' verified lists both match", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t, "owner@acme.test");
+    const { orgId: orgA } = await createOrg(t, cookie, "acme-a");
+    const { orgId: orgB } = await createOrg(t, cookie, "acme-b");
+    await insertVerifiedProvider(t, orgA, "acme.test", "zzz-broad");
+    await insertVerifiedProvider(t, orgB, "eu.acme.test", "aaa-narrow");
+
+    const res = await t.api.post(
+      "/enterprise/home-realm",
+      { email: "x@eu.acme.test" },
+      isolatedIpHeaders(),
+    );
+
+    expect(await res.json()).toEqual({ method: "sso", providerId: "aaa-narrow" });
+  });
+});

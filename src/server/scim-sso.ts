@@ -1,8 +1,18 @@
 import { acquireActiveSCIMUserLink, type SCIMManagedConnection } from "@better-auth/scim";
 import type { sso } from "@better-auth/sso";
+import { notePolicyRefusal } from "./audit/refusal";
 import { scimConnectionLabel } from "./scim-connection";
 
 type Resolver = NonNullable<NonNullable<Parameters<typeof sso>[0]>["resolveUser"]>;
+
+type ScimSignInRefusal = "SCIM_PROVISIONING_REQUIRED" | "SCIM_USER_NOT_ACTIVE";
+
+/** A refusal upstream throws on our behalf — marked as this package's own for the audit log (`notePolicyRefusal`). */
+function rejectSignIn(refusal: ScimSignInRefusal) {
+  notePolicyRefusal(refusal);
+  return { action: "reject", code: refusal } as const;
+}
+
 /** Pair an SSO provider only to its own organization's same-label SCIM connection. */
 export const resolveScimSsoUser: Resolver = async (input, context) => {
   if (input.providerReference.source.type !== "persisted") return { action: "continue" };
@@ -28,14 +38,14 @@ export const resolveScimSsoUser: Resolver = async (input, context) => {
   if (!connections.length) return { action: "continue" };
   const matches = connections.filter((c) => scimConnectionLabel(c) === input.providerId);
   if (!provider.domainVerified || matches.length !== 1 || connections.length > 1000)
-    return { action: "reject", code: "SCIM_PROVISIONING_REQUIRED" };
+    return rejectSignIn("SCIM_PROVISIONING_REQUIRED");
   const link = await acquireActiveSCIMUserLink(
     { connectionId: matches[0]!.connectionId, externalId: input.accountKey.accountId },
     context,
   );
   return link
     ? { action: "link", userId: link.userId, profile: "preserve" }
-    : { action: "reject", code: "SCIM_USER_NOT_ACTIVE" };
+    : rejectSignIn("SCIM_USER_NOT_ACTIVE");
 };
 
 /** Changing the IdP boundary requires retiring its provisioning authority first. */

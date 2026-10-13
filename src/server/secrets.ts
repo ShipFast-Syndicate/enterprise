@@ -171,20 +171,29 @@ const SECRET_JSON_FIELDS: Record<string, { keys: string[]; nested?: string[] }> 
 
 type Json = Record<string, unknown>;
 
+type SecretTransform = (value: string, field: string) => Promise<string>;
+
 async function mapSecretKeys(
   config: Json,
   spec: { keys: string[]; nested?: string[] },
-  transform: (value: string) => Promise<string>,
+  transform: SecretTransform,
+  path: string,
 ): Promise<Json> {
   const out: Json = { ...config };
   for (const key of spec.keys) {
     const value = out[key];
-    if (typeof value === "string" && value.length > 0) out[key] = await transform(value);
+    if (typeof value === "string" && value.length > 0)
+      out[key] = await transform(value, `${path}.${key}`);
   }
   for (const key of spec.nested ?? []) {
     const nested = out[key];
     if (nested && typeof nested === "object" && !Array.isArray(nested)) {
-      out[key] = await mapSecretKeys(nested as Json, { keys: spec.keys }, transform);
+      out[key] = await mapSecretKeys(
+        nested as Json,
+        { keys: spec.keys },
+        transform,
+        `${path}.${key}`,
+      );
     }
   }
   return out;
@@ -197,10 +206,7 @@ async function mapSecretKeys(
  * object (what a `type: "json"` adapter may hand back). Anything that isn't
  * parseable JSON is left exactly as-is rather than destroyed.
  */
-async function mapProviderSecrets(
-  data: Json,
-  transform: (value: string) => Promise<string>,
-): Promise<Json> {
+async function mapProviderSecrets(data: Json, transform: SecretTransform): Promise<Json> {
   let out = data;
   for (const [field, spec] of Object.entries(SECRET_JSON_FIELDS)) {
     const raw = out[field];
@@ -223,34 +229,76 @@ async function mapProviderSecrets(
     }
     if (!parsed) continue;
 
-    const mapped = await mapSecretKeys(parsed, spec, transform);
+    const mapped = await mapSecretKeys(parsed, spec, transform, field);
     if (out === data) out = { ...data };
     out[field] = wasString ? JSON.stringify(mapped) : mapped;
   }
   return out;
 }
 
+/**
+ * F-06: the write path **always** encrypts. It used to skip values that
+ * already carried the `enc:v1:` prefix ("already encrypted, pass through"),
+ * which let any caller of `/sso/register` persist a literal
+ * `enc:v1:<junk>` that could never be decrypted — and because every
+ * unfiltered `findMany` decrypted all rows together, one such row 500'd
+ * `GET /sso/providers` and the `/sign-in/sso` domain fallback for every
+ * tenant. "Already encrypted" is never something to infer from caller data;
+ * the only writer that legitimately hands this wrapper ciphertext is the
+ * wrapper itself, and that case is handled structurally (see `activeFor`).
+ */
 const encryptPayload = (data: unknown, secretsKey: string, aad: string): Promise<unknown> =>
   data && typeof data === "object" && !Array.isArray(data)
-    ? mapProviderSecrets(data as Json, (value) =>
-        isEncrypted(value) ? Promise.resolve(value) : encryptSecret(value, secretsKey, aad),
-      )
+    ? mapProviderSecrets(data as Json, (value) => encryptSecret(value, secretsKey, aad))
     : Promise.resolve(data);
+
+/** Where the wrapper reports a secret it could not open (F-06 soft decrypt). */
+export interface SecretsWrapperOptions {
+  /**
+   * Called once per undecryptable secret field on read. Defaults to
+   * `console.error`. `enterpriseGate` passes better-auth's own logger.
+   */
+  onUndecryptable?: (info: { providerId: string; field: string; error: unknown }) => void;
+}
 
 /**
  * Decrypts a row read back from the adapter. The AAD is the row's own
  * `providerId`; a row that doesn't carry one (no upstream or in-package read
  * path narrows the column set — `@better-auth/sso@1.6.33` uses no `select`
- * anywhere, verified by grep — so this is defensive) is returned untouched
- * rather than throwing, since an undecryptable-but-present ciphertext is
- * more useful to an operator than a failed request.
+ * anywhere, verified by grep — so this is defensive) is returned untouched.
+ *
+ * F-06: a field that fails to decrypt (wrong/rotated `secretsKey`, corrupted
+ * or transplanted ciphertext) is **reported and left sealed** — the
+ * `enc:v1:…` string stays in place, so the plaintext is never produced and
+ * the IdP exchange for that one provider fails, but the read itself succeeds.
+ * Throwing here turned one bad row into a fleet-wide `findMany` failure and
+ * made the row unreachable through get/update/delete (no recovery path
+ * short of raw SQL).
  */
-const decryptRow = async (row: unknown, secretsKey: string): Promise<unknown> => {
+const decryptRow = async (
+  row: unknown,
+  secretsKey: string,
+  options: SecretsWrapperOptions,
+): Promise<unknown> => {
   if (!row || typeof row !== "object" || Array.isArray(row)) return row;
   const aad = (row as { providerId?: unknown }).providerId;
   if (typeof aad !== "string") return row;
-  return mapProviderSecrets(row as Json, (value) => decryptSecret(value, secretsKey, aad));
+  const report = options.onUndecryptable ?? defaultOnUndecryptable;
+  return mapProviderSecrets(row as Json, async (value, field) => {
+    try {
+      return await decryptSecret(value, secretsKey, aad);
+    } catch (error) {
+      report({ providerId: aad, field, error });
+      return value;
+    }
+  });
 };
+
+function defaultOnUndecryptable({ providerId, field }: { providerId: string; field: string }) {
+  console.error(
+    `@alphabros/enterprise: ssoProvider "${providerId}" field "${field}" could not be decrypted (wrong or rotated secretsKey, or a corrupted/transplanted ciphertext); the value is left sealed and this provider's IdP exchange will fail until it is re-entered.`,
+  );
+}
 
 // --- the adapter wrapper ---------------------------------------------------
 
@@ -333,67 +381,105 @@ function touchesSecrets(payload: unknown): boolean {
  * which add methods this package doesn't know about — or which rely on
  * `this` — keep working unchanged.
  */
-export function withSecretEncryption(adapter: Adapter, secretsKey: string): Adapter {
-  return wrapAdapter(adapter, secretsKey, true);
+export function withSecretEncryption(
+  adapter: Adapter,
+  secretsKey: string,
+  options: SecretsWrapperOptions = {},
+): Adapter {
+  return wrapAdapter(adapter, secretsKey, true, options);
 }
 
-function wrapAdapter(adapter: Adapter, secretsKey: string, followTransaction: boolean): Adapter {
+/**
+ * Marks an adapter produced by `wrapAdapter`. Module-private, so nothing a
+ * caller can put in a request body or a row can forge it — unlike the
+ * `enc:v1:` string prefix the write path used to trust (F-06).
+ */
+const WRAPPED = Symbol("@alphabros/enterprise.secrets.wrapped");
+
+function isWrapped(adapter: unknown): boolean {
+  return !!adapter && (adapter as { [WRAPPED]?: true })[WRAPPED] === true;
+}
+
+function wrapAdapter(
+  adapter: Adapter,
+  secretsKey: string,
+  followTransaction: boolean,
+  options: SecretsWrapperOptions,
+): Adapter {
   const proxy = new Proxy(adapter, {
     get(target, prop, receiver) {
+      if (prop === WRAPPED) return true;
       const value = Reflect.get(target, prop, receiver) as unknown;
       if (typeof value !== "function") return value;
-      const call = async (params: unknown): Promise<unknown> => {
+
+      /**
+       * The adapter this call must actually hit. Inside a `runWithTransaction`
+       * started through this wrapper, better-auth's async-local store holds
+       * the transaction adapter that `case "transaction"` below already
+       * wrapped — so a caller that keeps using the *outer* `ctx.context.adapter`
+       * (rather than `getCurrentAdapter`) would otherwise pass through **two**
+       * wrapper layers. The old code survived that only because the second
+       * layer trusted the `enc:v1:` prefix and skipped re-encrypting (the exact
+       * trust F-06 removes). Now the outer layer detects the wrapped inner
+       * adapter and delegates the *raw* call to it, so every write is
+       * encrypted exactly once and every read decrypted exactly once — proven
+       * by the "outer adapter inside runWithTransaction" regression test.
+       */
+      const activeFor = async (): Promise<{ adapter: Adapter; delegated: boolean }> => {
         const active = followTransaction ? await getCurrentAdapter(target) : target;
-        if (active !== target && active !== proxy) {
-          const method = Reflect.get(active, prop) as (input: unknown) => Promise<unknown>;
-          return method.call(active, params);
-        }
-        return value.call(target, params);
+        if (active === target || active === proxy) return { adapter: target, delegated: false };
+        return { adapter: active as Adapter, delegated: isWrapped(active) };
       };
+      const invoke = (on: Adapter, params: unknown): Promise<unknown> =>
+        (Reflect.get(on, prop) as (input: unknown) => Promise<unknown>).call(on, params);
+      const call = async (params: unknown): Promise<unknown> =>
+        invoke((await activeFor()).adapter, params);
+      const decrypt = (row: unknown) => decryptRow(row, secretsKey, options);
 
       switch (prop) {
         case "transaction":
           return (callback: (transaction: Adapter) => Promise<unknown>) =>
             target.transaction((transaction) =>
-              callback(wrapAdapter(transaction as Adapter, secretsKey, false)),
+              callback(wrapAdapter(transaction as Adapter, secretsKey, false, options)),
             );
         case "create":
           return async (params: ModelParams) => {
             if (!isSecretModel(params)) return call(params);
-            if (!touchesSecrets(params.data)) return decryptRow(await call(params), secretsKey);
-            const aad = await resolveWriteAad(
-              followTransaction ? await getCurrentAdapter(target) : target,
-              params,
-              params.data,
-            );
+            const active = await activeFor();
+            if (active.delegated) return invoke(active.adapter, params);
+            if (!touchesSecrets(params.data)) return decrypt(await invoke(active.adapter, params));
+            const aad = await resolveWriteAad(active.adapter, params, params.data);
             if (!aad) throw unbindableWrite("create");
             const data = await encryptPayload(params.data, secretsKey, aad);
-            return decryptRow(await call({ ...params, data }), secretsKey);
+            return decrypt(await invoke(active.adapter, { ...params, data }));
           };
         case "update":
         case "updateMany":
           return async (params: ModelParams) => {
             if (!isSecretModel(params)) return call(params);
-            if (!touchesSecrets(params.update)) return decryptRow(await call(params), secretsKey);
-            const aad = await resolveWriteAad(
-              followTransaction ? await getCurrentAdapter(target) : target,
-              params,
-              params.update,
-            );
+            const active = await activeFor();
+            if (active.delegated) return invoke(active.adapter, params);
+            if (!touchesSecrets(params.update))
+              return decrypt(await invoke(active.adapter, params));
+            const aad = await resolveWriteAad(active.adapter, params, params.update);
             if (!aad) throw unbindableWrite(String(prop));
             const update = await encryptPayload(params.update, secretsKey, aad);
-            return decryptRow(await call({ ...params, update }), secretsKey);
+            return decrypt(await invoke(active.adapter, { ...params, update }));
           };
         case "findOne":
           return async (params: unknown) => {
-            const row = await call(params);
-            return isSecretModel(params) ? decryptRow(row, secretsKey) : row;
+            if (!isSecretModel(params)) return call(params);
+            const active = await activeFor();
+            const row = await invoke(active.adapter, params);
+            return active.delegated ? row : decrypt(row);
           };
         case "findMany":
           return async (params: unknown) => {
-            const rows = await call(params);
-            if (!isSecretModel(params) || !Array.isArray(rows)) return rows;
-            return Promise.all(rows.map((row) => decryptRow(row, secretsKey)));
+            if (!isSecretModel(params)) return call(params);
+            const active = await activeFor();
+            const rows = await invoke(active.adapter, params);
+            if (active.delegated || !Array.isArray(rows)) return rows;
+            return Promise.all(rows.map(decrypt));
           };
         default:
           return call;

@@ -35,12 +35,17 @@ interface NewKey {
   key: string;
 }
 
-/** `expiresIn` select options, in seconds. `""` (no expiry) is omitted from the POST body entirely. */
+/**
+ * `expiresIn` select options, in seconds; the first entry is the form's
+ * default. `""` omits `expiresIn` from the POST body entirely, which leaves
+ * the lifetime to the server's own default (`apiKeys.defaultExpiresInS`, 90
+ * days unless the product changed it) — never "no expiry" any more.
+ */
 const EXPIRES_IN_OPTIONS: Array<{ label: string; value: number | "" }> = [
-  { label: "No expiry", value: "" },
-  { label: "30 days", value: 30 * 24 * 60 * 60 },
   { label: "90 days", value: 90 * 24 * 60 * 60 },
+  { label: "30 days", value: 30 * 24 * 60 * 60 },
   { label: "1 year", value: 365 * 24 * 60 * 60 },
+  { label: "Server default", value: "" },
 ];
 
 export class AbApiKeys extends AbElement {

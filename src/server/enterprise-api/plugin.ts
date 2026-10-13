@@ -31,13 +31,14 @@ import {
 import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import * as z from "zod";
 import type { EnterpriseOptions } from "../types";
+import { orgIdSchema, requestOrgId } from "../org-id";
 import { getPolicyPreconditions } from "../policy/plugin";
 import { getOrgPolicy, isOrgOwner, requireOrgMember } from "../policy/store";
 import { buildSsoEndpoints } from "./sso";
 import { buildScimEndpoints } from "./scim";
 import { buildMembersEndpoint } from "./members";
 
-const featuresQuerySchema = z.object({ orgId: z.string() });
+const featuresQuerySchema = z.object({ orgId: orgIdSchema });
 
 function buildFeaturesEndpoint(opts: EnterpriseOptions) {
   return createAuthEndpoint(
@@ -74,10 +75,14 @@ function buildSsoEnforcePreconditionHook() {
     matcher: (ctx: { path?: string }) => ctx.path === "/enterprise/policy/set",
     handler: createAuthMiddleware(async (ctx) => {
       const body = ctx.body as
-        { orgId?: string; ssoEnforced?: boolean; breakGlassUserId?: string | null } | undefined;
-      if (!body?.ssoEnforced || !body.orgId) return;
+        { orgId?: unknown; ssoEnforced?: boolean; breakGlassUserId?: string | null } | undefined;
+      // Runs before the endpoint's own validation: an org id that is not one
+      // answers `400 ORG_ID_INVALID` here rather than reaching a query
+      // (`../org-id.ts`). The gate refuses it first on the default path; this
+      // hook does not rely on that.
+      const orgId = requestOrgId(body?.orgId);
+      if (!body?.ssoEnforced || !orgId) return;
       const fullCtx = ctx as unknown as GenericEndpointContext;
-      const orgId = body.orgId;
 
       const { verifiedProvider, testLoginPassed } = await getPolicyPreconditions(fullCtx, orgId);
       if (!verifiedProvider) return; // setPolicy's own check reports this

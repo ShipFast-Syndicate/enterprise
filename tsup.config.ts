@@ -7,6 +7,11 @@ const external = [
   "@libsql/client",
   "lit",
   /^lit\//,
+  // The SAML trust root is derived through samlify with the inputs
+  // `@better-auth/sso` uses (`src/server/sso-domain.ts`); a peer, like the
+  // upstream plugins, so one samlify decides both what is pinned and what
+  // verifies.
+  "samlify",
 ];
 
 // A **single** config object with every entry (Task 13 leftover). Two

@@ -233,7 +233,9 @@ describe("M-01 — the admin→owner escalation is closed at every step", () => 
     });
   });
 
-  it("an admin may still list and revoke SCIM tokens", async () => {
+  // F-07 (audit 3): revoke became a decommission in 1.7 (global ban of every
+  // provisioned user), so it is owner-only now; admins keep the listing.
+  it("an admin may still list SCIM tokens, but revoke is owner-only", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t);
     const { orgId } = await createOrg(t, cookie);
@@ -255,6 +257,14 @@ describe("M-01 — the admin→owner escalation is closed at every step", () => 
       { orgId, providerId: "hris" },
       { cookie: admin.cookie },
     );
-    expect(revoke.status).toBe(200);
+    expect(revoke.status).toBe(403);
+    expect(await code(revoke)).toBe("NOT_ORG_OWNER");
+
+    const ownerRevoke = await t.api.post(
+      "/enterprise/scim/tokens/revoke",
+      { orgId, providerId: "hris" },
+      { cookie },
+    );
+    expect(ownerRevoke.status).toBe(200);
   });
 });
