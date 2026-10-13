@@ -268,6 +268,15 @@ function migrationNumber(file: string): string {
   return file.slice(0, 4);
 }
 
+/**
+ * Whether `entry` carries the name this command gives package migration
+ * `file`: `NNNN_<emittedSuffix>.sql`, the suffix compared exactly.
+ */
+function hasEmittedName(entry: string, file: string): boolean {
+  const match = /^\d{4}_(.+)\.sql$/.exec(entry);
+  return match !== null && match[1] === emittedSuffix(file);
+}
+
 /** A migration's text with drizzle's breakpoint markers removed — what this command inserted them into. */
 function withoutBreakpoints(sql: string): string {
   return sql.split(`\n${STATEMENT_BREAKPOINT}`).join("").trimEnd();
@@ -286,7 +295,7 @@ function withoutBreakpoints(sql: string): string {
  * guesses: see `cmdMigrate` for what it does instead.
  */
 function isEmissionOf(outDir: string, entry: string, file: string): boolean {
-  if (!new RegExp(`^\\d{4}_${emittedSuffix(file)}\\.sql$`).test(entry)) return false;
+  if (!hasEmittedName(entry, file)) return false;
   const emitted = readFileSync(join(outDir, entry), "utf8");
   const source = readFileSync(migrationFilePath(file), "utf8");
   return withoutBreakpoints(emitted) === withoutBreakpoints(source);
@@ -303,8 +312,7 @@ type EmissionState =
  */
 function emissionState(outDir: string, file: string): EmissionState {
   if (!existsSync(outDir)) return { kind: "absent" };
-  const pattern = new RegExp(`^\\d{4}_${emittedSuffix(file)}\\.sql$`);
-  const named = readdirSync(outDir).filter((entry) => pattern.test(entry));
+  const named = readdirSync(outDir).filter((entry) => hasEmittedName(entry, file));
   const proven = named.find((entry) => isEmissionOf(outDir, entry, file));
   if (proven) return { kind: "present", entry: proven };
   if (named[0]) return { kind: "conflict", entry: named[0] };
