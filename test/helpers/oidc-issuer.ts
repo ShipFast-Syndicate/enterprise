@@ -63,7 +63,19 @@ function parseBasicAuth(
 }
 
 export async function startOidcIssuer(
-  opts: { clientId?: string; clientSecret?: string; user?: OidcIssuerUser } = {},
+  opts: {
+    clientId?: string;
+    clientSecret?: string;
+    user?: OidcIssuerUser;
+    /**
+     * The `iss` claim this issuer writes into its id_tokens (default: its own
+     * origin). A *rogue* IdP claiming an allowed issuer's string — the F-28
+     * allow-list tests register such an IdP with `issuer` = the claimed
+     * string and every endpoint on this loopback origin, and prove the
+     * allow-list refuses the endpoints rather than trusting the string.
+     */
+    issClaim?: string;
+  } = {},
 ): Promise<OidcIssuer> {
   const clientId = opts.clientId ?? "test-client";
   const clientSecret = opts.clientSecret ?? "test-client-secret";
@@ -147,7 +159,7 @@ export async function startOidcIssuer(
         })
           .setProtectedHeader({ alg: "RS256", kid })
           .setSubject(currentUser.sub)
-          .setIssuer(issuerUrl)
+          .setIssuer(opts.issClaim ?? issuerUrl)
           .setAudience(clientId)
           .setIssuedAt(now)
           .setExpirationTime(now + 300)

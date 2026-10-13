@@ -29,6 +29,8 @@ interface ListResponse {
 interface VerifyResponse {
   ok: boolean;
   brokenAtSeq?: number;
+  /** Whether the newest row is an HMAC link (`audit.chainKey`); present when `ok`. */
+  keyed?: boolean;
 }
 
 interface Filters {

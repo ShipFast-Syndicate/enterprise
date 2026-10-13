@@ -474,8 +474,9 @@ describe("SCIM token endpoints", () => {
   });
 
   // M-01 (security audit 2026-09-15): minting a SCIM token is owner-only —
-  // it is the second half of the admin→owner escalation. Admins keep
-  // list/revoke.
+  // it is the second half of the admin→owner escalation. Admins keep the
+  // listing; revoke became owner-only too in F-07 (audit 3, 2026-09-25) —
+  // see `test/security/f07-scim-revoke-owner-only.test.ts`.
   it("create requires owner (403 NOT_ORG_OWNER for an admin)", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");

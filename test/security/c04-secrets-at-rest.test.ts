@@ -13,7 +13,7 @@
 // callback reads — `test/e2e/oidc.test.ts` is the end-to-end proof that the
 // real flow still works).
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
 import {
   decryptSecret,
@@ -113,7 +113,13 @@ describe("C-04 — IdP client secrets are encrypted at rest", () => {
   // the database but not read the key — copy a working sealed secret onto a
   // provider they control — fails instead of silently re-pointing a live IdP
   // credential.
-  it("a ciphertext transplanted onto another provider row fails to decrypt", async () => {
+  //
+  // F-06 (audit 3): the failure is per field, not per request — the
+  // transplanted value is reported through the logger and **left sealed**
+  // (the plaintext is never produced, so the IdP exchange for that provider
+  // fails), instead of rejecting the read and, through `findMany`, every
+  // other tenant's reads with it.
+  it("a ciphertext transplanted onto another provider row never yields the plaintext", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t);
     const { orgId } = await createOrg(t, cookie);
@@ -127,12 +133,16 @@ describe("C-04 — IdP client secrets are encrypted at rest", () => {
     });
 
     const ctx = await t.auth.$context;
-    await expect(
-      ctx.adapter.findOne({
-        model: "ssoProvider",
-        where: [{ field: "providerId", value: "okta-dst" }],
-      }),
-    ).rejects.toThrow();
+    const error = vi.spyOn(ctx.logger, "error").mockImplementation(() => {});
+    const transplanted = await ctx.adapter.findOne<{ oidcConfig: string }>({
+      model: "ssoProvider",
+      where: [{ field: "providerId", value: "okta-dst" }],
+    });
+    const leaked = (JSON.parse(transplanted!.oidcConfig) as { clientSecret: string }).clientSecret;
+    expect(leaked).not.toBe(SECRET);
+    expect(isEncrypted(leaked)).toBe(true); // still sealed
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('"okta-dst"'));
+    error.mockRestore();
 
     // The row it was stolen *from* is unaffected.
     const source = await ctx.adapter.findOne<{ oidcConfig: string }>({

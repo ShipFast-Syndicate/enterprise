@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { auditLog, AUDITED_PATHS, VERIFY_PAGE_SIZE } from "../../src/server/audit/plugin";
-import { hashRow, type AuditRowForHash } from "../../src/server/audit/chain";
+import {
+  hashRow,
+  verifyChainHeadSignature,
+  type AuditRowForHash,
+} from "../../src/server/audit/chain";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
 
 async function inviteMember(t: TestAuth, cookie: string, orgId: string, email: string) {
@@ -36,8 +40,27 @@ describe("AUDITED_PATHS", () => {
         "scim_group",
         "api_key",
         "org_policy",
+        // PR-6 (F-13): sessions, linked accounts, passkeys, the organization
+        // itself, invitations and teams.
+        "session",
+        "account",
+        "passkey",
+        "organization",
+        "invitation",
+        "team",
       ]),
     );
+  });
+
+  it("gives every entry a scope from the closed set (PR-6: fan-out is declared, never guessed)", () => {
+    const scopes = new Set(Object.values(AUDITED_PATHS).map((v) => v.scope));
+    expect([...scopes].sort()).toEqual(
+      ["provider", "request-org", "resource", "scim", "subject", "target-user"].sort(),
+    );
+    for (const [path, entry] of Object.entries(AUDITED_PATHS)) {
+      expect(typeof entry.action, path).toBe("string");
+      expect(typeof entry.targetType, path).toBe("string");
+    }
   });
 
   it("keys parameterised paths by better-auth's real registered pattern, not the brief's shorthand", () => {
@@ -48,12 +71,15 @@ describe("AUDITED_PATHS", () => {
     expect(AUDITED_PATHS["/scim/v2/Users/:userId"]).toEqual({
       action: "scim.user_updated",
       targetType: "scim_user",
+      scope: "scim",
       methods: ["PUT", "PATCH"],
     });
     expect(AUDITED_PATHS["/scim/v2/Users/:id"]).toBeUndefined();
     expect(AUDITED_PATHS["/sso/callback/:providerId"]).toEqual({
       action: "auth.sso_sign_in",
       targetType: "user",
+      scope: "subject",
+      kind: "session",
     });
   });
 });
@@ -339,7 +365,7 @@ describe("GET /enterprise/audit/verify", () => {
 
     const ok = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, { cookie });
     expect(ok.status).toBe(200);
-    expect(await ok.json()).toEqual({ ok: true });
+    expect(await ok.json()).toEqual({ ok: true, keyed: false });
 
     // Tamper with the metadata of the first row directly on the underlying
     // DB, bypassing the plugin entirely — this is what makes the chain a
@@ -415,7 +441,7 @@ describe("GET /enterprise/audit/verify", () => {
 
       const ok = await t.api.get(`/enterprise/audit/verify?orgId=${orgId}`, { cookie });
       expect(ok.status).toBe(200);
-      expect(await ok.json()).toEqual({ ok: true });
+      expect(await ok.json()).toEqual({ ok: true, keyed: false });
 
       // The first row of the second page — the boundary the paging has to
       // carry `prevHash` across.
@@ -518,5 +544,84 @@ describe("enterprise-audit hook — SCIM bearer path (parameterised, live dispat
 
     const updated = await auditRowsFor(t, orgId, "scim.user_updated");
     expect(updated.rows.length).toBe(0);
+  });
+});
+
+describe("GET /enterprise/audit/head (PR-6, gap 6)", () => {
+  async function inviteOnce(t: TestAuth, cookie: string, orgId: string) {
+    await inviteMember(t, cookie, orgId, "invitee@acme.test");
+  }
+
+  it("unkeyed: returns the newest row's seq and hash, keyed:false, signature null", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    await inviteOnce(t, cookie, orgId);
+    const res = await t.api.get(`/enterprise/audit/head?orgId=${orgId}`, { cookie });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      head: { orgId: string; seq: number; hash: string } | null;
+      keyed: boolean;
+      signature: string | null;
+    };
+    const last = await t.client.execute({
+      sql: `SELECT seq, hash FROM audit_event WHERE org_id = ? ORDER BY seq DESC LIMIT 1`,
+      args: [orgId],
+    });
+    expect(body.head).toMatchObject({
+      orgId,
+      seq: Number(last.rows[0]!.seq),
+      hash: String(last.rows[0]!.hash),
+    });
+    expect(body.keyed).toBe(false);
+    expect(body.signature).toBeNull();
+  });
+
+  it("keyed: the head is an HMAC link and its signature verifies under audit.chainKey (and not under another key)", async () => {
+    const chainKey = "q".repeat(40);
+    const t = await makeAuth({ audit: { chainKey } });
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    await inviteOnce(t, cookie, orgId);
+    const res = await t.api.get(`/enterprise/audit/head?orgId=${orgId}`, { cookie });
+    const body = (await res.json()) as {
+      head: { orgId: string; seq: number; hash: string };
+      keyed: boolean;
+      signature: string;
+    };
+    expect(body.keyed).toBe(true);
+    expect(body.head.hash).toMatch(/^hmac:/);
+    expect(await verifyChainHeadSignature(chainKey, body.head, body.signature)).toBe(true);
+    expect(await verifyChainHeadSignature("z".repeat(40), body.head, body.signature)).toBe(false);
+    expect(
+      await verifyChainHeadSignature(
+        chainKey,
+        { ...body.head, seq: body.head.seq + 1 },
+        body.signature,
+      ),
+    ).toBe(false);
+  });
+
+  it("an empty chain answers head:null; a plain member gets 403 and the entitlement is required", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const empty = await t.api.get(`/enterprise/audit/head?orgId=${orgId}`, { cookie });
+    expect(await empty.json()).toEqual({ head: null, keyed: false, signature: null });
+    const { cookie: memberCookie, userId: memberId } = await signUpOwner(t, "member@acme.test");
+    await insertMemberRow(t, orgId, memberId, "member");
+    const member = await t.api.get(`/enterprise/audit/head?orgId=${orgId}`, {
+      cookie: memberCookie,
+    });
+    expect(member.status).toBe(403);
+
+    const unentitled = await makeAuth({ resolveEntitlements: async () => [] });
+    const owner = await signUpOwner(unentitled);
+    const { orgId: org2 } = await createOrg(unentitled, owner.cookie);
+    const denied = await unentitled.api.get(`/enterprise/audit/head?orgId=${org2}`, {
+      cookie: owner.cookie,
+    });
+    expect(denied.status).toBe(403);
+    expect((await denied.json()).code).toBe("FEATURE_NOT_ENTITLED");
   });
 });

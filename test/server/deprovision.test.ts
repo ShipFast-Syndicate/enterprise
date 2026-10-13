@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { coreUserId } from "../security/helpers";
+import { coreUserId, insertMemberRow } from "../security/helpers";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
 
 async function setUpScimUser(
@@ -67,12 +67,26 @@ async function insertSessionCookie(t: TestAuth, userId: string): Promise<string>
   return `better-auth.session_token=${signedValue}`;
 }
 
+async function apiKeyRevokedRows(t: TestAuth, orgId: string) {
+  const res = await t.client.execute({
+    sql: `SELECT actor_type, actor_id, target_type, target_id, metadata FROM audit_event WHERE org_id = ? AND action = 'api_key.revoked'`,
+    args: [orgId],
+  });
+  return res.rows;
+}
+
 describe("SCIM deprovision cascade", () => {
-  it("PATCH active:false deletes the user's api keys, leaves 0 sessions, and writes one scim.user_deactivated audit row", async () => {
+  it("PATCH active:false deletes the user's api keys (audited api_key.revoked into every org, SCIM org A and manual org B), leaves 0 sessions, and writes one scim.user_deactivated audit row", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t);
     const { orgId } = await createOrg(t, cookie);
     const { bearer, userId, scimId } = await setUpScimUser(t, cookie, orgId);
+    // A manual membership in an unrelated org B: keys are user-global, so
+    // B's chain records the revocation too (F-21: "write an audit row into
+    // every org the user belongs to").
+    const other = await signUpOwner(t, "other@beta.test");
+    const { orgId: orgB } = await createOrg(t, other.cookie, "beta");
+    await insertMemberRow(t, orgB, userId, "member");
 
     const userCookie = await insertSessionCookie(t, userId);
     const apiKeyRes = await t.api.post(
@@ -81,6 +95,7 @@ describe("SCIM deprovision cascade", () => {
       { cookie: userCookie },
     );
     expect(apiKeyRes.status).toBe(200);
+    const { id: keyId } = (await apiKeyRes.json()) as { id: string };
 
     const keysBefore = await t.client.execute({
       sql: `SELECT * FROM apikey WHERE referenceId = ?`,
@@ -118,6 +133,18 @@ describe("SCIM deprovision cascade", () => {
       args: [userId],
     });
     expect(keysAfter.rows.length).toBe(0);
+    for (const org of [orgId, orgB]) {
+      const revoked = await apiKeyRevokedRows(t, org);
+      expect(revoked.length).toBe(1);
+      expect(revoked[0]!.actor_type).toBe("scim");
+      expect(revoked[0]!.actor_id).toBeNull();
+      expect(revoked[0]!.target_type).toBe("api_key");
+      expect(revoked[0]!.target_id).toBe(keyId);
+      expect(JSON.parse(String(revoked[0]!.metadata))).toEqual({
+        reason: "scim.deactivate",
+        userId,
+      });
+    }
 
     const auditRows = await t.client.execute({
       sql: `SELECT * FROM audit_event WHERE org_id = ? AND action = 'scim.user_deactivated'`,
@@ -174,17 +201,18 @@ describe("SCIM deprovision cascade", () => {
     expect(deactivated.rows.length).toBe(0);
   });
 
-  it("DELETE deletes the user's api keys (relying on the existing scim.user_deleted audit row, not a duplicate)", async () => {
+  it("DELETE deletes the user's api keys, audited api_key.revoked into the provisioning org (relying on the existing scim.user_deleted audit row, not a duplicate)", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t);
     const { orgId } = await createOrg(t, cookie);
     const { bearer, userId, scimId } = await setUpScimUser(t, cookie, orgId);
     const userCookie = await insertSessionCookie(t, userId);
-    await t.api.post(
+    const created = await t.api.post(
       "/api-key/create",
       { name: "k1", organizationId: orgId },
       { cookie: userCookie },
     );
+    const { id: keyId } = (await created.json()) as { id: string };
 
     const deleteRes = await t.api.delete(`/scim/v2/Users/${scimId}`, bearer);
     expect(deleteRes.status).toBe(204);
@@ -194,6 +222,13 @@ describe("SCIM deprovision cascade", () => {
       args: [userId],
     });
     expect(keysAfter.rows.length).toBe(0);
+    // On DELETE nothing in the database still links the user to this org by
+    // the time the identity hook runs (the `scimUser` row and the SCIM-owned
+    // membership are gone) — the projector hands the org over in-transaction.
+    const revoked = await apiKeyRevokedRows(t, orgId);
+    expect(revoked.length).toBe(1);
+    expect(revoked[0]!.target_id).toBe(keyId);
+    expect(revoked[0]!.actor_type).toBe("scim");
 
     const deletedRows = await t.client.execute({
       sql: `SELECT * FROM audit_event WHERE org_id = ? AND action = 'scim.user_deleted'`,

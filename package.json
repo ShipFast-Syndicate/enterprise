@@ -1,6 +1,6 @@
 {
   "name": "@alphabros/enterprise",
-  "version": "0.0.0-development",
+  "version": "1.0.1",
   "description": "Alpha Bros studio enterprise layer for better-auth: SSO (SAML/OIDC), SCIM (Users+Groups), orgs, audit log, security policy, admin portal",
   "license": "MIT",
   "type": "module",
@@ -82,7 +82,8 @@
     "better-auth": "1.7.5",
     "better-call": "1.4.0",
     "drizzle-orm": "^0.45.2",
-    "lit": "^3"
+    "lit": "^3",
+    "samlify": "^2.13.1"
   },
   "peerDependenciesMeta": {
     "lit": {
@@ -132,7 +133,14 @@
   },
   "pnpm": {
     "overrides": {
-      "esbuild@^0.27.0": "^0.28.1"
+      "esbuild@^0.27.0": "^0.28.1",
+      "handlebars": "^4.7.10",
+      "source-map-js@>=1.0.0 <1.2.2": "^1.2.2"
+    },
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-vfj7-8cjw-p6xm"
+      ]
     }
   }
 }

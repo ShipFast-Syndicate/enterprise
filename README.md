@@ -1,16 +1,20 @@
 # @alphabros/enterprise
 
 Alpha Bros studio enterprise layer for [better-auth](https://www.better-auth.com/) `1.7.5`:
-SSO (SAML + OIDC), SCIM 2.0 provisioning (Users + Groups), organizations, a tamper-evident
-audit log, security policy enforcement, and a framework-agnostic admin portal — as one
-package with four subpath entry points and a CLI.
+SSO (SAML + OIDC), SCIM 2.0 provisioning (Users + Groups), organizations, a hash-chained
+audit log (tamper-evident against database writers when keyed with `audit.chainKey` and its
+head exported off-box — see `docs/security.md`), security policy enforcement, and a
+framework-agnostic admin portal — as one package with four subpath entry points and a CLI.
 
 ## Status
 
-**v1.0 — pilot-grade.** Server plugins, schema/CLI, client helpers, and all seven portal
-elements are implemented and tested (390 tests). Read [`docs/security.md`](./docs/security.md)
-before deploying to a real customer — it documents the patched SCIM migration, token storage,
-audit chain limitations, and the retention/GDPR posture.
+**v1.1.** Server plugins, schema/CLI, client helpers, and all seven portal elements are
+implemented and tested (1026 tests). Upgrading from 1.0.x or 0.1.x: read
+[`docs/upgrading-to-1.1.md`](./docs/upgrading-to-1.1.md) first — every change is on by default,
+a few change what existing users see, and a product that replaces one of the preset's plugins
+sets the preset's settings on its own call (step 2). Read
+[`docs/security.md`](./docs/security.md) before deploying to a real customer — it documents the patched SCIM migration, token storage, policy
+enforcement, audit chain limitations, and the retention/GDPR posture.
 
 ## Install
 
@@ -33,6 +37,7 @@ This package ships one dependency of its own (`zod`) and declares everything els
   "@libsql/client": "^0.15.15 || ^0.17.3", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
   "lit": "^3", // optional — only needed for ./portal
+  "samlify": "^2.13.1", // peer since 1.1.0; already a dependency of @better-auth/sso
 }
 ```
 
@@ -40,6 +45,9 @@ This package ships one dependency of its own (`zod`) and declares everything els
 (not a caret range) so the complete auth stack uses the tested, patched SCIM release.
 The former advisory exception is removed. See [`docs/security.md`](./docs/security.md)
 and the [migration guide](./docs/migration-1-7.md) for the new credential and identity model.
+`samlify` is the SAML library `@better-auth/sso` already uses; the package asks it which
+certificates a SAML configuration will be verified against, so it must resolve from your app —
+add it explicitly if your package manager does not install peer dependencies.
 
 Requirements: Node `>=22`, pnpm 10 (or any package manager — pnpm is only this repo's own
 dev toolchain).
@@ -84,8 +92,19 @@ export const auth = betterAuth({
 ```
 
 For OIDC, configure the provider's exact origin through Better Auth's
-`trustedOrigins` option or `BETTER_AUTH_TRUSTED_ORIGINS` before using the portal.
-See [OIDC origin configuration](./docs/sso.md#trust-the-oidc-provider-origin).
+`trustedOrigins` option or `BETTER_AUTH_TRUSTED_ORIGINS` before using the portal —
+that is Better Auth's SSRF boundary for discovery/endpoint origins, **not** an issuer
+allow-list. To restrict which IdPs tenants may register, set `sso.allowedIssuers` — it is
+applied to the `issuer` **and** to the trust root the configuration actually points at: for
+OIDC every endpoint (upstream fetches the keys from the tenant-supplied JWKS), for SAML the
+entity id/entry point **and the signing certificates**, which must be pinned in
+`sso.samlCertificateFingerprints` (a SAML provider with no pins is refused — fail closed).
+Stored providers are re-checked at every sign-in. SSO
+sign-ins are bound to the signing provider's verified domain by default
+(`sso.domainBinding`) — that, not the allow-list, is the per-tenant control; `domainBinding:
+"off"` is only safe with the allow-list (and, for SAML, the pins) configured. See
+[OIDC origins and the issuer allow-list](./docs/sso.md#oidc-provider-origins-trustedorigins-and-the-issuer-allow-list)
+and [domain binding](./docs/sso.md#domain-binding-ssodomainbinding-default-verified-domain).
 
 `samlSpKeys` is **not** in that list. It is typed on `EnterpriseOptions` and reserved, but
 `enterprisePreset` cannot consume it: `@better-auth/sso@1.7.5`'s `sso()` has no plugin-level slot
@@ -173,7 +192,24 @@ if (result.method === "sso") {
 ```
 
 See [`docs/sso.md`](./docs/sso.md#home-realm-discovery-email-first-login) for the full flow,
-including what `org_policy.sso_enforced` does to non-SSO sign-in attempts.
+including what `org_policy.sso_enforced` does to non-SSO sign-in attempts. `org_policy.require_2fa`
+is enforced too: a session for a member of such an org stands only through a method that carries a
+second factor (SSO by default, `policy.twoFactor.satisfiedBy`) or a password sign-in that upstream's
+`twoFactor()` challenges, and a password user who has not enrolled reaches only the enrolment
+endpoints until they have — `/get-session` reports `enterprise.enrollmentRequired` for them. A session
+that predates the requirement for a user who cannot enrol (switched on later, or the user joined
+later) is refused, and `/get-session` — hence `auth.api.getSession` — answers `null` for it; with the
+opt-in API-key mock session, a key's owner is judged the same way (a no-password owner's key must
+postdate the requirement, an un-enrolled password holder's key yields no session). No schema change:
+upgrading needs only the data-only migration `0003`. A product whose package tables came from its
+own migration emits just that one with
+`ab-enterprise migrate --out <folder> --from 0003` — never the full emit, which would re-run `0001`
+and `0002` after its own. Any 1.0.x install runs `--from 0003` too, even a folder whose `0001` this
+command wrote: 1.0.0 applied `0002` outside it ([`docs/migration-1-7.md`](./docs/migration-1-7.md)
+step 4). Only a folder from 0.1.x that never applied `0002` runs `--from 0002`; a plain run on a
+folder holding this command's `0001` without its `0002` stops and asks which.
+Details in
+[`docs/security.md`](./docs/security.md#policy-resolution-and-enforcement-points).
 
 ## Portal — embedding the admin UI
 
@@ -184,9 +220,33 @@ the `/enterprise/*` API directly — no server code needed beyond `enterprisePre
 
 One scope caveat: **API keys are per user, not per organization.** `<ab-api-keys>` drives
 upstream `/api-key/list` and `/api-key/create`, which are scoped to the signed-in user, so an
-org's security screen shows and creates _that user's_ keys wherever they were created — and a
-SCIM deprovision revokes all of that user's keys, not only the ones they used for this org.
-Per-org key scoping remains a follow-up.
+org's security screen shows and creates _that user's_ keys wherever they were created. Keys are
+bound to the user at use time and bounded by expiry (since 1.1.0): every use re-checks the live
+user row (a banned or removed user's key is refused — `USER_BANNED` / `USER_NOT_FOUND`), keys
+expire after 90 days unless the caller picks another lifetime (`apiKeys.defaultExpiresInS`,
+capped by `apiKeys.maxExpiresInDays`, default 365), and every deprovisioning path — a SCIM
+deactivation, `/admin/ban-user`, `/admin/remove-user` — revokes all of that user's keys, not only
+the ones they used for this org, audited as `api_key.revoked` into every org the user belonged
+to. (A user who holds an `owner` membership anywhere is never _banned_ by a SCIM feed, but their
+keys are revoked like everyone else's; they can sign in and mint new ones.) A request carrying an
+API key reaches an **allow-list** and nothing else: `/get-session` over HTTP, plus upstream's own
+server-side `auth.api.verifyApiKey` call. Every other better-auth endpoint — `/enterprise/*`, every
+credential-minting path, every key, organization, SSO-provider, account and credential write, every
+other read (`/list-sessions`, `/organization/list`, `/api-key/list`, `/sso/get-provider`,
+`/list-accounts`, …), every sign-in flow, `/admin/*`, `/two-factor/*`, and every endpoint of a
+plugin you add that this package has never heard of (`jwt()`'s `/token`, `oneTimeToken()`'s
+`/one-time-token/generate`, your own) — answers `403 API_KEY_NOT_ALLOWED_HERE`. An allow-list,
+because a deny-list is fail-open for what it does not know; built from how integrators use a key
+(resolve its owner through `auth.api.getSession({ headers })`, nothing else) and widened
+only by a reviewed change to this package. The refusal is enforced in the key validator itself (so
+it holds however a key is carried) and on the `x-api-key` header alone (so it holds under the
+preset default and next to a valid cookie; `/get-session` with a stray header still answers the
+cookie's session). To let a key authenticate as its owner on your own routes, set
+`apiKeys.enableSessionForAPIKeys: true` on the preset rather than hand-composing `apiKey()` — and
+size `apiKeys.rateLimit` (upstream's default is 10 requests per key per 24 h) — see
+[`docs/security.md`](./docs/security.md) for the must-keep settings if you do. An expiry can never
+be removed from a key (`/api-key/update { expiresIn: null }` → `400 API_KEY_EXPIRY_REQUIRED`) unless
+the operator set `apiKeys.defaultExpiresInS: null`. Per-org key scoping remains a follow-up.
 
 **Import the elements only from a browser-only context.** Lit's browser build references
 `HTMLElement`, which doesn't exist on the server; importing the module in server-rendered code
@@ -309,6 +369,20 @@ deploy step or locally, not from an edge/Workers runtime:
 # them one at a time; it is an ordinary SQL comment everywhere else.
 ab-enterprise migrate --out ./drizzle/migrations
 
+# Upgrading from 1.0.x: always --from 0003 (the data-only 0003 is all 1.1.0
+# adds), whatever wrote the folder's 0001 — a product's OWN migration (e.g. a
+# hand-written NNNN_enterprise_pilot.sql) or this command — because 1.0.0
+# applied 0002 outside the folder (docs/migration-1-7.md step 4).
+ab-enterprise migrate --out ./drizzle/migrations --from 0003
+
+# Upgrading from 0.1.x, where 0002 was never applied: 0002 and 0003.
+ab-enterprise migrate --out ./drizzle/migrations --from 0002
+
+# A plain run (no --from) is for a new install, or a folder whose 0002 this
+# command wrote. It refuses, writing nothing, a folder holding an
+# *enterprise*.sql file this command did not write, or this command's 0001
+# without its 0002 — the folder alone cannot show what that one applied.
+
 # No journal in the target folder? The command says so, and the supported
 # application paths are `applyMigration()` from `@alphabros/enterprise/schema`
 # or `turso db shell <db> < ./drizzle/migrations/NNNN_enterprise.sql`. Either
@@ -321,8 +395,12 @@ ab-enterprise verify --url $TURSO_DATABASE_URL --token $TURSO_AUTH_TOKEN
 # CLI flags are visible in `ps` output and shell history.
 
 # Recompute an org's audit_event hash chain and confirm nothing was tampered
-# with (within the retention window — see docs/security.md).
+# with (within the retention window — see docs/security.md). A keyed chain
+# (audit.chainKey) is verified with the key from AB_AUDIT_CHAIN_KEY (env only);
+# --expect-head checks the chain still holds a head exported earlier from
+# GET /enterprise/audit/head (catches truncation and wholesale rewrites).
 ab-enterprise audit-verify --org org_123 --url $TURSO_DATABASE_URL
+AB_AUDIT_CHAIN_KEY=... ab-enterprise audit-verify --org org_123 --expect-head "$(cat head.json)"
 ```
 
 Run `ab-enterprise verify` after every deploy (fleet migrations have historically not reached
@@ -339,7 +417,11 @@ at runtime and does not run on Cloudflare Workers/workerd. `./server`, `./client
 - [`docs/scim.md`](./docs/scim.md) — native SCIM Users/Groups, credential rotation,
   membership projection, decommissioning, and IdP setup notes.
 - [`docs/security.md`](./docs/security.md) — patched SCIM migration, secrets/token storage,
-  audit chain limits, retention/GDPR, and this package's trusted-publishing setup.
+  policy enforcement, API keys, audit coverage and chain limits, retention/GDPR, and this
+  package's trusted-publishing setup.
+- [`docs/upgrading-to-1.1.md`](./docs/upgrading-to-1.1.md) — upgrading from 1.0.x: pre-upgrade
+  checks, steps, behaviour changes, new options and error codes.
+- [`docs/releases/1.1.0.md`](./docs/releases/1.1.0.md) — 1.1.0 release notes.
 
 ## Development
 
