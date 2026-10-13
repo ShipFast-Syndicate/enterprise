@@ -134,7 +134,13 @@
   "pnpm": {
     "overrides": {
       "esbuild@^0.27.0": "^0.28.1",
-      "handlebars": "^4.7.10"
+      "handlebars": "^4.7.10",
+      "source-map-js@>=1.0.0 <1.2.2": "^1.2.2"
+    },
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-vfj7-8cjw-p6xm"
+      ]
     }
   }
 }
