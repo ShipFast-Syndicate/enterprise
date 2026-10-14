@@ -18,9 +18,9 @@ export interface EnterpriseOptions {
   resolveEntitlements: ResolveEntitlements;
   /**
    * Reserved — not yet consumed by `enterprisePreset` (`./preset.ts`).
-   * `@better-auth/sso@1.7.5`'s `sso()` constructor has no plugin-level slot
+   * `@better-auth/sso@1.7.7`'s `sso()` constructor has no plugin-level slot
    * for a default/shared SP signing identity (verified directly against
-   * `node_modules/@better-auth/sso/dist/index-CMcY1z4e.d.mts`'s `SSOOptions`
+   * `node_modules/@better-auth/sso/dist/index-sM6JWXeV.d.mts`'s `SSOOptions`
    * interface — only a *per-provider* `samlConfig.spMetadata`, set at
    * `/sso/register` time for that one org's connection, exists at all), so
    * this can't be wired into `preset.ts`'s `sso(...)` call the way

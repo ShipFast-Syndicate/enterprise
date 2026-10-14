@@ -1,6 +1,6 @@
 # @alphabros/enterprise
 
-Alpha Bros studio enterprise layer for [better-auth](https://www.better-auth.com/) `1.7.5`:
+Alpha Bros studio enterprise layer for [better-auth](https://www.better-auth.com/) `1.7.7`:
 SSO (SAML + OIDC), SCIM 2.0 provisioning (Users + Groups), organizations, a hash-chained
 audit log (tamper-evident against database writers when keyed with `audit.chainKey` and its
 head exported off-box — see `docs/security.md`), security policy enforcement, and a
@@ -27,12 +27,12 @@ This package ships one dependency of its own (`zod`) and declares everything els
 
 ```jsonc
 {
-  "@better-auth/api-key": "1.7.5",
-  "@better-auth/core": "1.7.5",
-  "@better-auth/passkey": "1.7.5",
-  "@better-auth/scim": "1.7.5",
-  "@better-auth/sso": "1.7.5",
-  "better-auth": "1.7.5",
+  "@better-auth/api-key": "1.7.7",
+  "@better-auth/core": "1.7.7",
+  "@better-auth/passkey": "1.7.7",
+  "@better-auth/scim": "1.7.7",
+  "@better-auth/sso": "1.7.7",
+  "better-auth": "1.7.7",
   "better-call": "1.4.0",
   "@libsql/client": "^0.15.15 || ^0.17.3", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
@@ -41,8 +41,11 @@ This package ships one dependency of its own (`zod`) and declares everything els
 }
 ```
 
-`better-auth` and its `@better-auth/*` plugin set are pinned to the exact `1.7.5` release
-(not a caret range) so the complete auth stack uses the tested, patched SCIM release.
+`better-auth` and its `@better-auth/*` plugin set are pinned to the exact `1.7.7` release
+(not a caret range) so the complete auth stack uses the tested, patched release: 1.7.7 fixes
+GHSA-965c-763c-88jm, and the package reads records better-auth writes (the magic-link
+pre-flight reads the pending link's verification row), so each better-auth upgrade ships as a
+release of this package. Upgrade `better-auth` and every `@better-auth/*` package together.
 The former advisory exception is removed. See [`docs/security.md`](./docs/security.md)
 and the [migration guide](./docs/migration-1-7.md) for the new credential and identity model.
 `samlify` is the SAML library `@better-auth/sso` already uses; the package asks it which
@@ -107,7 +110,7 @@ sign-ins are bound to the signing provider's verified domain by default
 and [domain binding](./docs/sso.md#domain-binding-ssodomainbinding-default-verified-domain).
 
 `samlSpKeys` is **not** in that list. It is typed on `EnterpriseOptions` and reserved, but
-`enterprisePreset` cannot consume it: `@better-auth/sso@1.7.5`'s `sso()` has no plugin-level slot
+`enterprisePreset` cannot consume it: `@better-auth/sso@1.7.7`'s `sso()` has no plugin-level slot
 for a shared SP signing identity — only a _per-provider_ `samlConfig.spMetadata`, set at
 `/sso/register` time. Read it back yourself and put it in your own registration body if you want
 one shared identity across orgs; see [`docs/sso.md`](./docs/sso.md). Wiring it properly is a P2

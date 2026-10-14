@@ -1,6 +1,6 @@
 # SCIM provisioning
 
-The preset uses Better Auth **1.7.5** native Users and Groups at `/api/auth/scim/v2`.
+The preset uses Better Auth **1.7.7** native Users and Groups at `/api/auth/scim/v2`.
 Both resources are isolated by connection and gated on the organization's `scim`
 entitlement. Supply `scimCredentialHashSecret` independently from the SSO encryption
 key, and enable interactive adapter transactions (`transaction: true` for Drizzle).

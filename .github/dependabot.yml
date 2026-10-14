@@ -48,6 +48,15 @@ updates:
           - "@better-fetch/*"
     labels:
       - dependencies
+    ignore:
+      # better-auth 1.7.x declares exact peers better-call 1.4.0 and
+      # @better-auth/utils 0.4.2. Grouped with it, these majors made the whole
+      # better-auth update unmergeable (#27). Lift them with the better-auth
+      # release that moves those peers.
+      - dependency-name: better-call
+        versions: [">=2"]
+      - dependency-name: "@better-auth/utils"
+        versions: [">=0.5"]
   - package-ecosystem: github-actions
     directory: /
     cooldown:

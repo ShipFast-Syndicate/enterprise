@@ -5,6 +5,8 @@ import {
   classifySessionCreate,
   deriveSessionCreateMethod,
   buildSessionCreateBeforeHook,
+  magicLinkRecordEmail,
+  magicLinkVerificationIdentifier,
 } from "../../src/server/policy/enforcement";
 import { ALLOWED_METHOD_VALUES } from "../../src/server/policy/store";
 import { makeAuth, signUpOwner, createOrg, type TestAuth } from "../helpers/auth";
@@ -443,6 +445,66 @@ describe("sign-in enforcement + session-creation backstop", () => {
     expect(rows.rows.length).toBe(1);
   });
 
+  it("the pre-flight reads the row better-auth writes: identifier `magic-link:<token>`, value tagged `type: magic-link`", async () => {
+    // better-auth 1.7.7 (GHSA-965c-763c-88jm) moved magic links from a bare
+    // `<token>` identifier to `magic-link:<token>`. If a future release moves
+    // them again, this fails here, by name, rather than only through the
+    // pre-flight tests above.
+    const sent: Array<{ email: string; token: string }> = [];
+    const t = await makeAuth({
+      plugins: [
+        magicLink({
+          async sendMagicLink({ email, token }) {
+            sent.push({ email, token });
+          },
+        }),
+      ],
+    });
+    const res = await t.api.post("/sign-in/magic-link", { email: "carol@example.test" }, {});
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+
+    const rows = await t.client.execute({
+      sql: `SELECT value FROM verification WHERE identifier = ?`,
+      args: [magicLinkVerificationIdentifier(sent[0]!.token)],
+    });
+    expect(rows.rows).toHaveLength(1);
+    expect(magicLinkRecordEmail(rows.rows[0]!.value)).toBe("carol@example.test");
+  });
+
+  it("a pre-1.7.7 magic-link row (bare identifier, or an untyped value) is not resolved by the pre-flight: upstream answers INVALID_TOKEN, not a policy refusal", async () => {
+    const t = await makeAuth({ plugins: [magicLink({ async sendMagicLink() {} })] });
+    await setUpSsoEnforcedOrg(t, ["bob@acme.test"]);
+    const legacyValue = JSON.stringify({ email: "bob@acme.test" });
+    const bare = "legacyBareToken0123456789abcdefgh";
+    const untyped = "legacyUntypedToken0123456789abcd";
+    // As 1.7.6 wrote it, and that value under the new key. 1.7.7's handler
+    // redeems neither, so the pre-flight must not refuse on their behalf.
+    const legacyRows: ReadonlyArray<readonly [id: string, identifier: string]> = [
+      ["verif_legacy_bare", bare],
+      ["verif_legacy_untyped", magicLinkVerificationIdentifier(untyped)],
+    ];
+    for (const [id, identifier] of legacyRows) {
+      await t.client.execute({
+        sql: `INSERT INTO verification (id, identifier, value, expiresAt, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?)`,
+        args: [id, identifier, legacyValue, Date.now() + 1000 * 60 * 5, Date.now(), Date.now()],
+      });
+    }
+    const sessionsBefore = (await t.client.execute(`SELECT id FROM session`)).rows.length;
+
+    for (const token of [bare, untyped]) {
+      const res = await t.api.get(`/magic-link/verify?token=${token}`);
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toContain("error=INVALID_TOKEN");
+    }
+
+    expect((await t.client.execute(`SELECT id FROM session`)).rows.length).toBe(sessionsBefore);
+    const remaining = await t.client.execute(
+      `SELECT id FROM verification WHERE id IN ('verif_legacy_bare', 'verif_legacy_untyped')`,
+    );
+    expect(remaining.rows).toHaveLength(2);
+  });
+
   it("allowedMethods excluding password blocks /sign-in/email with 403 METHOD_NOT_ALLOWED", async () => {
     const t = await makeAuth();
     const { cookie } = await signUpOwner(t, "owner@acme.test");
@@ -606,6 +668,35 @@ describe("deriveSessionCreateMethod (session-creation backstop's path -> method 
       kind: "unknown",
       path: "/callback/:id",
     });
+  });
+});
+
+describe("magicLinkRecordEmail (the /magic-link/verify pre-flight's value check)", () => {
+  it("returns the e-mail of a value better-auth >= 1.7.7 writes", () => {
+    expect(magicLinkRecordEmail(JSON.stringify({ type: "magic-link", email: "a@acme.test" }))).toBe(
+      "a@acme.test",
+    );
+    expect(
+      magicLinkRecordEmail(JSON.stringify({ type: "magic-link", email: "a@acme.test", name: "A" })),
+    ).toBe("a@acme.test");
+  });
+
+  it("returns null for any value 1.7.7's verify handler would not redeem", () => {
+    expect(magicLinkRecordEmail(JSON.stringify({ email: "a@acme.test" }))).toBeNull(); // 1.7.6 shape
+    expect(
+      magicLinkRecordEmail(JSON.stringify({ type: "auth-state", email: "a@acme.test" })),
+    ).toBeNull();
+    expect(magicLinkRecordEmail(JSON.stringify({ type: "magic-link", email: 1 }))).toBeNull();
+    expect(magicLinkRecordEmail(JSON.stringify({ type: "magic-link" }))).toBeNull();
+    expect(magicLinkRecordEmail(JSON.stringify("a@acme.test"))).toBeNull();
+    expect(magicLinkRecordEmail("null")).toBeNull();
+    expect(magicLinkRecordEmail("not json")).toBeNull();
+    expect(magicLinkRecordEmail(undefined)).toBeNull();
+    expect(magicLinkRecordEmail(42)).toBeNull();
+  });
+
+  it("keys a magic link under its purpose prefix", () => {
+    expect(magicLinkVerificationIdentifier("tok")).toBe("magic-link:tok");
   });
 });
 
