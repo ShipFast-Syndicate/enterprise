@@ -1,3 +1,9 @@
+## [1.1.1](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.1.0...v1.1.1) (2026-10-14)
+
+### Bug Fixes
+
+* **deps:** require better-auth 1.7.7 and read its magic-link rows ([#31](https://github.com/ShipFast-Syndicate/enterprise/issues/31)) ([41690a2](https://github.com/ShipFast-Syndicate/enterprise/commit/41690a2e12b7ade9893f485f6c9291473be745fc)), closes [#27](https://github.com/ShipFast-Syndicate/enterprise/issues/27)
+
 ## [1.1.0](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.0.1...v1.1.0) (2026-10-13)
 
 ### Features
