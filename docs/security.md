@@ -3,8 +3,8 @@
 ## Patched SCIM dependency
 
 GHSA-j8v8-g9cx-5qf4 affects `@better-auth/scim >=1.5.0 <1.7.0-beta.4`.
-The complete Better Auth peer set is now pinned to **1.7.5**. The audit suppression
-has been removed. This is a breaking provisioning migration; see
+The complete Better Auth peer set is now pinned to **1.7.7** (see the next section). The audit
+suppression has been removed. This is a breaking provisioning migration; see
 [the migration guide](./migration-1-7.md). Legacy management endpoints and the
 custom Groups bearer parser are no longer mounted or exported.
 
@@ -15,6 +15,24 @@ produce one, so it is always a manual grant) — the skipped ban is audited and 
 keys are still revoked like everyone else's (see "API keys" below).
 Native bearer authentication binds a credential to one connection and provisioning
 domain. Users and Groups enforce the same `scim` entitlement before mutation.
+
+## Patched magic-link and OAuth state dependency
+
+GHSA-965c-763c-88jm (critical) affects `better-auth >=1.4.0-beta.18 <1.7.7`: an OAuth state
+could be redeemed as a magic link to sign in as another user. The peer set is pinned to
+**1.7.7**, which keys every verification purpose separately: a pending magic link is the row
+`magic-link:<token>` (or `magic-link:<hashed token>`) with a value tagged
+`"type":"magic-link"`, and database-backed OAuth/SAML state is `auth-state:<state>`.
+
+The `/magic-link/verify` pre-flight reads exactly the row 1.7.7's handler redeems and nothing
+else: a bare `<token>` identifier or an untyped value is never resolved. Under an older
+better-auth the pre-flight finds no row and the session-creation backstop still refuses the
+sign-in, but upstream's handler has by then consumed the link and, for an address that is not
+yet verified, deleted the account's linked accounts and sessions.
+
+Upgrade every server that shares the verification table to 1.7.7 at once. Magic links and
+OAuth/SAML sign-ins pending at the switch stop working (their rows and state cookies use the old
+format): users request a new link or start the sign-in again.
 
 ## Secrets and token storage
 
@@ -33,7 +51,7 @@ domain. Users and Groups enforce the same `scim` entitlement before mutation.
 - **What is _not_ encrypted.** Everything else on `ssoProvider` is stored exactly as upstream
   stores it, in the clear: `samlConfig`'s `cert`, `idpMetadata` and `entryPoint`, the issuer, the
   domain. That is public IdP material, not secrets. And the **`samlSpKeys` option is reserved and
-  unused** — `enterprisePreset` cannot pass it to `@better-auth/sso@1.7.5`, which has no
+  unused** — `enterprisePreset` cannot pass it to `@better-auth/sso@1.7.7`, which has no
   plugin-level slot for a shared SP signing identity, so its value never reaches the database and
   no at-rest guarantee applies to it. If you set it, read it back yourself and put it in your own
   `/sso/register` body's `samlConfig.spMetadata`, where the per-provider encryption above does
