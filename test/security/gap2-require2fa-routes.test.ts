@@ -65,7 +65,7 @@ function sessionCreatingRoutes(): Record<string, string[]> {
 }
 
 /**
- * The census at the pinned upstream versions (better-auth 1.7.5 and its
+ * The census at the pinned upstream versions (better-auth 1.7.7 and its
  * companions). Every route declared in a session-creating file, whether or
  * not that particular route creates a session itself (a file's non-session
  * routes are listed too — they can only be refused, never stand).

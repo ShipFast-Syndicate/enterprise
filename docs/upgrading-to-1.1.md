@@ -106,12 +106,14 @@ In the product's own code, check for:
 
 ## 2. Upgrade steps
 
-1. **Dependencies.** Bump `@alphabros/enterprise` to `^1.1.0`. The better-auth peer set stays
-   pinned at `1.7.5`. `samlify` (`^2.13.1`) is a new peer dependency: the package now asks
-   samlify which certificates a SAML configuration will be verified against. `@better-auth/sso`
-   already depends on it, so it is usually present; add it explicitly
-   (`pnpm add samlify@^2.13.1`) if your package manager does not install peer dependencies
-   automatically or runs with strict peer checks.
+1. **Dependencies.** Bump `@alphabros/enterprise` to `^1.1.0`. 1.1.0 keeps the better-auth peer
+   set pinned at `1.7.5`; the 1.1.x patch release after it pins `1.7.7` (GHSA-965c-763c-88jm, see
+   [`security.md`](./security.md#patched-magic-link-and-oauth-state-dependency)): move every
+   better-auth package to exactly that version with it. `samlify` (`^2.13.1`) is a new peer
+   dependency: the package now asks samlify which certificates a SAML configuration will be
+   verified against. `@better-auth/sso` already depends on it, so it is usually present; add it
+   explicitly (`pnpm add samlify@^2.13.1`) if your package manager does not install peer
+   dependencies automatically or runs with strict peer checks.
 2. **Preset plugins you replace, filter out or mount twice.** `enterprisePreset()` returns a
    plugin list; the settings below are applied to the preset's own entries only.
    - **`organization()`.** The preset mounts

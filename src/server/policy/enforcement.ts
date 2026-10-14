@@ -132,7 +132,7 @@ export type SessionCreateClassification =
  * Session-creating paths that are not a sign-in method of their own (see
  * `SessionCreateClassification["kind"] === "continuation"`). Every entry was
  * traced to an `internalAdapter.createSession` call in the pinned
- * better-auth 1.7.5 or one of the preset's plugins. The `/two-factor/verify-*`
+ * better-auth 1.7.7 or one of the preset's plugins. The `/two-factor/verify-*`
  * endpoints run without a session (the challenge cookie stands in for it);
  * the rest sit behind `sessionMiddleware`.
  *
@@ -493,16 +493,50 @@ function judgedSessionCreatedAt(session: { createdAt?: unknown }, onsetMs: numbe
  * because the pending token, not a guessable e-mail, is what identifies the
  * user — and refusing before the real handler runs keeps the single-use
  * token unconsumed, which the audit row and the user's next attempt both
- * want.
+ * want. It also keeps upstream's handler from touching the account: for a
+ * user whose e-mail is not yet verified, the handler deletes their linked
+ * accounts and sessions (`revokeUnprovenAccountAccess`) before it mints the
+ * session the backstop would then refuse.
  */
 const SIGNIN_ENFORCEMENT_PATHS = new Set<string>(["/magic-link/verify"]);
 
-/** Web-Crypto reimplementation of `magicLink`'s default `storeToken: "hashed"` hasher (see `resolveSignInEmail` below for why). */
+/** Web-Crypto reimplementation of `magicLink`'s default `storeToken: "hashed"` hasher (see `resolveMagicLinkEmail` below for why). */
 async function hashMagicLinkToken(token: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   let binary = "";
   for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * The verification identifier better-auth >= 1.7.7 keys a pending magic
+ * link under: `magic-link:<stored token>` (`magicLinkIdentifier` in
+ * `node_modules/better-auth/dist/plugins/magic-link/index.mjs`). 1.7.7 gave
+ * every verification purpose its own prefix (GHSA-965c-763c-88jm: an OAuth
+ * state row, then keyed by the bare state, could be redeemed as a magic
+ * link; state rows are now `auth-state:<state>`).
+ */
+export function magicLinkVerificationIdentifier(storedToken: string): string {
+  return `magic-link:${storedToken}`;
+}
+
+/**
+ * The e-mail of a magic-link verification value, or `null`. 1.7.7 stores
+ * `{"type":"magic-link","email":…,"name"?:…}` and its verify handler redeems
+ * only a value tagged with that type, so a row of any other shape is never
+ * resolved here either.
+ */
+export function magicLinkRecordEmail(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null; // malformed verification value — fall through to the backstop
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const record = parsed as { type?: unknown; email?: unknown };
+  return record.type === "magic-link" && typeof record.email === "string" ? record.email : null;
 }
 
 /**
@@ -513,11 +547,11 @@ async function hashMagicLinkToken(token: string): Promise<string> {
  * consuming it here would burn the token before the user's actual
  * verification request).
  *
- * `magicLink`'s `storeToken` option controls what identifier the
- * verification row is actually keyed by
- * (`node_modules/better-auth/dist/plugins/magic-link/index.mjs`): `"plain"`
- * (the default) stores the raw token as the identifier; `"hashed"` stores
- * `defaultKeyHasher(token)` — SHA-256, base64url, unpadded
+ * It reads exactly the row the real handler will redeem: the identifier
+ * `magicLinkVerificationIdentifier(storedToken)` and a value
+ * `magicLinkRecordEmail` accepts. `magicLink`'s `storeToken` option controls
+ * the stored token: `"plain"` (the default) stores the raw token; `"hashed"`
+ * stores `defaultKeyHasher(token)` — SHA-256, base64url, unpadded
  * (`./utils.mjs`'s `defaultKeyHasher`), reimplemented here via Web Crypto
  * since this plugin has no access to the `magicLink` plugin instance's
  * options (it's configured by the product, not by `orgPolicy`) to call the
@@ -525,7 +559,9 @@ async function hashMagicLinkToken(token: string): Promise<string> {
  * replicated at all. So this tries the raw token first, then the default
  * hash — covering `"plain"` and `"hashed"` — and returns `null` (deferring
  * to the `databaseHooks.session.create.before` backstop) for a custom
- * hasher or an already-consumed/unknown token.
+ * hasher or an already-consumed/unknown token. A bare (unprefixed)
+ * identifier is never looked up: since 1.7.7 the handler never redeems one,
+ * and it may belong to another verification purpose.
  */
 export async function resolveMagicLinkEmail(
   ctx: GenericEndpointContext,
@@ -533,18 +569,14 @@ export async function resolveMagicLinkEmail(
 ): Promise<string | null> {
   const token = typeof query?.token === "string" ? query.token : null;
   if (!token) return null;
-  const candidates = [token, await hashMagicLinkToken(token)];
-  for (const identifier of candidates) {
+  const storedTokens = [token, await hashMagicLinkToken(token)];
+  for (const storedToken of storedTokens) {
     const verification = await ctx.context.internalAdapter
-      .findVerificationValue(identifier)
+      .findVerificationValue(magicLinkVerificationIdentifier(storedToken))
       .catch(() => null);
     if (!verification) continue;
-    try {
-      const parsed = JSON.parse(verification.value) as { email?: unknown };
-      if (typeof parsed.email === "string") return parsed.email;
-    } catch {
-      // malformed verification value — fall through to the backstop
-    }
+    const email = magicLinkRecordEmail(verification.value);
+    if (email) return email;
   }
   return null;
 }
