@@ -81,3 +81,19 @@ into `main`:
 6. After the publish: deprecate superseded versions when the release notes say so
    (`npm deprecate "@alphabros/enterprise@<range>" "<message>"`), and check the provenance
    statement on npm names the tagged release commit.
+
+## Public contribution intake (maintainers)
+
+The repository takes external requests as issues only (see `CONTRIBUTING.md`). Issues are
+picked up by the studio's issue triage, which reads `enterprise` from the shared feeder project
+list and files a ClawVault task for each confirmed issue; code fixes are routed to code-bro.
+Security reports arrive through GitHub private vulnerability reporting (`SECURITY.md`), which
+must stay enabled.
+
+Two repository settings back this policy and must stay as they are:
+
+- **Actions → Fork pull request workflows → Require approval for first-time contributors**
+  stays on, so a fork pull request never runs a workflow without a maintainer's approval.
+- code-bro's automatic review and merge only act on pull requests from branches of this
+  organization's repository. A pull request from a fork is never reviewed or merged by the
+  bots; close it with a pointer to `CONTRIBUTING.md` and ask for an issue.
