@@ -130,10 +130,11 @@
     "yaml": "2.9.1"
   },
   "dependencies": {
-    "zod": "^4.6.5"
+    "zod": "^4.6.7"
   },
   "pnpm": {
     "overrides": {
+      "@cloudflare/vitest-plugin>zod": "4.6.7",
       "esbuild@^0.27.0": "^0.28.1",
       "handlebars": "^4.7.10",
       "source-map-js@>=1.0.0 <1.2.2": "^1.2.2"
