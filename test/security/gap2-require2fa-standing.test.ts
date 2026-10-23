@@ -7,8 +7,8 @@
 // against two deployments:
 //
 // - the derived schema `makeAuth` builds (millisecond timestamps), and
-// - the product-shaped one (`../helpers/product-auth.ts`: klar's `session`
-//   with **second**-precision timestamps, dispatch's millisecond `member` and
+// - the product-shaped one (`../helpers/product-auth.ts`: a `session` table
+//   with **second**-precision timestamps, millisecond `member` and
 //   `org_policy`) — the units the requirement's timestamps are compared in
 //   differ there, which is the point.
 //
