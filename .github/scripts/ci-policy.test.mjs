@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, matchesGlob, sep } from "node:path";
 import test from "node:test";
 import { createVitest } from "vitest/node";
 import { parse } from "yaml";
@@ -31,8 +32,25 @@ test("Vitest projects inherit the declared timeout and cover executable source",
       ],
     );
     assert.deepEqual(context.config.coverage.include, ["src/**"]);
-    // The resolved provider also appends its own test/config exclusions.
-    assert.deepEqual(context.vite.config.test.coverage.exclude, ["**/*.sql", "**/*.md"]);
+    // Vitest 5 resolves a longer exclude: the declared entries first, then its
+    // defaults and each project's own test/setup/config files. Prove the
+    // outcome instead of the list: every executable source file stays
+    // covered, and the non-JavaScript files we declared stay excluded.
+    const exclude = context.vite.config.test.coverage.exclude;
+    assert.deepEqual(exclude.slice(0, 2), ["**/*.sql", "**/*.md"]);
+    const sources = readdirSync("src", { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name).split(sep).join("/"));
+    const excluded = (file) => exclude.some((pattern) => matchesGlob(file, pattern));
+    const executable = sources.filter((file) => /\.[cm]?[jt]sx?$/.test(file));
+    assert.ok(executable.length > 0);
+    assert.deepEqual(executable.filter(excluded), []);
+    const declared = sources.filter((file) => /\.(sql|md)$/.test(file));
+    assert.ok(declared.length > 0);
+    assert.deepEqual(
+      declared.filter((file) => !excluded(file)),
+      [],
+    );
   } finally {
     await context.close();
   }
