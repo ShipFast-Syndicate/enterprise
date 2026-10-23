@@ -1,6 +1,6 @@
 # @alphabros/enterprise
 
-Alpha Bros studio enterprise layer for [better-auth](https://www.better-auth.com/) `1.7.7`:
+Alpha Bros studio enterprise layer for [better-auth](https://www.better-auth.com/) `1.7.10`:
 SSO (SAML + OIDC), SCIM 2.0 provisioning (Users + Groups), organizations, a hash-chained
 audit log (tamper-evident against database writers when keyed with `audit.chainKey` and its
 head exported off-box — see `docs/security.md`), security policy enforcement, and a
@@ -27,13 +27,13 @@ This package ships one dependency of its own (`zod`) and declares everything els
 
 ```jsonc
 {
-  "@better-auth/api-key": "1.7.7",
-  "@better-auth/core": "1.7.7",
-  "@better-auth/passkey": "1.7.7",
-  "@better-auth/scim": "1.7.7",
-  "@better-auth/sso": "1.7.7",
-  "better-auth": "1.7.7",
-  "better-call": "1.4.0",
+  "@better-auth/api-key": "1.7.10",
+  "@better-auth/core": "1.7.10",
+  "@better-auth/passkey": "1.7.10",
+  "@better-auth/scim": "1.7.10",
+  "@better-auth/sso": "1.7.10",
+  "better-auth": "1.7.10",
+  "better-call": "1.4.2",
   "@libsql/client": "^0.15.15 || ^0.17.3", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
   "lit": "^3", // optional — only needed for ./portal
@@ -41,9 +41,9 @@ This package ships one dependency of its own (`zod`) and declares everything els
 }
 ```
 
-`better-auth` and its `@better-auth/*` plugin set are pinned to the exact `1.7.7` release
-(not a caret range) so the complete auth stack uses the tested, patched release: 1.7.7 fixes
-GHSA-965c-763c-88jm, and the package reads records better-auth writes (the magic-link
+`better-auth` and its `@better-auth/*` plugin set are pinned to the exact `1.7.10` release
+(not a caret range) so the complete auth stack uses the tested, patched release (1.7.7 fixed
+GHSA-965c-763c-88jm, and 1.7.10 includes that fix), and the package reads records better-auth writes (the magic-link
 pre-flight reads the pending link's verification row), so each better-auth upgrade ships as a
 release of this package. Upgrade `better-auth` and every `@better-auth/*` package together.
 The former advisory exception is removed. See [`docs/security.md`](./docs/security.md)
