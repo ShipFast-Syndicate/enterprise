@@ -2,6 +2,19 @@ name: Release
 on:
   push:
     branches: [main]
+  # Rehearses publication from any ref without touching the registry: builds,
+  # checks the version against npm and runs `npm publish --dry-run`. Real
+  # publication only ever follows a semantic-release push to main.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Rehearse the publish job (`npm publish --dry-run`). Only true is accepted.
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
 
 # Two fast merges to `main` must not race semantic-release into a double
 # tag/publish (security audit W3). `cancel-in-progress: false` — a release
@@ -21,6 +34,7 @@ jobs:
   # the installation token `@semantic-release/git` needs to push the release
   # commit past the `main` branch ruleset.
   release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -77,7 +91,12 @@ jobs:
   # not available on self-hosted runners.
   publish:
     needs: release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      published: ${{ steps.published.outputs.published }}
+      version: ${{ steps.version-check.outputs.version }}
     permissions:
       id-token: write
       contents: read
@@ -157,6 +176,7 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           [[ "$VERSION" =~ $VERSION_RE ]] || { echo "refusing suspicious version: $VERSION"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           if npm view "@alphabros/enterprise@$VERSION" version >/dev/null 2>&1; then
             echo "@alphabros/enterprise@$VERSION is already on the registry — skipping publish."
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -167,3 +187,79 @@ jobs:
       - name: Publish with provenance
         if: steps.check.outputs.released == 'true' && steps.version-check.outputs.exists != 'true'
         run: npm publish --provenance --access public
+
+      - name: Record publication
+        id: published
+        if: steps.check.outputs.released == 'true' && steps.version-check.outputs.exists != 'true'
+        run: echo "published=true" >> "$GITHUB_OUTPUT"
+
+  # Installs what was just published, from the registry, into a scratch
+  # consumer project: proves the public artifact (not the local build) imports
+  # and runs. Retries cover registry propagation after `npm publish`.
+  post-release-smoke:
+    needs: publish
+    if: needs.publish.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+      - name: Install the published version into a scratch project
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+          VERSION_RE: ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$
+        run: |
+          [[ "$VERSION" =~ $VERSION_RE ]] || { echo "refusing suspicious version: $VERSION"; exit 1; }
+          for attempt in 1 2 3 4 5 6; do
+            npm view "@alphabros/enterprise@$VERSION" version >/dev/null 2>&1 && break
+            echo "waiting for @alphabros/enterprise@$VERSION on the registry (attempt $attempt)"
+            sleep 30
+          done
+          .github/scripts/consumer-install.sh "@alphabros/enterprise@$VERSION"
+
+  # Manual rehearsal of the publish job. Read-only token, no OIDC, no `npm`
+  # environment: it cannot publish even if the dry-run flag were dropped.
+  publish-dry-run:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse anything but a dry run
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          [ "$DRY_RUN" = "true" ] || { echo "Only dry runs are dispatchable; real publication follows a release on main."; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Update npm
+        run: npm i -g npm@12.0.2
+      - name: Version check
+        env:
+          VERSION_RE: ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          [[ "$VERSION" =~ $VERSION_RE ]] || { echo "refusing suspicious version: $VERSION"; exit 1; }
+          LATEST=$(npm view @alphabros/enterprise version 2>/dev/null || echo none)
+          if npm view "@alphabros/enterprise@$VERSION" version >/dev/null 2>&1; then
+            echo "@alphabros/enterprise@$VERSION is already published (latest: $LATEST); a real run would skip publish." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "@alphabros/enterprise@$VERSION is not published yet (latest: $LATEST); a real run would publish it." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Publish dry run
+        run: npm publish --dry-run --access public
