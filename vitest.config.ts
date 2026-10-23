@@ -1,4 +1,6 @@
+import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
+import { IDP_CERT } from "./test/helpers/fixtures/saml-keys";
 
 export default defineConfig({
   test: {
@@ -17,13 +19,16 @@ export default defineConfig({
     // shared at the root. Vitest 4 requires extends: true for project-level
     // settings such as testTimeout to inherit. test/portal/env.test.ts guards
     // the portal environment; the CI contract test checks resolved timeouts.
+    // The `workerd` project boots `enterprisePreset` inside the real Workers
+    // runtime (test/workerd/preset.test.ts). It is part of `pnpm test`, so
+    // `ci / summary` gates the README's "runs on workerd" claim.
     projects: [
       {
         extends: true,
         test: {
           name: "server",
           include: ["test/**/*.test.ts"],
-          exclude: ["test/portal/**"],
+          exclude: ["test/portal/**", "test/workerd/**"],
           environment: "node",
         },
       },
@@ -34,6 +39,26 @@ export default defineConfig({
           include: ["test/portal/**/*.test.ts"],
           environment: "happy-dom",
           setupFiles: ["./test/portal/setup.ts"],
+        },
+      },
+      {
+        extends: true,
+        plugins: [
+          cloudflareTest({
+            miniflare: {
+              compatibilityDate: "2026-08-01",
+              compatibilityFlags: ["nodejs_compat"],
+              // The IdP certificate is minted by the Node-side fixture
+              // (@peculiar/x509 does not need to run inside workerd) and
+              // handed in as a binding, so the SAML provider the tests
+              // register carries a real, parseable X.509 certificate.
+              bindings: { IDP_CERT },
+            },
+          }),
+        ],
+        test: {
+          name: "workerd",
+          include: ["test/workerd/**/*.test.ts"],
         },
       },
     ],
