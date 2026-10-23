@@ -21,14 +21,16 @@ on:
         default: '["ubuntu-latest"]'
 
 permissions:
-  contents: write
-  pull-requests: write
-  checks: read
-  statuses: read
-  actions: read
+  contents: read
 
 jobs:
   automerge:
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      statuses: read
+      actions: read
     if: >-
       (github.event_name == 'pull_request_target' && github.event.pull_request.user.login == 'dependabot[bot]') ||
       (github.event_name == 'workflow_run' && (github.event.workflow_run.name == 'CI' || github.event.workflow_run.name == 'CI summary') && github.event.workflow_run.conclusion == 'success')
