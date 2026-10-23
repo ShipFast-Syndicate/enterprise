@@ -19,9 +19,27 @@ Branch protection continues to use `ci / summary`. This job requires:
 - Gitleaks full-history scanning with `.gitleaks.toml`;
 - `pnpm audit --audit-level=high` with the existing documented exception;
 - the npm package build;
+- the packed tarball (`package` job): `pnpm pack`, file list checked against the
+  allow-list in `.github/scripts/pack-files.mjs`, then
+  `.github/scripts/consumer-install.sh` installs it into a scratch project with
+  the declared peers, imports `/server`, `/schema`, `/client` and `/portal`
+  through the package name and runs `ab-enterprise --help`;
+- `actionlint` (pinned release, SHA-256 checked, shellcheck included) on every
+  workflow;
 - the existing PR base/head policy;
 - for PRs into main, both deploy-QA statuses on the exact PR head, or the live
   `release_grant` override.
+
+Branch rulesets (`develop`, `main` and the repository-level
+`enterprise-develop`/`enterprise-main`) require `ci / summary`; confirmed through
+`GET /repos/ShipFast-Syndicate/enterprise/rules/branches/{develop,main}` on
+2026-10-23. Renaming the caller job `ci` or the `summary` job breaks merges.
+
+Every job declares `timeout-minutes` (asserted by the contract tests) and the
+least permissions it needs; `ci.yml` cancels superseded runs per ref and
+`release.yml` serialises releases without cancelling one in flight. CI also runs
+nightly (03:17 UTC) on the default branch, `develop`, to catch new advisories
+and registry or runner drift between merges.
 
 Failures, cancellations, missing reports and unexpected skipped jobs block the
 summary. Dependabot PRs run the full set, including the Node quality job (lint,
@@ -45,11 +63,13 @@ ephemeral runner; raw matches are not published as artifacts or PR comments.
 Semgrep reports a failing exit code without printing matched source. Reproduce
 locally with the command in the workflow to inspect findings privately.
 
-The separate `release.yml` still calls a private reusable release workflow. That
-call has executed successfully and now explicitly requests a GitHub-hosted
-runner. Verify hosted execution on the next authorized release before applying
-any runner-group restriction that would remove its previous access. The runner
-choice does not authorize package publication; the main-PR release-readiness
+`release.yml` runs semantic-release locally on pushes to `main`, then the
+`publish` job (OIDC trusted publishing, `npm` environment) and a
+`post-release-smoke` job that installs the just-published version from the
+registry with `consumer-install.sh`. Dispatching the workflow manually runs only
+`publish-dry-run`: build, version check against the registry and
+`npm publish --dry-run`, with a read-only token, no OIDC and no `npm`
+environment, so a rehearsal can never publish. The main-PR release-readiness
 gate remains enforced.
 
 Hosted placement in this source does not restrict what an altered workflow can
@@ -68,8 +88,9 @@ into `main`:
    `pnpm exec prettier --check .`, `pnpm test`, `pnpm build`,
    `python3 .github/scripts/dependabot-gate.test.py` and
    `node --test .github/scripts/*.test.mjs` (the glob, not the directory).
-2. `npm pack --dry-run` and compare the file list with the previous release's tarball — the
-   `files` set (`dist`, `sql`, `LICENSE`, `README.md`) should not change unexpectedly.
+2. Dispatch **Release** (dry run) on the release head; CI's `package` job already enforces
+   the tarball allow-list, so a file-list change there is a deliberate edit to
+   `.github/scripts/pack-files.mjs`.
 3. `pnpm audit --prod`.
 4. `pnpm exec semantic-release --dry-run` with a read-only token, and confirm the computed
    version. A squash or merge commit's type decides the bump: keep the commit types of the

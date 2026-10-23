@@ -76,6 +76,14 @@ describe("ab-enterprise CLI (built binary)", () => {
     expect(readFileSync(cliPath, "utf8").startsWith("#!/usr/bin/env node")).toBe(true);
   });
 
+  it("--help prints the usage on stdout and exits 0", () => {
+    for (const flag of ["--help", "-h", "help"]) {
+      const result = runCli([flag]);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/^usage: ab-enterprise migrate/);
+    }
+  });
+
   it("verify exits 1 against an empty database and prints missing items", () => {
     const dbPath = join(workDir, "empty.db");
     const result = runCli(["verify", "--url", `file:${dbPath}`]);

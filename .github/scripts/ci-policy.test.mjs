@@ -249,7 +249,24 @@ const publicActions = new Set([
 
 test("public release uses a local job and confines registry authority to protected publication", () => {
   const release = parse(readFileSync(new URL("../workflows/release.yml", import.meta.url), "utf8"));
-  assert.deepEqual(release.on, { push: { branches: ["main"] } });
+  assert.deepEqual(release.on.push, { branches: ["main"] });
+  assert.deepEqual(Object.keys(release.on).sort(), ["push", "workflow_dispatch"]);
+  assert.deepEqual(release.permissions, { contents: "read" });
+  assert.equal(release.jobs.release.if, "github.event_name == 'push'");
+  assert.equal(release.jobs.publish.if, "github.event_name == 'push'");
+  // The dispatchable rehearsal can never publish: no OIDC, no npm environment.
+  const dryRun = release.jobs["publish-dry-run"];
+  assert.equal(dryRun.if, "github.event_name == 'workflow_dispatch'");
+  assert.deepEqual(dryRun.permissions, { contents: "read" });
+  assert.equal(dryRun.environment, undefined);
+  const dryRunScripts = dryRun.steps.map((step) => step.run ?? "").join("\n");
+  assert.match(dryRunScripts, /npm publish --dry-run/);
+  assert.doesNotMatch(dryRunScripts.replace(/npm publish --dry-run/g, ""), /npm publish/);
+  const smoke = release.jobs["post-release-smoke"];
+  assert.equal(smoke.needs, "publish");
+  assert.deepEqual(smoke.permissions, { contents: "read" });
+  assert.match(smoke.steps.at(-1).run, /consumer-install\.sh "@alphabros\/enterprise@\$VERSION"/);
+  for (const job of Object.values(release.jobs)) assert.ok(job["timeout-minutes"] > 0);
   assert.equal(release.concurrency["cancel-in-progress"], false);
   assert.equal(release.jobs.release.uses, undefined);
   assert.equal(release.jobs.release.permissions["id-token"], undefined);
@@ -284,7 +301,12 @@ test("public release uses a local job and confines registry authority to protect
 });
 
 function assertClosure(caller, workflow) {
-  assert.deepEqual(Object.keys(caller.on).sort(), ["pull_request", "push", "workflow_dispatch"]);
+  assert.deepEqual(Object.keys(caller.on).sort(), [
+    "pull_request",
+    "push",
+    "schedule",
+    "workflow_dispatch",
+  ]);
   assert.equal(caller.jobs.ci.uses, "./.github/workflows/public-ci.yml");
   assert.equal(caller.jobs.ci.secrets, undefined);
   assert.deepEqual(workflow.on, { workflow_call: null });
@@ -333,6 +355,13 @@ function assertClosure(caller, workflow) {
     ),
   );
   const scripts = (job) => workflow.jobs[job].steps.map((step) => step.run ?? "").join("\n");
+  for (const job of Object.values(workflow.jobs)) assert.ok(job["timeout-minutes"] > 0);
+  const pack = scripts("package");
+  assert.match(pack, /pack-files\.mjs/);
+  assert.match(pack, /consumer-install\.sh/);
+  const actionlint = scripts("actionlint");
+  assert.match(actionlint, /sha256sum --check/);
+  assert.match(actionlint, /actionlint" -color/);
   const semgrep = scripts("semgrep");
   for (const rules of [
     "p/default",

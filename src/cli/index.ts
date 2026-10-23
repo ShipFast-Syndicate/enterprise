@@ -654,6 +654,9 @@ async function cmdAuditVerify(argv: string[]): Promise<number> {
   }
 }
 
+const USAGE =
+  "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>] [--expect-head <seq>:<hash>]";
+
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   switch (command) {
@@ -663,17 +666,18 @@ async function main(): Promise<number> {
       return cmdVerify(rest);
     case "audit-verify":
       return cmdAuditVerify(rest);
+    case "--help":
+    case "-h":
+    case "help":
+      console.log(USAGE);
+      return 0;
     case undefined:
       console.error("ab-enterprise: no command given");
-      console.error(
-        "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>] [--expect-head <seq>:<hash>]",
-      );
+      console.error(USAGE);
       return 1;
     default:
       console.error(`ab-enterprise: unknown command "${command}"`);
-      console.error(
-        "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>] [--expect-head <seq>:<hash>]",
-      );
+      console.error(USAGE);
       return 1;
   }
 }

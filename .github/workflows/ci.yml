@@ -5,6 +5,10 @@ on:
   pull_request:
     branches: [main, develop]
   workflow_dispatch:
+  # Nightly drift run on the default branch (develop): catches new advisories,
+  # registry changes to resolved peers and runner image drift between merges.
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
