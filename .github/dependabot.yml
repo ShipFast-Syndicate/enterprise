@@ -64,6 +64,18 @@ updates:
       # when the support floor moves, then lift this ignore.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # typescript-eslint supports typescript <6.1.0 only (8.72.0, 2026-10-22);
+      # lift when it supports 7.x. TS 6.0.x stays allowed.
+      - dependency-name: typescript
+        versions: [">=6.1.0"]
+      # semantic-release 25.0.9 bundles @semantic-release/release-notes-generator
+      # 14.1.1, which renders with conventional-changelog-writer 8.x.
+      # conventional-changelog-conventionalcommits 10.x refuses to render with a
+      # writer older than 9 ("Your changelog tooling loaded an older writer"), so
+      # release notes fail in the dry run. Lift when a stable release-notes-generator
+      # (15.x, writer 9+) ships in a semantic-release release.
+      - dependency-name: conventional-changelog-conventionalcommits
+        versions: [">=10"]
   - package-ecosystem: github-actions
     directory: /
     cooldown:
