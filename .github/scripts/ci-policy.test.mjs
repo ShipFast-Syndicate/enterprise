@@ -235,9 +235,15 @@ const workflow = parse(
 const publicActions = new Set([
   "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
   "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+  // Verified upstream v7.1.0 tag (commit 949feb2413d6458794dcd2491c4babbbce0c15c1, signed).
+  // The v7.0.0 pin above stays only until the Dependabot bump lands.
+  "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1",
   // Verified upstream signed v6.1.0 tag d9184bf108216479bc5a137cc391f4d7b14c870b.
   "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413",
   "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  // Verified upstream v7.0.2 tag (commit cf430e030ddbb5b0abf93d22962f4752f3646cd9, signed).
+  // The v7.0.1 pin above stays only until the Dependabot bump lands.
+  "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
   "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
 ]);
 
