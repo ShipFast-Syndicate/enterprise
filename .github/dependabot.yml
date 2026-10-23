@@ -57,6 +57,13 @@ updates:
         versions: [">=2"]
       - dependency-name: "@better-auth/utils"
         versions: [">=0.5"]
+      # @types/node major = the oldest Node major this package supports
+      # (engines.node ">=22", CI on Node 22). A newer types major describes
+      # APIs a supported runtime does not have, and a library must not compile
+      # against them. Move engines, CI node-version and @types/node together
+      # when the support floor moves, then lift this ignore.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     cooldown:
