@@ -306,7 +306,7 @@ async function subjectHintOf(
  * The provider a provider-scoped endpoint acts on: a route with a
  * `:providerId` parameter (`/sso/saml2/sp/slo/:providerId`) acts on the
  * parameter and ignores any body field (`const { providerId } = ctx.params`,
- * `node_modules/@better-auth/sso/dist/index.mjs:4285`); every other provider
+ * `node_modules/@better-auth/sso/dist/index.mjs:4306`); every other provider
  * route acts on `body.providerId` (`checkProviderAccess(ctx,
  * body.providerId)`, the `/sso/*` entries of `GATE_ORG_SOURCES` in
  * `../gate.ts`). Reading the body first let

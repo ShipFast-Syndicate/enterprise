@@ -3,7 +3,7 @@
 ## Patched SCIM dependency
 
 GHSA-j8v8-g9cx-5qf4 affects `@better-auth/scim >=1.5.0 <1.7.0-beta.4`.
-The complete Better Auth peer set is now pinned to **1.7.7** (see the next section). The audit
+The complete Better Auth peer set is now pinned to **1.7.10** (see the next section). The audit
 suppression has been removed. This is a breaking provisioning migration; see
 [the migration guide](./migration-1-7.md). Legacy management endpoints and the
 custom Groups bearer parser are no longer mounted or exported.
