@@ -8,14 +8,16 @@ on:
     types: [completed]
 
 permissions:
-  contents: write
-  pull-requests: write
-  checks: read
-  statuses: read
-  actions: read
+  contents: read
 
 jobs:
   automerge:
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      statuses: read
+      actions: read
     uses: ./.github/workflows/dependabot-merge-gate.yml
     with:
       runs-on: '["ubuntu-latest"]'
