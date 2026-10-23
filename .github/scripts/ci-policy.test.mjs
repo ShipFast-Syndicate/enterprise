@@ -27,6 +27,7 @@ test("Vitest projects inherit the declared timeout and cover executable source",
       [
         { name: "server", timeout: 20000, environment: "node" },
         { name: "portal", timeout: 20000, environment: "happy-dom" },
+        { name: "workerd", timeout: 20000, environment: "node" },
       ],
     );
     assert.deepEqual(context.config.coverage.include, ["src/**"]);

@@ -412,6 +412,9 @@ Turso even when the migration file itself was committed).
 `@alphabros/enterprise/schema` is likewise Node-only — it reads the packaged SQL file from disk
 at runtime and does not run on Cloudflare Workers/workerd. `./server`, `./client`, and
 `./portal` have no Node built-ins and run anywhere better-auth itself does.
+The `workerd` Vitest project (`test/workerd`) boots `enterprisePreset` on better-auth's memory
+adapter inside the real workerd runtime on every `pnpm test` run and covers social sign-in
+start, SAML SP metadata, SCIM ServiceProviderConfig and Groups, and an audit write.
 
 ## Documentation
 
