@@ -34,7 +34,7 @@ This package ships one dependency of its own (`zod`) and declares everything els
   "@better-auth/sso": "1.7.10",
   "better-auth": "1.7.10",
   "better-call": "1.4.2",
-  "@libsql/client": "^0.15.15 || ^0.17.3", // optional — only needed for ./schema and the CLI
+  "@libsql/client": "^0.15.15 || ^0.17.3 || ^0.18.0", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
   "lit": "^3", // optional — only needed for ./portal
   "samlify": "^2.13.1", // peer since 1.1.0; already a dependency of @better-auth/sso
