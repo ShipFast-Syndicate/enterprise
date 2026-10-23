@@ -5,7 +5,9 @@
 set -euo pipefail
 spec="$1"
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
-case "$spec" in *.tgz) spec="$(cd "$(dirname "$spec")" && pwd)/$(basename "$spec")" ;; esac
+case "$spec" in
+  *.tgz) spec="$(cd "$(dirname "$spec")" && pwd)/$(basename "$spec")" ;;
+esac
 scratch="$(mktemp -d)"
 cd "$scratch"
 npm init -y >/dev/null
