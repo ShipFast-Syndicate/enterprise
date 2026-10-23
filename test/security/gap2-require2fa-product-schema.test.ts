@@ -2,8 +2,8 @@
 // must run on the tables products actually have.
 //
 // Every product maintains its better-auth Drizzle tables by hand
-// (`../helpers/product-auth.ts` reproduces klar's `session` and dispatch's
-// `member`/`org_policy`), and upstream's Drizzle adapter refuses to write a
+// (`../helpers/product-auth.ts` reproduces a product's `session` table and
+// hand-maintained `member`/`org_policy` tables), and upstream's Drizzle adapter refuses to write a
 // value key that its table does not declare. An enforcement that records
 // anything new on a core row therefore fails every sign-in on every product —
 // orgs without `require2fa` included. These cases drive the ordinary flows of

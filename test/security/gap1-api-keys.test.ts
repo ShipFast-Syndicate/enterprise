@@ -28,7 +28,7 @@
 // first-party `bearer()` plugin mounted, that token then drove the entire
 // refused surface), and a `jwt()` or `oneTimeToken()` plugin a product adds
 // minted a fresh credential from a key. The list is now an allow-list built
-// from what the seven fleet products do with a key (all of them:
+// from what embedding products do with a key (all of them:
 // `auth.api.getSession({ headers })`; none opts into the mock session), so
 // the reads rounds 2–3 allow-listed (`/organization/*` reads, `/api-key/list`,
 // `/sso/providers`, `/list-accounts`, …) are refused too — the inversions are
@@ -1390,12 +1390,12 @@ describe("gap 1 — a key reaches an allow-list only (verifier round 3, F6/F7; l
 
   it("preset default: the header alone is refused on /list-sessions, /organization/list and a product's own endpoint next to a valid cookie; /get-session with a stray header still answers the cookie's session", async () => {
     // Products forward the whole incoming request into
-    // `auth.api.getSession({ headers })` (rendra's legacy `X-API-Key`
+    // `auth.api.getSession({ headers })` (legacy `X-API-Key`
     // callers included), so `/get-session` must stay reachable with a
     // stray header — it is allow-listed. Everything else is not.
     const t = await makeAuth({ plugins: [productPlugin()] });
     const { cookie, userId } = await signUpOwner(t);
-    const both = { cookie, "x-api-key": "rendra_legacy_or_anything" };
+    const both = { cookie, "x-api-key": "legacy_or_anything" };
     for (const path of ["/list-sessions", "/organization/list", "/zz-product/whoami"]) {
       const res = await t.api.get(path, both);
       expect(res.status, path).toBe(403);

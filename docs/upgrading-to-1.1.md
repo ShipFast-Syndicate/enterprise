@@ -13,7 +13,8 @@ what such a plugin must set.
 - **One data-only migration**, `0003_require2fa.sql`, applied with
   `ab-enterprise migrate --out <folder> --from 0003` (step 3 below).
 - **One new peer dependency**, `samlify` (step 1).
-- The upgrade applies to every release from 0.1.0 to 1.0.1. Upgrade from any of them; the
+- The upgrade applies to every release from 0.1.0 to 1.0.1. Upgrade from any of them, to 1.1.1
+  or later together with better-auth 1.7.7 (1.1.0 is deprecated: it pins better-auth 1.7.5); the
   release notes list what changed ([`docs/releases/1.1.0.md`](./releases/1.1.0.md)).
 - **From 0.1.x**, first follow [`docs/migration-1-7.md`](./migration-1-7.md) (the better-auth
   1.6.33 → 1.7.5 peer set and SCIM connection catalog that 1.0.0 introduced), then this guide.
@@ -106,9 +107,9 @@ In the product's own code, check for:
 
 ## 2. Upgrade steps
 
-1. **Dependencies.** Bump `@alphabros/enterprise` to `^1.1.0`. 1.1.0 keeps the better-auth peer
-   set pinned at `1.7.5`; the 1.1.x patch release after it pins `1.7.7` (GHSA-965c-763c-88jm, see
-   [`security.md`](./security.md#patched-magic-link-and-oauth-state-dependency)): move every
+1. **Dependencies.** Bump `@alphabros/enterprise` to `^1.1.1` (1.1.0 is deprecated). 1.1.0
+   kept the better-auth peer set pinned at `1.7.5`; 1.1.1 and later pin `1.7.7` (GHSA-965c-763c-88jm,
+   see [`security.md`](./security.md#patched-magic-link-and-oauth-state-dependency)): move every
    better-auth package to exactly that version with it. `samlify` (`^2.13.1`) is a new peer
    dependency: the package now asks samlify which certificates a SAML configuration will be
    verified against. `@better-auth/sso` already depends on it, so it is usually present; add it

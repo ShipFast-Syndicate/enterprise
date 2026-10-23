@@ -17,7 +17,7 @@
 //      `createdAt` in place of the session's.
 //
 // Each case runs on the derived schema and on the product-shaped one
-// (`../helpers/product-auth.ts`: klar's `session` in seconds, dispatch's
+// (`../helpers/product-auth.ts`: a `session` table with timestamps in seconds,
 // millisecond `member` and `org_policy`).
 import { describe, expect, it } from "vitest";
 import type { BetterAuthOptions } from "better-auth";
