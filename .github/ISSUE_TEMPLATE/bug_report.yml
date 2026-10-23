@@ -22,8 +22,8 @@ body:
       label: better-auth versions
       description: Installed versions of `better-auth` and each `@better-auth/*` package.
       placeholder: |
-        better-auth 1.7.7
-        @better-auth/sso 1.7.7
+        better-auth 1.7.10
+        @better-auth/sso 1.7.10
       render: text
     validations:
       required: true
