@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@cloudflare/vitest-plugin>zod': 4.6.7
   esbuild@^0.27.0: ^0.28.1
   handlebars: ^4.7.10
   source-map-js@>=1.0.0 <1.2.2: ^1.2.2
@@ -14,7 +15,7 @@ importers:
   .:
     dependencies:
       zod:
-        specifier: ^4.6.5
+        specifier: ^4.6.7
         version: 4.6.7
     devDependencies:
       '@better-auth/api-key':
@@ -3418,9 +3419,6 @@ packages:
   youch@4.1.0-beta.10:
     resolution: {integrity: sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ==}
 
-  zod@4.6.5:
-    resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
-
   zod@4.6.7:
     resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
 
@@ -3592,7 +3590,7 @@ snapshots:
       miniflare: 5.20261019.2-beta(@types/node@22.20.2)
       vitest: 5.0.5(@types/node@22.20.2)(@vitest/coverage-v8@5.0.5)(happy-dom@21.0.3)(vite@7.3.7(@types/node@22.20.2)(yaml@2.9.1))
       wrangler: 4.152.0(@types/node@22.20.2)
-      zod: 4.6.5
+      zod: 4.6.7
     transitivePeerDependencies:
       - '@cloudflare/workers-types'
       - '@types/node'
@@ -6392,7 +6390,5 @@ snapshots:
       '@speed-highlight/core': 1.2.24
       cookie: 1.1.1
       youch-core: 0.3.3
-
-  zod@4.6.5: {}
 
   zod@4.6.7: {}
