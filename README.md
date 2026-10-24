@@ -23,17 +23,19 @@ pnpm add @alphabros/enterprise
 ```
 
 This package ships one dependency of its own (`zod`) and declares everything else as a
-**peer dependency**, pinned to exact versions where a security advisory requires it:
+**peer dependency**. The better-auth family and `better-call` are caret ranges that start at the
+releases this package is tested against (the security-patched floor), so you can run any later
+1.x release:
 
 ```jsonc
 {
-  "@better-auth/api-key": "1.7.10",
-  "@better-auth/core": "1.7.10",
-  "@better-auth/passkey": "1.7.10",
-  "@better-auth/scim": "1.7.10",
-  "@better-auth/sso": "1.7.10",
-  "better-auth": "1.7.10",
-  "better-call": "1.4.2",
+  "@better-auth/api-key": "^1.7.10",
+  "@better-auth/core": "^1.7.10",
+  "@better-auth/passkey": "^1.7.10",
+  "@better-auth/scim": "^1.7.10",
+  "@better-auth/sso": "^1.7.10",
+  "better-auth": "^1.7.10",
+  "better-call": "^1.4.2",
   "@libsql/client": "^0.15.15 || ^0.17.3 || ^0.18.0", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
   "lit": "^3", // optional — only needed for ./portal
@@ -41,10 +43,10 @@ This package ships one dependency of its own (`zod`) and declares everything els
 }
 ```
 
-`better-auth` and its `@better-auth/*` plugin set are pinned to the exact `1.7.10` release
-(not a caret range) so the complete auth stack uses the tested, patched release (1.7.7 fixed
-GHSA-965c-763c-88jm, and 1.7.10 includes that fix), and the package reads records better-auth writes (the magic-link
-pre-flight reads the pending link's verification row), so each better-auth upgrade ships as a
+`better-auth` and its `@better-auth/*` plugin set must be at `1.7.10` or later within 1.x (1.7.7 fixed
+GHSA-965c-763c-88jm, and 1.7.10 includes that fix). The package reads records better-auth writes
+(the magic-link pre-flight reads the pending link's verification row); CI runs the full suite
+against the latest 1.7.x release, but a future minor that changes those records may need a new
 release of this package. Upgrade `better-auth` and every `@better-auth/*` package together.
 The former advisory exception is removed. See [`docs/security.md`](./docs/security.md)
 and the [migration guide](./docs/migration-1-7.md) for the new credential and identity model.
@@ -52,7 +54,7 @@ and the [migration guide](./docs/migration-1-7.md) for the new credential and id
 certificates a SAML configuration will be verified against, so it must resolve from your app —
 add it explicitly if your package manager does not install peer dependencies.
 
-Requirements: Node `>=22`, pnpm 10 (or any package manager — pnpm is only this repo's own
+Requirements: Node `>=24`, pnpm 10 (or any package manager — pnpm is only this repo's own
 dev toolchain).
 
 ## Package layout
@@ -432,14 +434,13 @@ start, SAML SP metadata, SCIM ServiceProviderConfig and Groups, and an audit wri
 ## Development
 
 ```sh
-mise exec node@22 -- pnpm install
-mise exec node@22 -- pnpm typecheck
-mise exec node@22 -- pnpm lint
-mise exec node@22 -- pnpm format:check
-mise exec node@22 -- pnpm test
-mise exec node@22 -- pnpm build
+mise exec node@24 -- pnpm install
+mise exec node@24 -- pnpm typecheck
+mise exec node@24 -- pnpm lint
+mise exec node@24 -- pnpm format:check
+mise exec node@24 -- pnpm test
+mise exec node@24 -- pnpm build
 ```
 
-Node `>=22` is required for the toolchain itself, separately from the package's own
-`engines.node` — Node 25 is known-broken for this repo's jsdom/happy-dom-based tests
-(`mise exec node@22 -- <cmd>` pins the working version regardless of your global default).
+Node `>=24` is required for the toolchain itself (the same as the package's own `engines.node`).
+`mise exec node@24 -- <cmd>` pins the working version regardless of your global default.

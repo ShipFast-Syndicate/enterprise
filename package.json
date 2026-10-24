@@ -73,14 +73,14 @@
     "prepack": "pnpm build"
   },
   "peerDependencies": {
-    "@better-auth/api-key": "1.7.10",
-    "@better-auth/core": "1.7.10",
-    "@better-auth/passkey": "1.7.10",
-    "@better-auth/scim": "1.7.10",
-    "@better-auth/sso": "1.7.10",
+    "@better-auth/api-key": "^1.7.10",
+    "@better-auth/core": "^1.7.10",
+    "@better-auth/passkey": "^1.7.10",
+    "@better-auth/scim": "^1.7.10",
+    "@better-auth/sso": "^1.7.10",
     "@libsql/client": "^0.15.15 || ^0.17.3 || ^0.18.0",
-    "better-auth": "1.7.10",
-    "better-call": "1.4.2",
+    "better-auth": "^1.7.10",
+    "better-call": "^1.4.2",
     "drizzle-orm": "^0.45.2",
     "lit": "^3",
     "samlify": "^2.13.1"
