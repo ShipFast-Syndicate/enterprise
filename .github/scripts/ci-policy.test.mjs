@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, matchesGlob, sep } from "node:path";
 import test from "node:test";
 import { createVitest } from "vitest/node";
 import { parse } from "yaml";
@@ -27,11 +28,29 @@ test("Vitest projects inherit the declared timeout and cover executable source",
       [
         { name: "server", timeout: 20000, environment: "node" },
         { name: "portal", timeout: 20000, environment: "happy-dom" },
+        { name: "workerd", timeout: 20000, environment: "node" },
       ],
     );
     assert.deepEqual(context.config.coverage.include, ["src/**"]);
-    // The resolved provider also appends its own test/config exclusions.
-    assert.deepEqual(context.vite.config.test.coverage.exclude, ["**/*.sql", "**/*.md"]);
+    // Vitest 5 resolves a longer exclude: the declared entries first, then its
+    // defaults and each project's own test/setup/config files. Prove the
+    // outcome instead of the list: every executable source file stays
+    // covered, and the non-JavaScript files we declared stay excluded.
+    const exclude = context.vite.config.test.coverage.exclude;
+    assert.deepEqual(exclude.slice(0, 2), ["**/*.sql", "**/*.md"]);
+    const sources = readdirSync("src", { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name).split(sep).join("/"));
+    const excluded = (file) => exclude.some((pattern) => matchesGlob(file, pattern));
+    const executable = sources.filter((file) => /\.[cm]?[jt]sx?$/.test(file));
+    assert.ok(executable.length > 0);
+    assert.deepEqual(executable.filter(excluded), []);
+    const declared = sources.filter((file) => /\.(sql|md)$/.test(file));
+    assert.ok(declared.length > 0);
+    assert.deepEqual(
+      declared.filter((file) => !excluded(file)),
+      [],
+    );
   } finally {
     await context.close();
   }
@@ -235,15 +254,38 @@ const workflow = parse(
 const publicActions = new Set([
   "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
   "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+  // Verified upstream v7.1.0 tag (commit 949feb2413d6458794dcd2491c4babbbce0c15c1, signed).
+  // The v7.0.0 pin above stays only until the Dependabot bump lands.
+  "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1",
   // Verified upstream signed v6.1.0 tag d9184bf108216479bc5a137cc391f4d7b14c870b.
   "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413",
   "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+  // Verified upstream v7.0.2 tag (commit cf430e030ddbb5b0abf93d22962f4752f3646cd9, signed).
+  // The v7.0.1 pin above stays only until the Dependabot bump lands.
+  "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
   "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
 ]);
 
 test("public release uses a local job and confines registry authority to protected publication", () => {
   const release = parse(readFileSync(new URL("../workflows/release.yml", import.meta.url), "utf8"));
-  assert.deepEqual(release.on, { push: { branches: ["main"] } });
+  assert.deepEqual(release.on.push, { branches: ["main"] });
+  assert.deepEqual(Object.keys(release.on).sort(), ["push", "workflow_dispatch"]);
+  assert.deepEqual(release.permissions, { contents: "read" });
+  assert.equal(release.jobs.release.if, "github.event_name == 'push'");
+  assert.equal(release.jobs.publish.if, "github.event_name == 'push'");
+  // The dispatchable rehearsal can never publish: no OIDC, no npm environment.
+  const dryRun = release.jobs["publish-dry-run"];
+  assert.equal(dryRun.if, "github.event_name == 'workflow_dispatch'");
+  assert.deepEqual(dryRun.permissions, { contents: "read" });
+  assert.equal(dryRun.environment, undefined);
+  const dryRunScripts = dryRun.steps.map((step) => step.run ?? "").join("\n");
+  assert.match(dryRunScripts, /npm publish --dry-run/);
+  assert.doesNotMatch(dryRunScripts.replace(/npm publish --dry-run/g, ""), /npm publish/);
+  const smoke = release.jobs["post-release-smoke"];
+  assert.equal(smoke.needs, "publish");
+  assert.deepEqual(smoke.permissions, { contents: "read" });
+  assert.match(smoke.steps.at(-1).run, /consumer-install\.sh "@alphabros\/enterprise@\$VERSION"/);
+  for (const job of Object.values(release.jobs)) assert.ok(job["timeout-minutes"] > 0);
   assert.equal(release.concurrency["cancel-in-progress"], false);
   assert.equal(release.jobs.release.uses, undefined);
   assert.equal(release.jobs.release.permissions["id-token"], undefined);
@@ -278,7 +320,12 @@ test("public release uses a local job and confines registry authority to protect
 });
 
 function assertClosure(caller, workflow) {
-  assert.deepEqual(Object.keys(caller.on).sort(), ["pull_request", "push", "workflow_dispatch"]);
+  assert.deepEqual(Object.keys(caller.on).sort(), [
+    "pull_request",
+    "push",
+    "schedule",
+    "workflow_dispatch",
+  ]);
   assert.equal(caller.jobs.ci.uses, "./.github/workflows/public-ci.yml");
   assert.equal(caller.jobs.ci.secrets, undefined);
   assert.deepEqual(workflow.on, { workflow_call: null });
@@ -327,6 +374,13 @@ function assertClosure(caller, workflow) {
     ),
   );
   const scripts = (job) => workflow.jobs[job].steps.map((step) => step.run ?? "").join("\n");
+  for (const job of Object.values(workflow.jobs)) assert.ok(job["timeout-minutes"] > 0);
+  const pack = scripts("package");
+  assert.match(pack, /pack-files\.mjs/);
+  assert.match(pack, /consumer-install\.sh/);
+  const actionlint = scripts("actionlint");
+  assert.match(actionlint, /sha256sum --check/);
+  assert.match(actionlint, /actionlint" -color/);
   const semgrep = scripts("semgrep");
   for (const rules of [
     "p/default",

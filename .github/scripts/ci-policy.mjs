@@ -11,6 +11,8 @@ export const requiredJobs = [
   "gitleaks",
   "audit",
   "build",
+  "package",
+  "actionlint",
   "base",
   "release",
 ];

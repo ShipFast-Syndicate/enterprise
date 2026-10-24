@@ -49,14 +49,37 @@ updates:
     labels:
       - dependencies
     ignore:
-      # better-auth 1.7.x declares exact peers better-call 1.4.0 and
-      # @better-auth/utils 0.4.2. Grouped with it, these majors made the whole
-      # better-auth update unmergeable (#27). Lift them with the better-auth
-      # release that moves those peers.
+      # better-call 2 and later are not released as a better-auth peer yet:
+      # the better-auth family declares an exact better-call, so a lone major
+      # leaves two copies of the plugin types (#27, #34). Lift this with the
+      # better-auth release that moves that peer.
       - dependency-name: better-call
         versions: [">=2"]
-      - dependency-name: "@better-auth/utils"
-        versions: [">=0.5"]
+      # @types/node major = the oldest Node major this package supports
+      # (CI and the dev toolchain run Node 24 LTS; the published package keeps its
+      # engines.node ">=22" floor, and es2022 output). A newer types major describes
+      # APIs a supported runtime does not have, and a library must not compile
+      # against them. Move engines, CI node-version and @types/node together
+      # when the support floor moves, then lift this ignore.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # typescript-eslint supports typescript <6.1.0 only (8.72.0, 2026-10-22);
+      # lift when it supports 7.x. TS 6.0.x stays allowed.
+      - dependency-name: typescript
+        versions: [">=6.1.0"]
+      # semantic-release 25.0.9 bundles @semantic-release/release-notes-generator
+      # 14.1.1, which renders with conventional-changelog-writer 8.x.
+      # conventional-changelog-conventionalcommits 10.x refuses to render with a
+      # writer older than 9 ("Your changelog tooling loaded an older writer"), so
+      # release notes fail in the dry run. Lift when a stable release-notes-generator
+      # (15.x, writer 9+) ships in a semantic-release release.
+      - dependency-name: conventional-changelog-conventionalcommits
+        versions: [">=10"]
+      # samlify 2.15 changes the signing-certificate derivation the F-28 trust-root
+      # tests pin and breaks SP metadata in workerd; the peer is capped <2.15.0.
+      # Lift with a reviewed update of those tests and the peer range.
+      - dependency-name: samlify
+        versions: [">=2.15.0"]
   - package-ecosystem: github-actions
     directory: /
     cooldown:

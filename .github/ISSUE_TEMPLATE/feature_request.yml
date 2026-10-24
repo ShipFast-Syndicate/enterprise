@@ -1,0 +1,39 @@
+name: Feature request
+description: Something you need that the package does not do yet.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tell us the problem first, then the solution you have in mind. The roadmap in
+        [CONTRIBUTING.md](https://github.com/ShipFast-Syndicate/enterprise/blob/develop/CONTRIBUTING.md#roadmap)
+        shows what we are working on now.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, in your own product's terms?
+    validations:
+      required: true
+  - type: input
+    id: who
+    attributes:
+      label: Who needs it
+      placeholder: "Organization admins, end users, our backend, …"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How you would like it to work. Optional.
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do today
+      description: Your current workaround, if any.
+  - type: input
+    id: standard
+    attributes:
+      label: Related standard
+      description: A link to the SAML, OIDC or SCIM section it should follow, if any.

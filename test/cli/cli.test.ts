@@ -76,6 +76,14 @@ describe("ab-enterprise CLI (built binary)", () => {
     expect(readFileSync(cliPath, "utf8").startsWith("#!/usr/bin/env node")).toBe(true);
   });
 
+  it("--help prints the usage on stdout and exits 0", () => {
+    for (const flag of ["--help", "-h", "help"]) {
+      const result = runCli([flag]);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/^usage: ab-enterprise migrate/);
+    }
+  });
+
   it("verify exits 1 against an empty database and prints missing items", () => {
     const dbPath = join(workDir, "empty.db");
     const result = runCli(["verify", "--url", `file:${dbPath}`]);
@@ -477,14 +485,13 @@ describe("ab-enterprise CLI (built binary)", () => {
   });
 
   // PR-5 round 4 — a product whose package tables came from its own
-  // migration (every fleet product: klar `0010_enterprise_pilot.sql`, dispatch
-  // `0011`, nomi `0023` + `0024_scim_1_7.sql`, rendra `0004`, pagr `0008`,
-  // opensalary `0006`, publishr `0014`). A plain `migrate --out` used to write
+  // migration (a hand-written `NNNN_enterprise_pilot.sql`, possibly followed
+  // by its own copy of 0002). A plain `migrate --out` used to write
   // all three package files after it, and the product's migrator then failed
   // on 0001's `ALTER TABLE organization` / 0002's `ALTER TABLE org_policy ADD
   // COLUMN id`. `--from 0003` writes the one file such a product lacks.
-  describe("migrate --from into a product's own drizzle folder (klar-shaped fixture)", () => {
-    const fixture = join(repoRoot, "test", "cli", "fixtures", "klar-shaped-drizzle");
+  describe("migrate --from into a product's own drizzle folder (product-shaped fixture)", () => {
+    const fixture = join(repoRoot, "test", "cli", "fixtures", "product-shaped-drizzle");
 
     function journalOf(dir: string) {
       return JSON.parse(readFileSync(join(dir, "meta", "_journal.json"), "utf8")) as {
@@ -521,13 +528,13 @@ describe("ab-enterprise CLI (built binary)", () => {
     }
 
     it("without --from, a folder holding a migration this command did not write is refused and left untouched", async () => {
-      const { dir, client } = await productDatabase("klar-plain");
+      const { dir, client } = await productDatabase("product-plain");
       const before = readdirSync(dir).sort();
       const journalBefore = readFileSync(join(dir, "meta", "_journal.json"), "utf8");
 
       const plain = runCli(["migrate", "--out", dir]);
       expect(plain.status).toBe(1);
-      expect(plain.stderr).toMatch(/0010_enterprise_pilot\.sql, which this command did not write/);
+      expect(plain.stderr).toMatch(/0002_enterprise_pilot\.sql, which this command did not write/);
       expect(plain.stderr).toMatch(/--from 0003/);
       expect(readdirSync(dir).sort()).toEqual(before);
       expect(readFileSync(join(dir, "meta", "_journal.json"), "utf8")).toBe(journalBefore);
@@ -535,29 +542,29 @@ describe("ab-enterprise CLI (built binary)", () => {
     });
 
     it("--from 0003 writes exactly one file, registers it after the product's own entries, and the real drizzle libsql migrator applies it once", async () => {
-      const { dir, client } = await productDatabase("klar-from");
-      expect(await appliedCount(client)).toBe(16);
+      const { dir, client } = await productDatabase("product-from");
+      expect(await appliedCount(client)).toBe(3);
       const before = readdirSync(dir);
 
       const run = runCli(["migrate", "--out", dir, "--from", "0003"]);
       expect(run.status, run.stderr).toBe(0);
       const added = readdirSync(dir).filter((entry) => !before.includes(entry));
-      expect(added).toEqual(["0015_enterprise_0003_require2fa.sql"]);
+      expect(added).toEqual(["0003_enterprise_0003_require2fa.sql"]);
       const journal = journalOf(dir);
-      expect(journal.entries).toHaveLength(17);
-      const entry = journal.entries[16]!;
+      expect(journal.entries).toHaveLength(4);
+      const entry = journal.entries[3]!;
       expect(entry).toMatchObject({
-        idx: 16,
-        tag: "0015_enterprise_0003_require2fa",
+        idx: 3,
+        tag: "0003_enterprise_0003_require2fa",
         breakpoints: true,
       });
       expect(entry.when).toBeGreaterThan(
-        Math.max(...journal.entries.slice(0, 16).map((e) => e.when)),
+        Math.max(...journal.entries.slice(0, 3).map((e) => e.when)),
       );
 
       const upgradeStartedMs = Date.now();
       await migrate(drizzle(client), { migrationsFolder: dir });
-      expect(await appliedCount(client)).toBe(17);
+      expect(await appliedCount(client)).toBe(4);
       // 0003 moved the requiring org's onset to the upgrade, in the column's
       // own unit (milliseconds here); the other org is untouched.
       const moved = await updatedAt(client, "org_strict");
@@ -571,9 +578,9 @@ describe("ab-enterprise CLI (built binary)", () => {
       expect(again.status).toBe(0);
       expect(again.stdout).toMatch(/already holds every migration from 0003 — nothing written/);
       expect(readdirSync(dir).filter((e) => !before.includes(e))).toEqual(added);
-      expect(journalOf(dir).entries).toHaveLength(17);
+      expect(journalOf(dir).entries).toHaveLength(4);
       await migrate(drizzle(client), { migrationsFolder: dir });
-      expect(await appliedCount(client)).toBe(17);
+      expect(await appliedCount(client)).toBe(4);
       expect(await updatedAt(client, "org_strict")).toBe(moved);
       // And a plain run is still refused (the pilot file is still unproven);
       // the proven 0003 emission alone would not be.
@@ -582,7 +589,7 @@ describe("ab-enterprise CLI (built binary)", () => {
     });
 
     it("--from must name one of the package's migrations", () => {
-      const dir = join(workDir, "klar-bad-from");
+      const dir = join(workDir, "product-bad-from");
       cpSync(fixture, dir, { recursive: true });
       for (const bad of ["3", "0004", "0000", "latest"]) {
         const result = runCli(["migrate", "--out", dir, "--from", bad]);
@@ -621,7 +628,7 @@ describe("ab-enterprise CLI (built binary)", () => {
   // output of the v1.0.1 CLI (`git archive v1.0.1`, `src/cli/index.ts`
   // bundled with esbuild as tsup does, `migrate --out` into a folder holding
   // `0000_base.sql`); `0002_scim_1_7.sql` is the product migration step 4
-  // allows (package 0002 with drizzle breakpoints, e.g. nomi's own).
+  // allows (package 0002 with drizzle breakpoints, e.g. a product's own).
   describe("migrate from a 1.0.x install (the v1.0.1 CLI's exact 0001 output)", () => {
     const fixture = join(repoRoot, "test", "cli", "fixtures", "v1-0-1-drizzle");
 

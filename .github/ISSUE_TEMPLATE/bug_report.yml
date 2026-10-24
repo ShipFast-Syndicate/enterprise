@@ -1,0 +1,81 @@
+name: Bug report
+description: Something does not work as the docs say.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Security problems never go here** — use
+        [private vulnerability reporting](https://github.com/ShipFast-Syndicate/enterprise/security/advisories/new).
+        Remove secrets, keys, certificates, tokens and customer data from everything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      description: Output of `npm ls @alphabros/enterprise`.
+      placeholder: "1.0.1"
+    validations:
+      required: true
+  - type: textarea
+    id: peers
+    attributes:
+      label: better-auth versions
+      description: Installed versions of `better-auth` and each `@better-auth/*` package.
+      placeholder: |
+        better-auth 1.7.10
+        @better-auth/sso 1.7.10
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: entry
+    attributes:
+      label: Entry point
+      multiple: true
+      options:
+        - /server
+        - /client
+        - /schema
+        - /portal
+        - CLI (ab-enterprise)
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime and database
+      description: Node version or platform (Cloudflare Workers, Vercel, …) and database adapter.
+      placeholder: "Node 24, libSQL / Turso"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest set of steps that shows the problem, with the configuration you pass to the preset or plugin.
+      placeholder: |
+        1. Configure enterprisePreset({ ... })
+        2. Call ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: The full error message, or the HTTP status and response body.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: For SSO, say SAML or OIDC and which identity provider. Describe assertions and tokens; never paste them.

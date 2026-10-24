@@ -10,17 +10,17 @@
 // value key its hand-written table does not have. This harness is the
 // production shape:
 //
-// - `session` — klar `src/db/enterprise-session.ts` (develop bac0670):
-//   snake_case columns, `created_at`/`updated_at`/`expires_at` in **seconds**
+// - `session` — a product's session table: snake_case columns,
+//   `created_at`/`updated_at`/`expires_at` in **seconds**
 //   (`mode: "timestamp"`), and no column beyond the upstream/organization/
 //   admin ones.
-// - `member` and `org_policy` — dispatch `src/db/enterprise-schema.ts`
-//   (develop 214c945): `enterprise_member` with a millisecond `createdAt`, and
+// - `member` and `org_policy` — a product with hand-maintained member and
+//   org_policy tables: `enterprise_member` with a millisecond `createdAt`, and
 //   `org_policy` keyed by its snake_case field names with a millisecond
 //   `updated_at` (the physical table is the package's own `0001`/`0002`).
 //
 // The mixed units (a seconds `session.created_at` next to millisecond policy
-// and membership stamps) are deliberate: they are what the fleet runs.
+// and membership stamps) are deliberate: products in the field mix them.
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type { DynamicSchema } from "./auth";
 import { makeAuth, type TestAuth } from "./auth";

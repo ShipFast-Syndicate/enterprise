@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1700000000000,
+      "tag": "0000_base",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1700000100000,
+      "tag": "0001_items",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1700000200000,
+      "tag": "0002_enterprise_pilot",
+      "breakpoints": true
+    }
+  ]
+}
