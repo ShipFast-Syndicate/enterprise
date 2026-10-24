@@ -56,7 +56,8 @@ updates:
       - dependency-name: better-call
         versions: [">=2"]
       # @types/node major = the oldest Node major this package supports
-      # (engines.node ">=24", CI on Node 24 LTS). A newer types major describes
+      # (CI and the dev toolchain run Node 24 LTS; the published package keeps its
+      # engines.node ">=22" floor, and es2022 output). A newer types major describes
       # APIs a supported runtime does not have, and a library must not compile
       # against them. Move engines, CI node-version and @types/node together
       # when the support floor moves, then lift this ignore.
@@ -74,6 +75,11 @@ updates:
       # (15.x, writer 9+) ships in a semantic-release release.
       - dependency-name: conventional-changelog-conventionalcommits
         versions: [">=10"]
+      # samlify 2.15 changes the signing-certificate derivation the F-28 trust-root
+      # tests pin and breaks SP metadata in workerd; the peer is capped <2.15.0.
+      # Lift with a reviewed update of those tests and the peer range.
+      - dependency-name: samlify
+        versions: [">=2.15.0"]
   - package-ecosystem: github-actions
     directory: /
     cooldown:

@@ -39,7 +39,7 @@ releases this package is tested against (the security-patched floor), so you can
   "@libsql/client": "^0.15.15 || ^0.17.3 || ^0.18.0", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
   "lit": "^3", // optional — only needed for ./portal
-  "samlify": "^2.13.1", // peer since 1.1.0; already a dependency of @better-auth/sso
+  "samlify": ">=2.13.1 <2.15.0", // peer since 1.1.0; already a dependency of @better-auth/sso
 }
 ```
 
@@ -54,7 +54,7 @@ and the [migration guide](./docs/migration-1-7.md) for the new credential and id
 certificates a SAML configuration will be verified against, so it must resolve from your app —
 add it explicitly if your package manager does not install peer dependencies.
 
-Requirements: Node `>=24`, pnpm 10 (or any package manager — pnpm is only this repo's own
+Requirements: Node `>=22`, pnpm 10 (or any package manager — pnpm is only this repo's own
 dev toolchain).
 
 ## Package layout
@@ -442,5 +442,5 @@ mise exec node@24 -- pnpm test
 mise exec node@24 -- pnpm build
 ```
 
-Node `>=24` is required for the toolchain itself (the same as the package's own `engines.node`).
+Node `>=24` is used for this repo's own toolchain and CI; the published package keeps `engines.node` `>=22`.
 `mise exec node@24 -- <cmd>` pins the working version regardless of your global default.
