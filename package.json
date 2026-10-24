@@ -151,8 +151,8 @@
       "@peculiar/asn1-x509-post-quantum": "^2.11.0",
       "esbuild@^0.27.0": "^0.28.1",
       "handlebars": "^4.7.10",
-      "miniflare>undici": "^7.30.1",
-      "source-map-js@>=1.0.0 <1.2.2": "^1.2.2"
+      "source-map-js@>=1.0.0 <1.2.2": "^1.2.2",
+      "undici@>=7.18.0 <7.30.1": "7.30.1"
     },
     "auditConfig": {
       "ignoreGhsas": [
