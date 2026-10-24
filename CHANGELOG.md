@@ -1,3 +1,11 @@
+## [1.1.2](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.1.1...v1.1.2) (2026-10-24)
+
+### Bug Fixes
+
+* **deps:** bump zod to 4.6.7 (GHSA-mrhx-c7xc-m3w5) ([#56](https://github.com/ShipFast-Syndicate/enterprise/issues/56)) ([84d5f62](https://github.com/ShipFast-Syndicate/enterprise/commit/84d5f625d342ecb306ed256392c0412e17dd83b6))
+* **deps:** override undici to 7.30.1 (GHSA-xjj6-f33q-929c) ([#58](https://github.com/ShipFast-Syndicate/enterprise/issues/58)) ([a294e5a](https://github.com/ShipFast-Syndicate/enterprise/commit/a294e5aa6d9d83249f0816ac9d66b1f264078684))
+* **deps:** widen better-auth/better-call peer ranges and upgrade dependencies to latest ([#59](https://github.com/ShipFast-Syndicate/enterprise/issues/59)) ([a98eef4](https://github.com/ShipFast-Syndicate/enterprise/commit/a98eef404f037eadc1d631f0a5ccb190ae654c37))
+
 ## [1.1.1](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.1.0...v1.1.1) (2026-10-14)
 
 ### Bug Fixes
