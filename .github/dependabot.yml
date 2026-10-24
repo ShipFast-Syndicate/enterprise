@@ -56,7 +56,7 @@ updates:
       - dependency-name: better-call
         versions: [">=2"]
       # @types/node major = the oldest Node major this package supports
-      # (engines.node ">=22", CI on Node 22). A newer types major describes
+      # (engines.node ">=24", CI on Node 24 LTS). A newer types major describes
       # APIs a supported runtime does not have, and a library must not compile
       # against them. Move engines, CI node-version and @types/node together
       # when the support floor moves, then lift this ignore.

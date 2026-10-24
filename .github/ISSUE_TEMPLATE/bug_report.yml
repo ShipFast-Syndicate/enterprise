@@ -46,7 +46,7 @@ body:
     attributes:
       label: Runtime and database
       description: Node version or platform (Cloudflare Workers, Vercel, …) and database adapter.
-      placeholder: "Node 22, libSQL / Turso"
+      placeholder: "Node 24, libSQL / Turso"
     validations:
       required: true
   - type: textarea
