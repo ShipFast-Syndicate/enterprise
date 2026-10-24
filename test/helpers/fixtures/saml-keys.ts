@@ -73,7 +73,9 @@ export async function generateSelfSigned(commonName: string): Promise<GeneratedP
     notBefore: new Date(),
     notAfter: new Date(Date.now() + VALIDITY_DAYS * 24 * 60 * 60 * 1000),
     signingAlgorithm: { name: RSA_ALGORITHM.name, hash: RSA_ALGORITHM.hash },
-    keys,
+    // Node's webcrypto KeyUsage union is wider than the DOM lib's (it adds the
+    // ML-KEM usages); the key itself is the RSA pair generated above.
+    keys: keys as unknown as CryptoKeyPair,
   });
   const pkcs8 = await webcrypto.subtle.exportKey("pkcs8", keys.privateKey);
   return { key: toPem(pkcs8, "PRIVATE KEY"), cert: cert.toString("pem") };
