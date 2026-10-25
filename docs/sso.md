@@ -139,11 +139,10 @@ The list binds the **IdP**, not merely the `issuer` string — and what
   with `getX509Certificate("signing")` — and (b) every certificate the
   configuration carries in a signing position: `cert`, `idpMetadata.cert`
   and each `KeyDescriptor` of the metadata document with `use="signing"`
-  or no `use`. A `use="encryption"` descriptor is left out only when
-  samlify does not treat it as a signing certificate — samlify reads a
-  document with a single `KeyDescriptor` as one shared certificate for
-  both uses whatever its `use` says, so a lone `encryption` descriptor is
-  pinned like any other. When samlify cannot build the IdP from the
+  or no `use`. A `use="encryption"` descriptor is left out unless samlify
+  treats it as a signing certificate; as of samlify 2.15 it never does
+  (the metadata's `use` is honoured, and only certificates declared in the
+  metadata are trusted at all). When samlify cannot build the IdP from the
   configuration, or returns no signing certificate, the provider is refused
   (fail closed). List every certificate during a rotation.
 

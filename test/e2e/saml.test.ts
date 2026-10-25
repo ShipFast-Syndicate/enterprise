@@ -137,4 +137,41 @@ describe("SAML end-to-end (IdP-initiated)", () => {
     expect(failedRows.rows[0]!.target_type).toBe("sso_provider");
     expect(failedRows.rows[0]!.target_id).toBe(providerId);
   });
+
+  // samlify 2.15 (GHSA-wxh7-j2vx-w63f): a response issued for another service
+  // provider must not sign anyone in here. These are the negative tests that
+  // keep the Audience / Destination checks from being switched off.
+  it.each([
+    ["Audience", { audience: "https://other-sp.example/entity" }],
+    ["Destination", { destination: "https://other-sp.example/acs" }],
+  ] as const)(
+    "a correctly signed response issued for another service provider (%s) is rejected: error=, no session, no user, an auth.sso_sign_in_failed row",
+    async (field, override) => {
+      const t = await makeAuth();
+      const { cookie: ownerCookie } = await signUpOwner(t, "owner@acme.test");
+      const { orgId } = await createOrg(t, ownerCookie);
+      const providerId = `saml-wrong-${field.toLowerCase()}`;
+      const { acsUrl, spEntityID } = await registerSamlProvider(t, ownerCookie, orgId, providerId);
+
+      const email = `${field.toLowerCase()}-target@acme.test`;
+      const response = await mintSamlResponse({ spEntityID, acsUrl, email, ...override });
+      const acsRes = await t.api.postForm(`/sso/saml2/sp/acs/${providerId}`, {
+        SAMLResponse: response,
+        RelayState: "",
+      });
+      expect(acsRes.status).toBe(302);
+      expect(acsRes.headers.get("location") ?? "").toContain("error=");
+      expect(acsRes.headers.getSetCookie().length).toBe(0);
+      const userRows = await t.client.execute({
+        sql: `SELECT * FROM user WHERE email = ?`,
+        args: [email],
+      });
+      expect(userRows.rows.length).toBe(0);
+      const failedRows = await t.client.execute({
+        sql: `SELECT * FROM audit_event WHERE action = 'auth.sso_sign_in_failed' AND org_id = ?`,
+        args: [orgId],
+      });
+      expect(failedRows.rows.length).toBe(1);
+    },
+  );
 });

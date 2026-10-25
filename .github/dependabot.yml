@@ -75,11 +75,6 @@ updates:
       # (15.x, writer 9+) ships in a semantic-release release.
       - dependency-name: conventional-changelog-conventionalcommits
         versions: [">=10"]
-      # samlify 2.15 changes the signing-certificate derivation the F-28 trust-root
-      # tests pin and breaks SP metadata in workerd; the peer is capped <2.15.0.
-      # Lift with a reviewed update of those tests and the peer range.
-      - dependency-name: samlify
-        versions: [">=2.15.0"]
   - package-ecosystem: github-actions
     directory: /
     cooldown:

@@ -2,18 +2,20 @@
 // computed **through samlify**, not re-derived with a parser of our own.
 //
 // Round 3 read the certificates out of `idpMetadata.metadata` with a
-// `use`-attribute regex and skipped every `use="encryption"` descriptor.
-// samlify does not read the document that way: a document with a single
-// `KeyDescriptor` is one *shared* certificate for both uses whatever its
-// `use` says (`metadata.js`, the `sharedCertificate` collapse), so a lone
-// `use="encryption"` descriptor is exactly what `@better-auth/sso` verifies
-// assertions against at the ACS — and round 3 never required it to be
-// pinned. The fix stops re-implementing samlify: `samlifySigningCertificates`
-// builds the IdP with the inputs upstream's `createIdP` uses and asks
+// `use`-attribute regex. samlify <= 2.14 did not read the document that way
+// (a lone `use="encryption"` descriptor was the signing certificate, several
+// descriptors were paired with `use` values positionally), which is why the
+// fix stopped re-implementing samlify: `samlifySigningCertificates` builds
+// the IdP with the inputs upstream's `createIdP` uses and asks
 // `entityMeta.getX509Certificate("signing")`; `collectSamlTrustRoot` pins the
-// union of that and every literal signing-position source. These cases pin
-// samlify's own behaviour so an upgrade that changes it is noticed here,
-// and prove the pinned set equals samlify's signing set for every shape.
+// union of that and every literal signing-position source.
+//
+// samlify 2.15 (GHSA-w8r9-gp23-wcxp) changed the rule: `KeyDescriptor use` is
+// honoured. `signing` and use-less descriptors are signing certificates, an
+// `encryption` descriptor never is, and a document without a signing
+// certificate has none. These cases pin samlify's own behaviour so an upgrade
+// that changes it is noticed here, and prove the pinned set equals samlify's
+// signing set for every shape.
 import { describe, expect, it } from "vitest";
 import { X509Certificate } from "node:crypto";
 import samlify from "samlify";
@@ -56,20 +58,38 @@ function samlifySigning(metadata: string): string[] | null {
 }
 
 describe("F-28 (round 4) — samlify decides what the SAML signing trust root is", () => {
-  it('pins samlify\'s single-KeyDescriptor collapse: a lone use="encryption" descriptor IS the signing certificate (as is a lone `Encryption`, `signing` or use-less one)', () => {
-    for (const use of ["encryption", "Encryption", "signing", undefined]) {
+  it('pins samlify 2.15\'s `use` handling: a lone use="encryption" descriptor is NOT a signing certificate; a lone `signing` or use-less one is; an unknown `use` value is neither', () => {
+    expect(samlifySigning(metadataXml([{ cert: SP_CERT, use: "encryption" }]))).toBeNull();
+    expect(samlifySigning(metadataXml([{ cert: SP_CERT, use: "Encryption" }]))).toBeNull();
+    for (const use of ["signing", undefined]) {
       const signing = samlifySigning(metadataXml([{ cert: SP_CERT, use }]));
       expect(signing, `use=${String(use)}`).toEqual([body(SP_CERT)]);
     }
   });
 
-  it("pins samlify's multi-descriptor pairing: `use` values are zipped with the certificates positionally, skipping descriptors without `use` — a use-less descriptor ahead of the signing one is what samlify trusts", () => {
-    // [no use, signing] → samlify pairs "signing" with the FIRST certificate.
+  it("pins samlify 2.15's multi-descriptor reading: each descriptor is read by its own `use` (no positional pairing), use-less descriptors serve both uses, encryption-only descriptors are never signing", () => {
+    // [no use, signing] → both are signing certificates.
     expect(
-      samlifySigning(metadataXml([{ cert: SP_CERT }, { cert: IDP_CERT, use: "signing" }])),
-    ).toEqual([body(SP_CERT)]);
-    // Two use-less or two encryption descriptors: no signing certificate at all.
-    expect(samlifySigning(metadataXml([{ cert: IDP_CERT }, { cert: SP_CERT }]))).toBeNull();
+      sorted(
+        samlifySigning(metadataXml([{ cert: SP_CERT }, { cert: IDP_CERT, use: "signing" }]))?.map(
+          fp,
+        ),
+      ),
+    ).toEqual(sorted([fp(SP_CERT), fp(IDP_CERT)]));
+    // Two use-less descriptors: both serve signing.
+    expect(
+      sorted(samlifySigning(metadataXml([{ cert: IDP_CERT }, { cert: SP_CERT }]))?.map(fp)),
+    ).toEqual(sorted([fp(IDP_CERT), fp(SP_CERT)]));
+    // signing + encryption: only the signing one.
+    expect(
+      samlifySigning(
+        metadataXml([
+          { cert: IDP_CERT, use: "signing" },
+          { cert: SP_CERT, use: "encryption" },
+        ]),
+      ),
+    ).toEqual([body(IDP_CERT)]);
+    // Two encryption descriptors: no signing certificate at all.
     expect(
       samlifySigning(
         metadataXml([
@@ -80,7 +100,7 @@ describe("F-28 (round 4) — samlify decides what the SAML signing trust root is
     ).toBeNull();
   });
 
-  it("the pinned set equals samlify's signing set: single signing descriptor, signing+encryption pair, lone encryption descriptor, use-less descriptor, several signing certificates (rotation)", () => {
+  it("the pinned set equals samlify's signing set: single signing descriptor, signing+encryption pair, use-less descriptor, several signing certificates (rotation)", () => {
     const shapes: Array<{ name: string; keys: Array<{ cert: string; use?: string }> }> = [
       { name: "single signing", keys: [{ cert: IDP_CERT, use: "signing" }] },
       {
@@ -90,7 +110,6 @@ describe("F-28 (round 4) — samlify decides what the SAML signing trust root is
           { cert: SP_CERT, use: "encryption" },
         ],
       },
-      { name: "lone encryption", keys: [{ cert: SP_CERT, use: "encryption" }] },
       { name: "no use", keys: [{ cert: IDP_CERT }] },
       {
         name: "rotation (two signing)",
@@ -116,38 +135,54 @@ describe("F-28 (round 4) — samlify decides what the SAML signing trust root is
     }
   });
 
-  it("union: a certificate samlify pairs differently from its `use` is pinned from both readings; a document samlify reads no signing certificate from fails closed", () => {
-    // samlify trusts SP (positional pairing); the literal reading sees both
-    // as signing-position certificates → both must be pinned.
+  it("GHSA-w8r9-gp23-wcxp: a document that declares only a bare key (RSAKeyValue, no X.509 certificate) has no signing certificate — samlify no longer falls back to the certificate in the message, and neither does the pinned set", () => {
+    const metadata = metadataXml([]).replace(
+      "<md:SingleSignOnService",
+      `<md:KeyDescriptor use="signing"><ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:KeyValue><ds:RSAKeyValue><ds:Modulus>AQAB</ds:Modulus><ds:Exponent>AQAB</ds:Exponent></ds:RSAKeyValue></ds:KeyValue></ds:KeyInfo></md:KeyDescriptor><md:SingleSignOnService`,
+    );
+    expect(samlifySigning(metadata)).toBeNull();
+    expect(samlifySigningCertificates({ idpMetadata: { metadata } })).toBeNull();
     expect(
-      sorted(
-        collectSamlTrustRoot(
-          {
-            idpMetadata: {
-              metadata: metadataXml([{ cert: SP_CERT }, { cert: IDP_CERT, use: "signing" }]),
-            },
-          },
-          "https://sp",
-        )?.certFingerprints,
-      ),
-    ).toEqual(sorted([fp(IDP_CERT), fp(SP_CERT)]));
-    // No signing certificate in samlify's reading → no trust root to pin.
+      collectSamlTrustRoot({ idpMetadata: { metadata } }, "https://sp")?.certFingerprints,
+    ).toBeNull();
+  });
+
+  it("a document samlify reads no signing certificate from fails closed (a lone or only-encryption descriptor, whatever else the configuration carries)", () => {
+    for (const keys of [
+      [{ cert: SP_CERT, use: "encryption" }],
+      [
+        { cert: IDP_CERT, use: "encryption" },
+        { cert: SP_CERT, use: "encryption" },
+      ],
+    ]) {
+      expect(
+        samlifySigningCertificates({ idpMetadata: { metadata: metadataXml(keys) } }),
+      ).toBeNull();
+      expect(
+        collectSamlTrustRoot({ idpMetadata: { metadata: metadataXml(keys) } }, "https://sp")
+          ?.certFingerprints,
+      ).toBeNull();
+    }
+    // An inline `cert` alongside a metadata document is ignored by upstream
+    // (the metadata path wins) but must not rescue it: the document has no
+    // signing certificate, so there is no trust root to pin.
     expect(
       collectSamlTrustRoot(
-        { idpMetadata: { metadata: metadataXml([{ cert: IDP_CERT }, { cert: SP_CERT }]) } },
+        {
+          cert: IDP_CERT,
+          idpMetadata: { metadata: metadataXml([{ cert: SP_CERT, use: "encryption" }]) },
+        },
         "https://sp",
       )?.certFingerprints,
     ).toBeNull();
-    // An inline `cert` alongside a metadata document is ignored by upstream
-    // (the metadata path wins) but stays in the pinned set: the round-3
-    // verifier's smuggle set `cert` to the pinned public certificate and
-    // put its own key in the document — both are pinned now.
+    // A signing descriptor next to the inline cert: both stay in the pinned
+    // set (upstream ignores the inline one, the literal reading keeps it).
     expect(
       sorted(
         collectSamlTrustRoot(
           {
             cert: IDP_CERT,
-            idpMetadata: { metadata: metadataXml([{ cert: SP_CERT, use: "encryption" }]) },
+            idpMetadata: { metadata: metadataXml([{ cert: SP_CERT, use: "signing" }]) },
           },
           "https://sp",
         )?.certFingerprints,
