@@ -679,7 +679,7 @@ describe("F-28 — sso.allowedIssuers is the issuer allow-list", () => {
 
     const bare = IDP_CERT.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
     const x509 = (cert: string, use?: string) =>
-      `<md:KeyDescriptor${use ? ` use='${use}'` : ""}><ds:KeyInfo><ds:X509Data><ds:X509Certificate>${cert
+      `<md:KeyDescriptor${use ? ` use='${use}'` : ""}><ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:X509Data><ds:X509Certificate>${cert
         .replace(/-----[^-]+-----/g, "")
         .replace(/\s+/g, "")}</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor>`;
     const doc = (entityId: string, keys: string) =>

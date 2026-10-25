@@ -65,6 +65,10 @@ export interface MintSamlResponseOptions {
   email: string;
   /** Signs with this PEM key instead of `IDP_KEY` — pass `SP_KEY` to produce a "wrong signing key" response for the negative test. */
   signWithKey?: string;
+  /** Overrides the `Audience` the assertion is issued for (default `spEntityID`) — pass another SP's entity ID to produce a response issued for a different service provider (GHSA-wxh7-j2vx-w63f negative test). */
+  audience?: string;
+  /** Overrides the response's `Destination` (default `acsUrl`) — pass another ACS URL for the wrong-destination negative test. */
+  destination?: string;
 }
 
 /** Mints a base64-encoded, IdP-initiated, signed SAMLResponse asserting `email`. */
@@ -93,8 +97,8 @@ export async function mintSamlResponse(opts: MintSamlResponseOptions): Promise<s
         context: samlify.SamlLib.replaceTagsByValue(template, {
           ID: id,
           AssertionID: `_${randomUUID()}`,
-          Destination: opts.acsUrl,
-          Audience: opts.spEntityID,
+          Destination: opts.destination ?? opts.acsUrl,
+          Audience: opts.audience ?? opts.spEntityID,
           EntityID: opts.spEntityID,
           SubjectRecipient: opts.acsUrl,
           Issuer: TEST_IDP_ENTITY_ID,

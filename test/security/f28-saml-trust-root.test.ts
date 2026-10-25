@@ -577,16 +577,20 @@ describe("F-28 (round 3) — sso.allowedIssuers pins the SAML trust root, fail c
   });
 
   describe("round 4 — the trust root is what samlify verifies against, derived through samlify", () => {
-    // The round-3 security verifier's bypass: round 3 skipped every
-    // `use="encryption"` KeyDescriptor, but samlify reads a document with a
-    // SINGLE KeyDescriptor as one shared certificate for both uses whatever
-    // its `use` attribute, and upstream's `createIdP` builds the IdP from the
-    // document alone (the inline `cert` is ignored). So an attacker set the
-    // inline `cert` to the operator's public pinned certificate — which is
-    // all round 3 collected — and put their own key in a lone
-    // `use="encryption"` descriptor: register 200, and the ACS verified their
-    // assertions against the smuggled certificate. Never the shared fixtures
-    // here: the attacker's keypair is freshly generated per case.
+    // History: round 3 skipped every `use="encryption"` KeyDescriptor, but
+    // samlify <= 2.14 read a document with a SINGLE KeyDescriptor as one shared
+    // certificate for both uses whatever its `use` attribute, and upstream's
+    // `createIdP` builds the IdP from the document alone (the inline `cert` is
+    // ignored). An attacker set the inline `cert` to the operator's public
+    // pinned certificate and put their own key in a lone `use="encryption"`
+    // descriptor. samlify 2.15 (GHSA-w8r9-gp23-wcxp) honours `use`, so that
+    // key is no longer a signing certificate and a document with no signing
+    // certificate is refused by samlify itself (`NO_SELECTED_CERTIFICATE`).
+    // The pins stay as defence in depth: register/update still refuse it
+    // (no determinable trust root), and the cases that 2.15 still accepts —
+    // an attacker key in a `use="signing"` / use-less descriptor — are what
+    // the pins catch. Never the shared fixtures here: the attacker's keypair
+    // is freshly generated per case.
     const smuggled = (attackerCert: string, use = "encryption") => ({
       cert: IDP_CERT, // the operator's public, pinned certificate
       idpMetadata: { metadata: metadataXml([{ cert: attackerCert, use }]) },
@@ -695,7 +699,7 @@ describe("F-28 (round 3) — sso.allowedIssuers pins the SAML trust root, fail c
       // public certificate inline, the attacker's key in the document.
       await plantStoredConfig(t, "legacy", "samlConfig", (config) => {
         config.idpMetadata = {
-          metadata: metadataXml([{ cert: attacker.cert, use: "encryption" }]),
+          metadata: metadataXml([{ cert: attacker.cert, use: "signing" }]),
         };
       });
       const refused = await acs(
@@ -724,6 +728,39 @@ describe("F-28 (round 3) — sso.allowedIssuers pins the SAML trust root, fail c
         await mintWith({ providerId: "legacy", email: "user@legacy.test", ...IDP_KEYS }),
       );
       expect((await sessionOf(t, sessionCookieOf(ok))).user.email).toBe("user@legacy.test");
+    });
+
+    it('stored row with a lone use="encryption" document: samlify 2.15 itself refuses a response signed by that key (no signing certificate in metadata) — no session, no user row', async () => {
+      const attacker = await generateSelfSigned("round4-attacker-stored-enc");
+      const t = await makeAuth({ sso: { ...LIST, domainBinding: "off" } });
+      await owner(t);
+      const evil = await owner(t, "owner@evil.test", "evil");
+      expect(
+        (
+          await t.api.post("/sso/register", samlBody("legacy-enc", evil.orgId), {
+            cookie: evil.cookie,
+          })
+        ).status,
+      ).toBe(200);
+      await verifyProviderDomain(t, "legacy-enc");
+      await plantStoredConfig(t, "legacy-enc", "samlConfig", (config) => {
+        config.idpMetadata = {
+          metadata: metadataXml([{ cert: attacker.cert, use: "encryption" }]),
+        };
+      });
+      const refused = await acs(
+        t,
+        "legacy-enc",
+        await mintWith({
+          providerId: "legacy-enc",
+          email: "ceo@acme.test",
+          signingCert: attacker.cert,
+          privateKey: attacker.key,
+        }),
+      );
+      expect(locationOf(refused)).toContain("error=");
+      expect(extractCookie(refused)).not.toContain("session_token");
+      expect(await userRowsFor(t, "ceo@acme.test")).toBe(0);
     });
   });
 });

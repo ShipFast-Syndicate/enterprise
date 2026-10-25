@@ -1,0 +1,26 @@
+diff --git a/build/src/metadata-idp.js b/build/src/metadata-idp.js
+index 18927b3..716f420 100644
+--- a/build/src/metadata-idp.js
++++ b/build/src/metadata-idp.js
+@@ -41,7 +41,7 @@ var metadata_1 = __importDefault(require("./metadata"));
+ var urn_1 = require("./urn");
+ var libsaml_1 = __importDefault(require("./libsaml"));
+ var utility_1 = require("./utility");
+-var xml_1 = __importDefault(require("xml"));
++var xml_1 = __importDefault(require("xml/lib/xml.js"));
+ /**
+  * Factory returning a new {@link IdpMetadata} instance.
+  *
+diff --git a/build/src/metadata-sp.js b/build/src/metadata-sp.js
+index a659dfe..b967fd4 100644
+--- a/build/src/metadata-sp.js
++++ b/build/src/metadata-sp.js
+@@ -41,7 +41,7 @@ var metadata_1 = __importDefault(require("./metadata"));
+ var urn_1 = require("./urn");
+ var libsaml_1 = __importDefault(require("./libsaml"));
+ var utility_1 = require("./utility");
+-var xml_1 = __importDefault(require("xml"));
++var xml_1 = __importDefault(require("xml/lib/xml.js"));
+ /**
+  * Factory returning a new {@link SpMetadata} instance.
+  *
