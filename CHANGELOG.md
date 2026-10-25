@@ -1,3 +1,9 @@
+## [1.1.3](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.1.2...v1.1.3) (2026-10-25)
+
+### Bug Fixes
+
+* **security:** support samlify 2.15 and require it (GHSA-w8r9-gp23-wcxp, GHSA-wxh7-j2vx-w63f, GHSA-wr2x-fh6q-q243) ([#62](https://github.com/ShipFast-Syndicate/enterprise/issues/62)) ([4431e3e](https://github.com/ShipFast-Syndicate/enterprise/commit/4431e3e0120902fec9779dd12ab1b15dcd81a9b5))
+
 ## [1.1.2](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.1.1...v1.1.2) (2026-10-24)
 
 ### Bug Fixes
