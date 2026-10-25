@@ -107,8 +107,8 @@ export interface EnterpriseOptions {
    *   the configuration — built with the inputs upstream uses at the ACS
    *   — and every certificate carried in a signing position (`cert`,
    *   `idpMetadata.cert`, each `use="signing"`/use-less `KeyDescriptor`
-   *   of the document); a `use="encryption"` descriptor is left out only
-   *   when samlify does not treat it as a signing certificate. **Fail
+   *   of the document); a `use="encryption"` descriptor is left out unless
+   *   samlify treats it as a signing certificate (it does not as of 2.15). **Fail
    *   closed**: with an array allow-list and no pins for that entity id,
    *   a certificate that is not pinned, no readable certificate, or a
    *   configuration samlify cannot build an IdP from, the SAML provider

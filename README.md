@@ -39,7 +39,7 @@ releases this package is tested against (the security-patched floor), so you can
   "@libsql/client": "^0.15.15 || ^0.17.3 || ^0.18.0", // optional — only needed for ./schema and the CLI
   "drizzle-orm": "^0.45.2", // optional — only needed for ./schema
   "lit": "^3", // optional — only needed for ./portal
-  "samlify": ">=2.13.1 <2.15.0", // peer since 1.1.0; already a dependency of @better-auth/sso
+  "samlify": "^2.15.1", // peer since 1.1.0; 2.15.1+ is required for GHSA-w8r9-gp23-wcxp and others; already a dependency of @better-auth/sso
 }
 ```
 
@@ -53,6 +53,10 @@ and the [migration guide](./docs/migration-1-7.md) for the new credential and id
 `samlify` is the SAML library `@better-auth/sso` already uses; the package asks it which
 certificates a SAML configuration will be verified against, so it must resolve from your app —
 add it explicitly if your package manager does not install peer dependencies.
+`samlify` 2.15 (a security release) is the minimum: it trusts only X.509 signing certificates declared
+in the IdP metadata and checks `Audience`, `Destination` and `Recipient` against the service provider, so
+an existing SAML connection whose IdP metadata declares no signing certificate, or whose service provider
+entity ID or ACS URL does not match what the IdP puts in its responses, now fails to sign in.
 
 Requirements: Node `>=22`, pnpm 10 (or any package manager — pnpm is only this repo's own
 dev toolchain).

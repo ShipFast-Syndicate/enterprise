@@ -190,8 +190,8 @@ export interface SamlTrustRoot {
    * certificate the configuration carries in a signing position: `cert`,
    * `idpMetadata.cert` (string or list) and each `X509Certificate` inside a
    * `KeyDescriptor` of `idpMetadata.metadata` whose `use` is `signing` or
-   * unset. A `use="encryption"` descriptor is left out only when samlify
-   * does not return it as a signing certificate. `null` — the caller fails
+   * unset. A `use="encryption"` descriptor is left out unless samlify
+   * returns it as a signing certificate (it does not as of samlify 2.15). `null` — the caller fails
    * closed — when samlify cannot build the IdP or yields no signing
    * certificate, when any certificate cannot be parsed, or when a metadata
    * document has no `entityID`.
@@ -265,15 +265,17 @@ function resolveSigningCerts(samlConfig: Record<string, unknown>): unknown[] | u
  * trust root cannot be determined is not one an allow-list can vouch for.
  *
  * Why through samlify: what samlify treats as "the signing certificate" is
- * not what a `use` attribute says. A metadata document with a single
- * `KeyDescriptor` is read as one shared certificate for both uses whatever
- * its `use` attribute (so a lone `use="encryption"` descriptor *is* the
- * signing certificate), and with several descriptors the `use` values are
- * paired with the certificates positionally, skipping descriptors that
- * carry no `use`. Re-deriving that with a parser of our own is exactly how
- * a certificate slips in through a source the check did not consider;
- * the pinned set is therefore whatever samlify returns, unioned with the
- * literal sources (`collectSamlTrustRoot`).
+ * samlify's call, not ours. Since samlify 2.15 (GHSA-w8r9-gp23-wcxp) only
+ * certificates declared in the metadata are trusted and `KeyDescriptor use`
+ * is honoured: `use="signing"` and use-less descriptors are signing
+ * certificates, an `encryption` descriptor never is, and a document with no
+ * signing certificate yields none (so this returns `null`). samlify <= 2.14
+ * instead read a lone descriptor as one shared certificate whatever its
+ * `use` said and paired several descriptors with `use` values positionally.
+ * Re-deriving the rule with a parser of our own is how a certificate slips
+ * in through a source the check did not consider — and the rule has already
+ * changed once — so the pinned set is whatever samlify returns, unioned
+ * with the literal sources (`collectSamlTrustRoot`).
  */
 export function samlifySigningCertificates(
   samlConfig: unknown,

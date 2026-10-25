@@ -19,6 +19,14 @@ export default defineConfig({
     // shared at the root. Vitest 4 requires extends: true for project-level
     // settings such as testTimeout to inherit. test/portal/env.test.ts guards
     // the portal environment; the CI contract test checks resolved timeouts.
+    // samlify 2.15 added `build/src/xml.js`. Inside this project the pool's
+    // module fallback resolves a CommonJS `require("xml")` made from
+    // `build/src/metadata-*.js` to that sibling file (it probes
+    // `<referrer dir>/xml` + `.js` before the package), so building SP/IdP
+    // metadata threw `xml_1.default is not a function`. `patches/samlify@
+    // 2.15.1.patch` makes the two requires explicit (`xml/lib/xml.js`). It
+    // only affects this repo's tests: bundlers (wrangler/esbuild) resolve the
+    // package correctly. Drop the patch once samlify fixes the import.
     // The `workerd` project boots `enterprisePreset` inside the real Workers
     // runtime (test/workerd/preset.test.ts). It is part of `pnpm test`, so
     // `ci / summary` gates the README's "runs on workerd" claim.
