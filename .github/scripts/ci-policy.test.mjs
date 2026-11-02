@@ -264,6 +264,9 @@ const publicActions = new Set([
   // The v7.0.1 pin above stays only until the Dependabot bump lands.
   "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
   "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+  // Verified upstream v7.1.0 tag (lightweight tag, commit 6d4fd22b20465ccc0f7354476588e8df7c9ca0e0).
+  // The v7.0.0 pin above stays only until the Dependabot bump lands.
+  "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
 ]);
 
 test("public release uses a local job and confines registry authority to protected publication", () => {
