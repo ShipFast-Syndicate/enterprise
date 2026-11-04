@@ -17,7 +17,7 @@ Branch protection continues to use `ci / summary`. This job requires:
 - Semgrep's configured code/security rule sets;
 - Trivy CRITICAL/HIGH vulnerabilities, secrets and configuration findings;
 - Gitleaks full-history scanning with `.gitleaks.toml`;
-- `pnpm audit --audit-level=high` with the existing documented exception;
+- `pnpm audit --audit-level=high` with no advisory exceptions;
 - the npm package build;
 - the packed tarball (`package` job): `pnpm pack`, file list checked against the
   allow-list in `.github/scripts/pack-files.mjs`, then

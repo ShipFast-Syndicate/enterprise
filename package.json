@@ -157,11 +157,6 @@
     },
     "patchedDependencies": {
       "samlify@2.15.1": "patches/samlify@2.15.1.patch"
-    },
-    "auditConfig": {
-      "ignoreGhsas": [
-        "GHSA-vfj7-8cjw-p6xm"
-      ]
     }
   }
 }
