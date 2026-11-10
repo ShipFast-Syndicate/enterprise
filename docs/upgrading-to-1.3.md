@@ -27,6 +27,23 @@ to resolve features the supported way, use `requireFeature` or `resolveEntitledF
 `@alphabros/enterprise/server`. At runtime a value that is not a function is now rejected at
 construction.
 
+## Staff-only organization creation and metadata (opt-in)
+
+`organization.creation` (`"self-service"` | `"staff-only"` | `(ctx) => boolean`) and
+`organization.metadata` (`"open"` | `"staff-only"`) lock `/organization/create` and the `metadata`
+field of `/organization/create` and `/organization/update` to platform staff (same definition as
+`setEntitlements`, never an impersonation session) and server-only calls. Refusals are
+`403 ORG_CREATION_STAFF_ONLY` / `403 ORG_METADATA_STAFF_ONLY`, audited as
+`organization.write_refused` (a refusal for a caller who belongs to no organization has no chain
+and is only logged). Defaults are unchanged and the preset's plugin list is identical
+until you set one: the lock is a separate plugin (`enterprise-org-lock`) mounted only then. If you
+replace the preset's `organization()` entry, nothing changes for you: the lock still applies.
+Hand-composed lists add `orgWriteLock(opts)` after `enterpriseGate(opts)`. Read
+[`docs/security.md`](./security.md#staff-only-organization-creation-and-metadata) for the audit
+rules and how this differs from upstream's `allowUserToCreateOrganization`. If you keep plans or
+flags in `organization.metadata`, set `metadata: "staff-only"` and write it from staff or server
+code.
+
 ## Callback-only deployments (nothing to do)
 
 - Keep `resolveEntitlements`; the callback still decides and still fails closed.

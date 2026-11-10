@@ -84,7 +84,9 @@ export function takeDomainBindingOffUnlistedWarning(opts: EnterpriseOptions): st
  *   accepted but warned about, naming the advisory.
  * - `sso.allowedIssuers` — an array of strings/RegExps or a function.
  * - `organization.*` — a boolean (or, for `allowUserToCreateOrganization`, a
- *   function), never a truthy string that would silently mean "on".
+ *   function), never a truthy string that would silently mean "on";
+ *   `organization.creation` — `"self-service"`, `"staff-only"` or a function;
+ *   `organization.metadata` — `"open"` or `"staff-only"`.
  * - `policy.signInMethods` — every key is a request path (`/…`, optionally
  *   ending in `/*`) and every value a `[a-z_][a-z0-9_]*` method name.
  * - `policy.twoFactor.satisfiedBy` — method names; `enrollmentPaths` — paths.
@@ -221,6 +223,27 @@ export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
     typeof allowUserToCreateOrganization !== "function"
   ) {
     fail(`"organization.allowUserToCreateOrganization" must be a boolean or a function.`);
+  }
+  const creation = opts.organization?.creation;
+  if (
+    creation !== undefined &&
+    creation !== "self-service" &&
+    creation !== "staff-only" &&
+    typeof creation !== "function"
+  ) {
+    fail(
+      `"organization.creation" must be "self-service", "staff-only" or a function (got ${JSON.stringify(creation)}).`,
+    );
+  }
+  const organizationMetadata = opts.organization?.metadata;
+  if (
+    organizationMetadata !== undefined &&
+    organizationMetadata !== "open" &&
+    organizationMetadata !== "staff-only"
+  ) {
+    fail(
+      `"organization.metadata" must be "open" or "staff-only" (got ${JSON.stringify(organizationMetadata)}).`,
+    );
   }
 
   const signInMethods = opts.policy?.signInMethods;

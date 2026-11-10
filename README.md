@@ -242,6 +242,43 @@ For Drizzle, spread `orgEntitlementSchema` from `@alphabros/enterprise/schema` (
 together with `entitlements: { store: "table" }` still takes precedence: the table is then
 written but not read for gating. Upgrade notes: [`docs/upgrading-to-1.3.md`](./docs/upgrading-to-1.3.md).
 
+### Staff-only organization creation and metadata
+
+An organization's owner can write `organization.metadata` through `/organization/update` (and at
+creation), so any plan, quota or flag your product keeps there is owner-controlled. Two opt-in
+options lock the writes down; the defaults are unchanged.
+
+```ts
+enterprisePreset({
+  // ...
+  organization: {
+    creation: "staff-only", // "self-service" (default) | "staff-only" | (ctx) => boolean
+    metadata: "staff-only", // "open" (default) | "staff-only"
+  },
+});
+```
+
+- `creation: "staff-only"` refuses `/organization/create` with `403 ORG_CREATION_STAFF_ONLY` for
+  everyone but platform staff. A function `({ user, body }) => boolean` decides for callers who are
+  not staff (`true` allows).
+- `metadata: "staff-only"` refuses any `/organization/create` or `/organization/update` request
+  that carries a `metadata` field with `403 ORG_METADATA_STAFF_ONLY`, unless the caller is staff.
+- Staff is the same test as `setEntitlements` (`entitlements.staffRoles`, default `["admin"]`, read
+  from the database, **never an impersonation session**). A server-only call (`auth.api.*` with
+  neither a `Request` nor headers) is never refused.
+- Each refusal is appended to the hash-chained audit as `organization.write_refused` (code and path
+  in the metadata), in the chain of the organization the request names when the caller belongs to
+  it (update), or of each organization the caller belongs to (creation). A caller who belongs to no
+  organization (a first creation under `staff-only`) has no chain: that refusal is only logged at
+  `warn`. A `creation` function that throws counts as a refusal.
+- The lock is a separate plugin (`enterprise-org-lock`, mounted by the preset only when an option
+  is set), so it also holds when your product replaces the preset's `organization()` with its own.
+  Hand-composed lists mount `orgWriteLock(opts)` from `@alphabros/enterprise/server` after
+  `enterpriseGate(opts)`.
+
+Details and the relation to upstream's `allowUserToCreateOrganization`:
+[`docs/security.md`](./docs/security.md#staff-only-organization-creation-and-metadata).
+
 ## Quick start — client
 
 ```ts
