@@ -63,13 +63,26 @@ dev toolchain).
 
 ## Package layout
 
-| Entry point                    | What it's for                                                     |
-| ------------------------------ | ----------------------------------------------------------------- |
-| `@alphabros/enterprise/server` | better-auth plugin preset (`enterprisePreset`) and its pieces     |
-| `@alphabros/enterprise/schema` | Drizzle table definitions + SQL migrations (Node-only, see below) |
-| `@alphabros/enterprise/client` | better-auth client plugins + home-realm login helpers             |
-| `@alphabros/enterprise/portal` | Lit web components for a security-settings admin UI               |
-| `ab-enterprise` (bin)          | CLI: `migrate`, `verify`, `audit-verify` (Node-only)              |
+| Entry point                       | What it's for                                                     |
+| --------------------------------- | ----------------------------------------------------------------- |
+| `@alphabros/enterprise/server`    | better-auth plugin preset (`enterprisePreset`) and its pieces     |
+| `@alphabros/enterprise/schema`    | Drizzle table definitions + SQL migrations (Node-only, see below) |
+| `@alphabros/enterprise/schema/pg` | Postgres Drizzle tables (`pg-core`); see "Postgres" below         |
+| `@alphabros/enterprise/client`    | better-auth client plugins + home-realm login helpers             |
+| `@alphabros/enterprise/portal`    | Lit web components for a security-settings admin UI               |
+| `ab-enterprise` (bin)             | CLI: `migrate`, `verify`, `audit-verify` (Node-only)              |
+
+### Postgres (schema only)
+
+`@alphabros/enterprise/schema/pg` exports `orgPolicy`, `auditEvent`,
+`enterpriseScimMember`, `enterpriseSchema` and `studioRefColumns()` (spread it into your
+`user` and `organization` tables for the `studio_ref` column). `sql/pg/0001_enterprise.sql`
+is one idempotent migration; `applyMigrationPg(client)` and `verifyDatabase(client)` from
+`@alphabros/enterprise/schema` accept any client with `query(sql, params?)` (`pg`, PGlite).
+`audit_event.metadata` is `json`, never `jsonb`: `jsonb` re-orders keys and breaks the audit
+hash chain, and `@better-auth/cli generate` emits `jsonb` for `json` fields, so do not
+regenerate this table with it. `verifyDatabase` fails on a `jsonb` column. The CLI stays
+SQLite (`TURSO_*`); a `--dialect pg` option is not part of this release.
 
 Upgrading from 0.1 requires new SCIM tables, a separate credential HMAC secret and
 IdP reprovisioning. Read [the migration guide](./docs/migration-1-7.md) first.

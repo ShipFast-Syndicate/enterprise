@@ -54,3 +54,5 @@ export const enterpriseSchema = { orgPolicy, auditEvent, enterpriseScimMember };
 export { EXPECTED_TABLES } from "./expected";
 export { verifyDatabase, type MissingItem, type VerifyResult } from "./verify";
 export { applyMigration } from "./migrate";
+export { applyMigrationPg } from "./migrate-pg";
+export type { PgClient } from "./pg-client";
