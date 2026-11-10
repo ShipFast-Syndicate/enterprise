@@ -8,8 +8,11 @@ framework-agnostic admin portal — as one package with four subpath entry point
 
 ## Status
 
-**v1.1.** Server plugins, schema/CLI, client helpers, and all seven portal elements are
-implemented and tested (1026 tests). Upgrading from 1.0.x or 0.1.x: read
+**v1.2.** Server plugins, schema/CLI, client helpers, and all seven portal elements are
+implemented and tested (1494 tests, the core suites on both SQLite and Postgres). Postgres,
+the staff-managed entitlement table and staff-only organization creation are optional and
+additive: upgrading from 1.1.x, read [`docs/upgrading-to-1.2.md`](./docs/upgrading-to-1.2.md).
+Upgrading from 1.0.x or 0.1.x: read
 [`docs/upgrading-to-1.1.md`](./docs/upgrading-to-1.1.md) first — every change is on by default,
 a few change what existing users see, and a product that replaces one of the preset's plugins
 sets the preset's settings on its own call (step 2). Read
@@ -254,7 +257,7 @@ await verifyDatabase(client, { entitlements: true });
 For Drizzle, spread `orgEntitlementSchema` from `@alphabros/enterprise/schema` (or
 `/schema/pg`) into your schema next to `enterpriseSchema`. A `resolveEntitlements` callback given
 together with `entitlements: { store: "table" }` still takes precedence: the table is then
-written but not read for gating. Upgrade notes: [`docs/upgrading-to-1.3.md`](./docs/upgrading-to-1.3.md).
+written but not read for gating. Upgrade notes: [`docs/upgrading-to-1.2.md`](./docs/upgrading-to-1.2.md).
 
 ### Staff-only organization creation and metadata
 
@@ -581,6 +584,8 @@ start, SAML SP metadata, SCIM ServiceProviderConfig and Groups, and an audit wri
 - [`docs/security.md`](./docs/security.md) — patched SCIM migration, secrets/token storage,
   policy enforcement, API keys, audit coverage and chain limits, retention/GDPR, and this
   package's trusted-publishing setup.
+- [`docs/upgrading-to-1.2.md`](./docs/upgrading-to-1.2.md) — upgrading from 1.1.x: optional
+  Postgres support, the staff-managed entitlement table and staff-only organization creation.
 - [`docs/upgrading-to-1.1.md`](./docs/upgrading-to-1.1.md) — upgrading from 1.0.x: pre-upgrade
   checks, steps, behaviour changes, new options and error codes.
 - [`docs/releases/1.1.0.md`](./docs/releases/1.1.0.md) — 1.1.0 release notes.
