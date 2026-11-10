@@ -152,7 +152,7 @@ describe("writeAudit bounds every row, whoever writes it", () => {
     const chain = readFileSync(join(root, "server/audit/chain.ts"), "utf8");
     // Inside chain.ts, the only row carrying caller values is the one
     // `insertNextRow` builds, and only `writeAudit` calls it — after bounding.
-    expect(chain.match(/insertNextRow\(/g)?.length).toBe(3); // declaration + two calls
+    expect(chain.match(/insertNextRow\(/g)?.length).toBe(2); // declaration + the one (retried) call
     const writeAuditBody = chain.slice(chain.indexOf("export async function writeAudit("));
     expect(writeAuditBody.indexOf("auditRowBounds(input)")).toBeGreaterThan(0);
     expect(writeAuditBody.indexOf("auditRowBounds(input)")).toBeLessThan(

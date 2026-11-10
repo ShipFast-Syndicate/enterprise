@@ -27,6 +27,7 @@ test("Vitest projects inherit the declared timeout and cover executable source",
       })),
       [
         { name: "server", timeout: 20000, environment: "node" },
+        { name: "server-pg", timeout: 20000, environment: "node" },
         { name: "portal", timeout: 20000, environment: "happy-dom" },
         { name: "workerd", timeout: 20000, environment: "node" },
       ],
@@ -370,6 +371,15 @@ function assertClosure(caller, workflow) {
   for (const command of ["pnpm lint", "pnpm typecheck", "pnpm format:check", "pnpm test:coverage"])
     assert.ok(workflow.jobs.node.steps.some((step) => step.run === command));
   assert.ok(workflow.jobs.build.steps.some((step) => step.run === "pnpm build"));
+  // The Postgres job: the core suites against a digest-pinned service
+  // container, reached through TEST_DATABASE_URL (which also enables the
+  // concurrent-writer audit test).
+  const postgres = workflow.jobs.postgres;
+  assert.match(postgres.services.postgres.image, /^postgres:[\w.-]+@sha256:[0-9a-f]{64}$/);
+  const pgSuites = postgres.steps.find((step) => step.run === "pnpm test:pg");
+  assert.ok(pgSuites, "postgres job runs pnpm test:pg");
+  assert.match(pgSuites.env.TEST_DATABASE_URL, /^postgres:\/\/\w+@localhost:5432\/\w+$/);
+  assert.ok(workflow.jobs.summary.needs.includes("postgres"));
   assert.ok(workflow.jobs.audit.steps.some((step) => step.run === "pnpm audit --audit-level=high"));
   assert.ok(
     workflow.jobs.contracts.steps.some(

@@ -15,6 +15,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { magicLink } from "better-auth/plugins";
 import { createOrg, extractCookie, signUpOwner, type TestAuth } from "../helpers/auth";
+import { isPg } from "../helpers/dialect";
 import { startOidcIssuer, type OidcIssuer } from "../helpers/oidc-issuer";
 import { insertProductMember, makeProductAuth } from "../helpers/product-auth";
 import { registerOidcProvider } from "../helpers/sso";
@@ -54,12 +55,15 @@ describe("gap 2 R3 — a product-shaped Drizzle schema, no require2fa anywhere: 
     const owner = await sessionUser(t, cookie);
     expect(owner.email).toBe("owner@acme.test");
 
-    // The row really is in the product shape: seconds, snake_case.
+    // The row really is in the product shape: snake_case, and on SQLite
+    // seconds (Postgres has a timestamptz, which the test client reads back
+    // as milliseconds).
     const row = await t.client.execute({
       sql: `SELECT created_at FROM session WHERE user_id = ?`,
       args: [owner.id],
     });
-    expect(Number(row.rows[0]!.created_at)).toBeLessThan(100_000_000_000);
+    if (isPg) expect(Number(row.rows[0]!.created_at)).toBeGreaterThan(100_000_000_000);
+    else expect(Number(row.rows[0]!.created_at)).toBeLessThan(100_000_000_000);
 
     const { orgId } = await createOrg(t, cookie, "acme");
     const active = await t.api.post(

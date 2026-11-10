@@ -21,9 +21,22 @@
 //
 // The mixed units (a seconds `session.created_at` next to millisecond policy
 // and membership stamps) are deliberate: products in the field mix them.
+//
+// On Postgres (`TEST_DIALECT=pg`) the same two hand-written tables exist in
+// their Postgres shape: `timestamptz` columns (the seconds/millisecond mix is a
+// SQLite integer-column property), the package's own `org_policy` from the
+// migration, and `session`/`enterprise_member` written out by hand.
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  index as pgIndex,
+  pgTable,
+  text as pgText,
+  timestamp as pgTimestamp,
+  uniqueIndex as pgUniqueIndex,
+} from "drizzle-orm/pg-core";
 import type { DynamicSchema } from "./auth";
 import { makeAuth, type TestAuth } from "./auth";
+import { isPg, ts } from "./dialect";
 
 const productSession = sqliteTable("session", {
   id: text("id").primaryKey(),
@@ -91,8 +104,76 @@ const PRODUCT_DDL = [
   `CREATE INDEX IF NOT EXISTS "enterprise_member_user" ON "enterprise_member" ("userId")`,
 ];
 
+const productSessionPg = pgTable("session", {
+  id: pgText("id").primaryKey(),
+  expiresAt: pgTimestamp("expires_at", { withTimezone: true }).notNull(),
+  token: pgText("token").notNull().unique(),
+  createdAt: pgTimestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: pgTimestamp("updated_at", { withTimezone: true }).notNull(),
+  ipAddress: pgText("ip_address"),
+  userAgent: pgText("user_agent"),
+  activeOrganizationId: pgText("activeOrganizationId"),
+  activeTeamId: pgText("activeTeamId"),
+  impersonatedBy: pgText("impersonatedBy"),
+  userId: pgText("user_id").notNull(),
+});
+
+const productMemberPg = pgTable(
+  "enterprise_member",
+  {
+    id: pgText("id").primaryKey(),
+    organizationId: pgText("organizationId").notNull(),
+    userId: pgText("userId").notNull(),
+    role: pgText("role").notNull().default("member"),
+    createdAt: pgTimestamp("createdAt", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    pgUniqueIndex("enterprise_member_org_user").on(t.organizationId, t.userId),
+    pgIndex("enterprise_member_user").on(t.userId),
+  ],
+);
+
+const PRODUCT_DDL_PG = [
+  `CREATE TABLE IF NOT EXISTS "session" (
+  "id" text PRIMARY KEY NOT NULL,
+  "expires_at" timestamptz NOT NULL,
+  "token" text NOT NULL UNIQUE,
+  "created_at" timestamptz NOT NULL,
+  "updated_at" timestamptz NOT NULL,
+  "ip_address" text,
+  "user_agent" text,
+  "activeOrganizationId" text,
+  "activeTeamId" text,
+  "impersonatedBy" text,
+  "user_id" text NOT NULL
+)`,
+  `CREATE TABLE IF NOT EXISTS "enterprise_member" (
+  "id" text PRIMARY KEY NOT NULL,
+  "organizationId" text NOT NULL,
+  "userId" text NOT NULL,
+  "role" text NOT NULL DEFAULT 'member',
+  "createdAt" timestamptz NOT NULL
+)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "enterprise_member_org_user" ON "enterprise_member" ("organizationId", "userId")`,
+  `CREATE INDEX IF NOT EXISTS "enterprise_member_user" ON "enterprise_member" ("userId")`,
+];
+
 /** Drops the derived `session`/`member`/`org_policy` tables and puts the hand-written product ones in their place. */
 function productTables(built: DynamicSchema): DynamicSchema {
+  if (isPg) {
+    // `org_policy` is the package's own table, created by `applyMigrationPg`
+    // after this DDL; the derived Drizzle table for it already has the
+    // migration's shape, so only `session` and `member` are swapped.
+    const replacedPg = /^CREATE TABLE IF NOT EXISTS "(session|member)" /;
+    return {
+      drizzleSchema: {
+        ...built.drizzleSchema,
+        session: productSessionPg,
+        member: productMemberPg,
+      },
+      ddl: [...built.ddl.filter((statement) => !replacedPg.test(statement)), ...PRODUCT_DDL_PG],
+    };
+  }
   const replaced = /^CREATE TABLE IF NOT EXISTS "(session|member|org_policy)" /;
   return {
     drizzleSchema: {
@@ -123,7 +204,7 @@ export async function insertProductMember(
 ): Promise<void> {
   await t.client.execute({
     sql: `INSERT INTO enterprise_member (id, organizationId, userId, role, createdAt) VALUES (?, ?, ?, ?, ?)`,
-    args: [`member_${userId}_${orgId}`, orgId, userId, role, createdAtMs],
+    args: [`member_${userId}_${orgId}`, orgId, userId, role, ts(createdAtMs)],
   });
 }
 
@@ -141,7 +222,16 @@ export async function insertProductSessionCookie(
   const seconds = Math.floor(createdAtMs / 1000);
   await t.client.execute({
     sql: `INSERT INTO session (id, expires_at, token, created_at, updated_at, user_id) VALUES (?, ?, ?, ?, ?, ?)`,
-    args: [`sess_${token}`, seconds + 24 * 60 * 60, token, seconds, seconds, userId],
+    args: isPg
+      ? [
+          `sess_${token}`,
+          new Date((seconds + 24 * 60 * 60) * 1000),
+          token,
+          new Date(seconds * 1000),
+          new Date(seconds * 1000),
+          userId,
+        ]
+      : [`sess_${token}`, seconds + 24 * 60 * 60, token, seconds, seconds, userId],
   });
   const secret = (t.auth.options as { secret: string }).secret;
   const key = await crypto.subtle.importKey(

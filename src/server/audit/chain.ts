@@ -321,12 +321,12 @@ export async function verifyChainPage(
 
 // Driver error codes that mean "a row with this unique key already exists"
 // (L-03): libsql/sqlite (`SQLITE_CONSTRAINT_UNIQUE`/`…_PRIMARYKEY`),
-// postgres (`23505`), mysql (`ER_DUP_ENTRY`/1062). Checked *in addition to*
-// — not instead of — the message heuristic: adapters differ in whether they
-// preserve the driver's code at all (the drizzle/libsql path this package is
-// tested on frequently rewraps the error), so dropping the regex would turn
-// a real race into a hard failure on those. The code check is what makes the
-// common cases exact rather than wording-dependent.
+// postgres (SQLSTATE `23505`, `unique_violation`), mysql (`ER_DUP_ENTRY`/1062).
+// Checked *in addition to* — not instead of — the message heuristic: adapters
+// differ in whether they preserve the driver's code at all (the drizzle/libsql
+// path this package is tested on frequently rewraps the error), so dropping
+// the regex would turn a real race into a hard failure on those. The code
+// check is what makes the common cases exact rather than wording-dependent.
 const UNIQUE_VIOLATION_CODES = new Set([
   "SQLITE_CONSTRAINT_UNIQUE",
   "SQLITE_CONSTRAINT_PRIMARYKEY",
@@ -336,13 +336,30 @@ const UNIQUE_VIOLATION_CODES = new Set([
   "1062",
 ]);
 
+// The error and its `cause` chain, outermost first. A Postgres driver error
+// reaches `writeAudit` wrapped (drizzle's `DrizzleQueryError` puts the
+// driver's `DatabaseError` — the one carrying SQLSTATE `code` — in `cause`, and
+// its own message is "Failed query: …", never "unique"), so the code has to be
+// looked for down the chain, not on the top-level error only.
+function causeChain(err: unknown): unknown[] {
+  const chain: unknown[] = [];
+  let current: unknown = err;
+  while (current && typeof current === "object" && chain.length < 8 && !chain.includes(current)) {
+    chain.push(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return chain;
+}
+
 export function isUniqueViolation(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  if (
-    (typeof code === "string" || typeof code === "number") &&
-    UNIQUE_VIOLATION_CODES.has(String(code))
-  ) {
-    return true;
+  for (const link of causeChain(err)) {
+    const code = (link as { code?: unknown }).code;
+    if (
+      (typeof code === "string" || typeof code === "number") &&
+      UNIQUE_VIOLATION_CODES.has(String(code))
+    ) {
+      return true;
+    }
   }
   const message = err instanceof Error ? err.message : String(err);
   return /unique/i.test(message);
@@ -570,11 +587,24 @@ async function insertNextRow(
 }
 
 /**
+ * How many times `writeAudit` will try to append one row before giving up on
+ * unique-index collisions. A collision means another process/instance took the
+ * `seq` this call computed; each round of losers re-reads the chain and at
+ * least one of them wins, so a handful of writers racing for one org all land
+ * within as many rounds as there are writers.
+ */
+const MAX_WRITE_ATTEMPTS = 16;
+
+/**
  * Appends one row to `input.orgId`'s chain: `seq` = max(seq)+1 for the org,
  * `prevHash` = the org's last row's hash (or `"GENESIS"` for the first
  * row). Serialized per org via `withOrgLock`; on a unique-index violation
  * (`audit_event_org_seq`, meaning another process/instance won the race for
- * this `seq`) retries once with a freshly recomputed `seq`, then rethrows.
+ * this `seq`) it recomputes `seq` from the chain as it now stands and tries
+ * again, up to `MAX_WRITE_ATTEMPTS`, then rethrows. Postgres reports the
+ * violation as SQLSTATE `23505` (see `isUniqueViolation`); a write inside an
+ * already-open transaction cannot be retried there — the failed statement
+ * aborted it — and rethrows whatever the aborted transaction answers.
  */
 export async function writeAudit(
   ctx: AuditWriteContext,
@@ -588,11 +618,12 @@ export async function writeAudit(
   // bound can never grow a chain.
   const row = { ...auditRowBounds(input), orgId: input.orgId };
   return withOrgLock(row.orgId, async () => {
-    try {
-      return await insertNextRow(adapter, row, chainKey);
-    } catch (err) {
-      if (!isUniqueViolation(err)) throw err;
-      return await insertNextRow(adapter, row, chainKey);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await insertNextRow(adapter, row, chainKey);
+      } catch (err) {
+        if (attempt >= MAX_WRITE_ATTEMPTS || !isUniqueViolation(err)) throw err;
+      }
     }
   });
 }

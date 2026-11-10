@@ -14,7 +14,8 @@ npm init -y >/dev/null
 npm pkg set type=module
 # Every peer (optional ones back /schema and /portal) at the ranges this
 # checkout declares; happy-dom gives the portal entry a DOM. No lockfile: this
-# resolves the way a consumer would.
+# resolves the way a consumer would. The smoke imports every entry point,
+# including the Postgres one (schema/pg, which needs drizzle-orm/pg-core).
 peers="$(node -e '
   const p = require(process.argv[1]);
   console.log(Object.entries(p.peerDependencies).map(([n, r]) => `${n}@${r}`).join("\n"));
