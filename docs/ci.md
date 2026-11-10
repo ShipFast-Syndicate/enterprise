@@ -14,6 +14,13 @@ Branch protection continues to use `ci / summary`. This job requires:
 
 - CI policy and workflow contract tests;
 - lint, typecheck, formatting, unit tests and coverage;
+- the `postgres` job: the core suites (auth test harness, preset, SCIM, policy
+  and the audit log with its golden vectors and hash chain) run against a real
+  Postgres 17 service container pinned by digest, with `TEST_DATABASE_URL` set,
+  which also turns on the concurrent-writer audit test. Locally the same suites
+  run on in-process PGlite (`pnpm test:pg`, no Docker), so `pnpm test` covers
+  both engines and each suite file runs once per dialect rather than being
+  copied. When bumping the image, take the digest of the multi-arch index;
 - Semgrep's configured code/security rule sets;
 - Trivy CRITICAL/HIGH vulnerabilities, secrets and configuration findings;
 - Gitleaks full-history scanning with `.gitleaks.toml`;

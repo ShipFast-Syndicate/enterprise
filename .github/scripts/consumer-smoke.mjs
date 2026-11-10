@@ -5,6 +5,7 @@ import { Window } from "happy-dom";
 
 const server = await import("@alphabros/enterprise/server");
 const schema = await import("@alphabros/enterprise/schema");
+const schemaPg = await import("@alphabros/enterprise/schema/pg");
 const client = await import("@alphabros/enterprise/client");
 
 // The portal registers custom elements on import, so it needs a DOM.
@@ -16,12 +17,15 @@ for (const key of Object.getOwnPropertyNames(window))
 globalThis.window = window;
 const portal = await import("@alphabros/enterprise/portal");
 
-for (const [name, module] of Object.entries({ server, schema, client, portal })) {
+for (const [name, module] of Object.entries({ server, schema, schemaPg, client, portal })) {
   if (Object.keys(module).length === 0) throw new Error(`${name} exports nothing`);
   console.log(`${name}: ${Object.keys(module).length} exports`);
 }
 if (typeof server.enterprisePreset !== "function")
   throw new Error("server.enterprisePreset missing");
+if (typeof schema.applyMigrationPg !== "function")
+  throw new Error("schema.applyMigrationPg missing");
+if (!schemaPg.enterpriseSchema?.auditEvent) throw new Error("schemaPg.enterpriseSchema missing");
 if (!window.customElements.get("ab-members"))
   throw new Error("portal did not register <ab-members>");
 console.log("Consumer import smoke OK");

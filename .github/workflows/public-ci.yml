@@ -66,6 +66,45 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  postgres:
+    # The core suites (auth harness, preset, SCIM, policy, audit hash chain)
+    # against a real Postgres, next to the SQLite baseline in `node`. The
+    # service container is pinned by digest (Postgres 17, the major PGlite
+    # runs locally). Trust auth: the server is reachable only from this job's
+    # runner, and no credential is needed or stored. `TEST_DATABASE_URL` is what
+    # switches test/helpers from in-process PGlite to this server, and enables
+    # the concurrent-writer audit test.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "24"
+      - name: Install locked dependencies
+        id: install
+        run: pnpm install --frozen-lockfile
+      - name: Core suites on Postgres
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        env:
+          TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
+        run: pnpm test:pg
+
   semgrep:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -262,7 +301,20 @@ jobs:
   summary:
     if: always()
     needs:
-      [contracts, node, semgrep, trivy, gitleaks, audit, build, package, actionlint, base, release]
+      [
+        contracts,
+        node,
+        postgres,
+        semgrep,
+        trivy,
+        gitleaks,
+        audit,
+        build,
+        package,
+        actionlint,
+        base,
+        release,
+      ]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
