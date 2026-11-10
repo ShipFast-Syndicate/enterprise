@@ -79,6 +79,30 @@ export interface EnterpriseOptions {
    */
   audit?: { retentionDays?: number; exportMaxRows?: number; chainKey?: string };
   /**
+   * Which database engine the product runs on (default `"sqlite"`, the
+   * behaviour of every earlier release — nothing changes unless it is set).
+   *
+   * `dialect: "pg"` serializes the audit chain's `seq` allocation per
+   * organization with a transaction-scoped advisory lock
+   * (`pg_advisory_xact_lock`, keyed by a hash of the organization id), taken
+   * inside the transaction the row is written in — the caller's own, when the
+   * write is part of a larger one (a SCIM request, an entitlement change), or
+   * one `writeAudit` opens when there is none. A writer therefore reads the
+   * chain's head only after every earlier writer has committed, so it never
+   * hits the `(org_id, seq)` unique index (SQLSTATE `23505`) inside an open
+   * transaction, where the failed statement would leave it aborted (`25P02`)
+   * and the retry could not run. The unique-violation retry stays as a
+   * safety net.
+   *
+   * The lock statement has to run on the transaction's own connection, which
+   * better-auth's adapter does not expose: wrap the drizzle database the
+   * adapter is built on with `withPgAuditLock(db)` (`@alphabros/enterprise/
+   * server`), `drizzleAdapter(withPgAuditLock(db), { provider: "pg",
+   * transaction: true })`. Without it the lock cannot be taken (a warning is
+   * logged once) and the retry is the only guard, as on SQLite.
+   */
+  database?: { dialect?: "sqlite" | "pg" };
+  /**
    * SSO trust boundaries.
    *
    * `domainBinding` (default `"verified-domain"`): an SSO sign-in — the JIT

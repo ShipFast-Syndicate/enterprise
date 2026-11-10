@@ -52,8 +52,10 @@ export {
   SIGN_IN_REFUSED_ACTION,
   type RefusalInput,
 } from "./audit/refusal";
+export { withPgAuditLock } from "./audit/pg-lock";
 export {
   auditChainKeyOf,
+  auditDialectOf,
   canonical,
   hashRow,
   isKeyedHash,

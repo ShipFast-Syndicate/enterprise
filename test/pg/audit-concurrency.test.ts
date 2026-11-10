@@ -14,7 +14,20 @@
 // database through the same auth context.
 import { describe, expect, it, vi } from "vitest";
 import type { GenericEndpointContext } from "better-auth";
-import { isUniqueViolation, verifyChain, type AuditRow } from "../../src/server/audit/chain";
+import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
+import {
+  auditDialectOf,
+  isUniqueViolation,
+  verifyChain,
+  type AuditRow,
+} from "../../src/server/audit/chain";
+import {
+  currentPgTransaction,
+  lockOrganizationInTransaction,
+  orgLockKey,
+  withPgAuditLock,
+  type PgTransactionHandle,
+} from "../../src/server/audit/pg-lock";
 import { makeAuth, type TestAuth } from "../helpers/auth";
 import { isPg, realPostgresUrl } from "../helpers/dialect";
 
@@ -140,9 +153,30 @@ describe.skipIf(!isPg)("audit write path on Postgres", () => {
     expect(isUniqueViolation(raw)).toBe(true);
   });
 
+  it("a drizzle-wrapped 23505 carries the SQLSTATE on error.cause, which isUniqueViolation reads", async () => {
+    const t = await makeAuth();
+    const insert = `INSERT INTO audit_event (id, org_id, seq, actor_type, action, target_type, created_at, prev_hash, hash)
+      VALUES ('drizzle_dup', 'org_drizzle', 1, 'system', 'x', 'org', now(), 'GENESIS', 'h')`;
+    const db = t.db as unknown as { execute(query: string): PromiseLike<unknown> };
+    await db.execute(insert);
+    const error = await Promise.resolve(db.execute(insert)).then(
+      () => null,
+      (e: unknown) => e as { message: string; cause?: { code?: string } },
+    );
+    // drizzle's own error: "Failed query: …" on the outside, the driver's
+    // SQLSTATE one level down — never "unique" in the top-level message.
+    expect(error).not.toBeNull();
+    expect(error!.message).toMatch(/^Failed query/);
+    expect(error!.message).not.toMatch(/unique/i);
+    expect(error!.cause?.code).toBe("23505");
+    expect(isUniqueViolation(error)).toBe(true);
+  });
+
   it("writers that all read the chain before any writes recover through the 23505 retry into a valid chain", async () => {
     const writers = 4;
-    const t = await makeAuth();
+    // Without the advisory lock (`database` unset): this is the safety net the
+    // lock leaves in place, outside a transaction.
+    const t = await makeAuth({ database: undefined });
     const base = await t.auth.$context;
     const orgId = "org_barrier";
 
@@ -191,6 +225,163 @@ describe.skipIf(!isPg)("audit write path on Postgres", () => {
     expect(chain[0]!.prevHash).toBe("GENESIS");
     await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
   });
+
+  it("a duplicate (org_id, seq) inside a transaction aborts it (25P02) — what the lock keeps writeAudit out of", async () => {
+    const t = await makeAuth({ database: undefined });
+    const { adapter } = await t.auth.$context;
+    const row = {
+      orgId: "org_abort",
+      seq: 1,
+      actorType: "system",
+      actorId: null,
+      action: "x",
+      targetType: "org",
+      targetId: null,
+      ip: null,
+      userAgent: null,
+      metadata: {},
+      createdAt: new Date(),
+      prevHash: "GENESIS",
+      hash: "h",
+    };
+    await adapter.create({ model: "auditEvent", data: row });
+    let failure: unknown = null;
+    await runWithTransaction(adapter, async () => {
+      const current = await getCurrentAdapter(adapter);
+      await current.create({ model: "auditEvent", data: row }).catch(() => undefined);
+      // The retry's read, in the same transaction.
+      failure = await current
+        .findMany({ model: "auditEvent", where: [{ field: "orgId", value: "org_abort" }] })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+    }).catch(() => undefined); // the aborted transaction cannot commit either
+    expect(String((failure as { code?: unknown } | null)?.code)).toBe("25P02");
+  });
+
+  it("a SCIM-style write inside a larger transaction succeeds next to concurrent writers", async () => {
+    // `database: { dialect: "pg" }` (makeAuth's default here): the lock is
+    // taken in the caller's transaction before the chain head is read, so the
+    // transaction is never aborted by a unique violation (25P02).
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_larger_tx";
+
+    const modules = [];
+    for (let i = 0; i < 4; i++) modules.push(await freshChainModule());
+    const [larger, ...others] = modules as [ChainModule, ...ChainModule[]];
+
+    let lockHeldInside = 0;
+    const largerTransaction = runWithTransaction(context.adapter, async () => {
+      await larger.writeAudit(ctx, input(orgId, 100));
+      // The lock is still held: it lasts until this transaction ends.
+      const handle = await currentPgTransaction();
+      const held = (await handle!.execute(
+        "select count(*)::int as n from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()",
+      )) as { rows: { n: number }[] };
+      lockHeldInside = held.rows[0]!.n;
+      await larger.writeAudit(ctx, input(orgId, 101));
+    });
+    const concurrent = others.map((chain, writer) => chain.writeAudit(ctx, input(orgId, writer)));
+    await expect(Promise.all([largerTransaction, ...concurrent])).resolves.toBeDefined();
+
+    expect(lockHeldInside).toBeGreaterThan(0);
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(chain[0]!.prevHash).toBe("GENESIS");
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
+    // The lock ended with the transaction.
+    const after = await t.pg!.query(
+      "select count(*)::int as n from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()",
+    );
+    expect((after.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it("a rolled-back transaction leaves no gap and no half-written chain", async () => {
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_rollback";
+    const chainModule = await freshChainModule();
+
+    await chainModule.writeAudit(ctx, input(orgId, 0));
+    await expect(
+      runWithTransaction(context.adapter, async () => {
+        await chainModule.writeAudit(ctx, input(orgId, 1));
+        throw new Error("the larger change failed");
+      }),
+    ).rejects.toThrow("the larger change failed");
+    await chainModule.writeAudit(ctx, input(orgId, 2));
+
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual([1, 2]);
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
+  });
+
+  it("a keyed chain written under the lock verifies, through the compaction anchor too", async () => {
+    const chainKey = "k".repeat(40);
+    const t = await makeAuth({ audit: { chainKey } });
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_keyed_compacted";
+    const chainModule = await freshChainModule();
+
+    for (let writer = 0; writer < 4; writer++) {
+      await chainModule.writeAudit(ctx, input(orgId, writer));
+    }
+    const compacted = await chainModule.compactChain(ctx, orgId, new Date(Date.now() + 60_000));
+    expect(compacted?.compactedCount).toBe(4);
+    await chainModule.writeAudit(ctx, input(orgId, 4));
+
+    const chain = await readChain(t, orgId);
+    expect(chain.some((r) => r.action === "audit.retention_compacted")).toBe(true);
+    await expect(verifyChain(chain, chainKey)).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("withPgAuditLock and the organization lock key", () => {
+  it("records the transaction db.transaction opens, for the callback only", async () => {
+    const executed: string[] = [];
+    const tx: PgTransactionHandle = { execute: async (query) => void executed.push(query) };
+    const db = {
+      marker: "db",
+      transaction: async (callback: (tx: PgTransactionHandle) => Promise<unknown>) => callback(tx),
+    };
+    const wrapped = withPgAuditLock(db);
+    expect(wrapped.marker).toBe("db");
+
+    await expect(lockOrganizationInTransaction("org_a")).resolves.toBe(false);
+    await wrapped.transaction(async () => {
+      await expect(currentPgTransaction()).resolves.toBe(tx);
+      await expect(lockOrganizationInTransaction("org_a")).resolves.toBe(true);
+    });
+    await expect(currentPgTransaction()).resolves.toBeUndefined();
+
+    expect(executed).toHaveLength(1);
+    expect(executed[0]).toMatch(/^select pg_advisory_xact_lock\(\d+, -?\d+\)$/);
+  });
+
+  it("keys the lock by organization: stable per id, different between ids", async () => {
+    const a = await orgLockKey("org_a");
+    expect(await orgLockKey("org_a")).toBe(a);
+    expect(Number.isInteger(a)).toBe(true);
+    expect(a).toBeGreaterThanOrEqual(-(2 ** 31));
+    expect(a).toBeLessThan(2 ** 31);
+    expect(await orgLockKey("org_b")).not.toBe(a);
+  });
+
+  it("reads database.dialect off the enterprise plugins (sqlite when unset)", () => {
+    const withDialect = (dialect: unknown) => ({
+      options: { plugins: [{ id: "enterprise-gate", options: { database: { dialect } } }] },
+    });
+    expect(auditDialectOf(withDialect("pg"))).toBe("pg");
+    expect(auditDialectOf(withDialect("sqlite"))).toBe("sqlite");
+    expect(auditDialectOf(withDialect(undefined))).toBe("sqlite");
+    expect(auditDialectOf({ options: { plugins: [] } })).toBe("sqlite");
+    expect(auditDialectOf(null)).toBe("sqlite");
+  });
 });
 
 describe.skipIf(!realPostgresUrl)("audit chain on a real Postgres: concurrent writers", () => {
@@ -215,5 +406,29 @@ describe.skipIf(!realPostgresUrl)("audit chain on a real Postgres: concurrent wr
     expect(
       chain.map((r) => (r.metadata as { writer: number }).writer).sort((a, b) => a - b),
     ).toEqual(Array.from({ length: writers }, (_, i) => i));
+  });
+
+  it("N writers, each inside a larger transaction: no 25P02, a gap-free chain that verifies", async () => {
+    const writers = 12;
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_real_larger_tx";
+
+    const modules = [];
+    for (let i = 0; i < writers; i++) modules.push(await freshChainModule());
+    await Promise.all(
+      modules.map((chain, writer) =>
+        runWithTransaction(context.adapter, async () => {
+          await chain.writeAudit(ctx, input(orgId, writer));
+          await chain.writeAudit(ctx, input(orgId, writer + 1000));
+        }),
+      ),
+    );
+
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual(Array.from({ length: writers * 2 }, (_, i) => i + 1));
+    expect(chain[0]!.prevHash).toBe("GENESIS");
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
   });
 });

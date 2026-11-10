@@ -54,6 +54,24 @@ describe("assertEnterpriseOptions — audit.chainKey", () => {
   });
 });
 
+describe("assertEnterpriseOptions — database.dialect", () => {
+  it('accepts "sqlite", "pg" and no value', () => {
+    expect(() => assertEnterpriseOptions(opts({}))).not.toThrow();
+    expect(() => assertEnterpriseOptions(opts({ database: {} }))).not.toThrow();
+    expect(() => assertEnterpriseOptions(opts({ database: { dialect: "sqlite" } }))).not.toThrow();
+    expect(() => assertEnterpriseOptions(opts({ database: { dialect: "pg" } }))).not.toThrow();
+  });
+
+  it("rejects any other dialect", () => {
+    for (const dialect of ["postgres", "mysql", "", 1, null]) {
+      expect(
+        () => assertEnterpriseOptions(loose({ database: { dialect } })),
+        String(dialect),
+      ).toThrow(/database\.dialect/);
+    }
+  });
+});
+
 describe("assertEnterpriseOptions — sso", () => {
   it("accepts both domainBinding literals and rejects anything else", () => {
     expect(() =>

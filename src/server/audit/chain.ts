@@ -34,7 +34,9 @@
 
 import type { AuthContext } from "better-auth";
 import type { Where } from "@better-auth/core/db/adapter";
+import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
 import { auditRowBounds } from "./bounds";
+import { lockOrganizationInTransaction } from "./pg-lock";
 
 type AuditAdapter = AuthContext["adapter"];
 
@@ -520,6 +522,23 @@ export function auditChainKeyOf(context: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * The `database.dialect` the running auth instance is configured with
+ * (`"sqlite"` when none is), read from the enterprise plugins the same way
+ * `auditChainKeyOf` reads the key.
+ */
+export function auditDialectOf(context: unknown): "sqlite" | "pg" {
+  const plugins = (context as { options?: { plugins?: unknown } } | null | undefined)?.options
+    ?.plugins;
+  if (!Array.isArray(plugins)) return "sqlite";
+  for (const id of OPTION_CARRYING_PLUGIN_IDS) {
+    const plugin = plugins.find((p: unknown) => (p as { id?: unknown } | null)?.id === id) as
+      { options?: { database?: { dialect?: unknown } } } | undefined;
+    if (plugin?.options?.database?.dialect === "pg") return "pg";
+  }
+  return "sqlite";
+}
+
 /** The context shape the chain writers need: the adapter, and the options they read `chainKey` from. */
 export interface AuditWriteContext {
   context: Pick<AuthContext, "adapter"> & { options?: unknown };
@@ -527,6 +546,34 @@ export interface AuditWriteContext {
 
 function effectiveChainKey(ctx: AuditWriteContext, options: ChainWriteOptions): string | undefined {
   return options.chainKey ?? auditChainKeyOf(ctx.context);
+}
+
+let warnedUnlockedPg = false;
+
+/**
+ * Runs `work` — a read of the organization's chain head plus the write that
+ * extends it — under the organization's Postgres advisory lock (see
+ * `./pg-lock.ts`), inside one transaction: the caller's when there is one,
+ * else one opened here. `work` receives the adapter that transaction uses.
+ * An adapter without a `transaction` method is itself a transaction adapter
+ * (SCIM's `trx`), so the caller's transaction is the one in force.
+ */
+async function withPgChainLock<T>(
+  adapter: AuditAdapter,
+  orgId: string,
+  work: (active: AuditAdapter) => Promise<T>,
+): Promise<T> {
+  const locked = async (): Promise<T> => {
+    if (!(await lockOrganizationInTransaction(orgId)) && !warnedUnlockedPg) {
+      warnedUnlockedPg = true;
+      console.warn(
+        '@alphabros/enterprise: "database.dialect" is "pg" but the audit lock could not run — wrap the drizzle database with withPgAuditLock(db) so audit writes inside a transaction cannot hit the (org_id, seq) unique index; relying on the retry only.',
+      );
+    }
+    return work((await getCurrentAdapter(adapter)) as AuditAdapter);
+  };
+  if (typeof (adapter as { transaction?: unknown }).transaction !== "function") return locked();
+  return runWithTransaction(adapter, locked);
 }
 
 async function insertNextRow(
@@ -605,6 +652,12 @@ const MAX_WRITE_ATTEMPTS = 16;
  * violation as SQLSTATE `23505` (see `isUniqueViolation`); a write inside an
  * already-open transaction cannot be retried there — the failed statement
  * aborted it — and rethrows whatever the aborted transaction answers.
+ *
+ * With `database: { dialect: "pg" }` the read of the head and the insert run
+ * under the organization's advisory lock (`withPgChainLock`), so the
+ * collision — and with it the aborted transaction — does not arise; the retry
+ * above stays as the safety net (and, when `writeAudit` opened the
+ * transaction itself, each attempt gets a fresh one).
  */
 export async function writeAudit(
   ctx: AuditWriteContext,
@@ -617,10 +670,12 @@ export async function writeAudit(
   // through the same backstop (`./bounds.ts`), so a value one of them did not
   // bound can never grow a chain.
   const row = { ...auditRowBounds(input), orgId: input.orgId };
+  const pg = auditDialectOf(ctx.context) === "pg";
+  const append = (active: AuditAdapter) => insertNextRow(active, row, chainKey);
   return withOrgLock(row.orgId, async () => {
     for (let attempt = 1; ; attempt++) {
       try {
-        return await insertNextRow(adapter, row, chainKey);
+        return await (pg ? withPgChainLock(adapter, row.orgId, append) : append(adapter));
       } catch (err) {
         if (attempt >= MAX_WRITE_ATTEMPTS || !isUniqueViolation(err)) throw err;
       }
@@ -670,9 +725,13 @@ export async function compactChain(
   cutoff: Date,
   options: ChainWriteOptions = {},
 ): Promise<CompactionResult | null> {
-  const adapter = ctx.context.adapter as unknown as AuditAdapter;
+  const outer = ctx.context.adapter as unknown as AuditAdapter;
   const chainKey = effectiveChainKey(ctx, options);
-  return withOrgLock(orgId, async () => {
+  const pg = auditDialectOf(ctx.context) === "pg";
+  // On Postgres the whole compaction runs under the organization's audit lock
+  // (one transaction), so a writer on another instance cannot take a `seq`
+  // while the anchor is being placed.
+  const compact = async (adapter: AuditAdapter): Promise<CompactionResult | null> => {
     const expired = await adapter.findMany<{ seq: number; hash: string }>({
       model: "auditEvent",
       where: [
@@ -769,7 +828,8 @@ export async function compactChain(
       compactedCount,
       lastHash: through.hash,
     };
-  });
+  };
+  return withOrgLock(orgId, () => (pg ? withPgChainLock(outer, orgId, compact) : compact(outer)));
 }
 
 /**
