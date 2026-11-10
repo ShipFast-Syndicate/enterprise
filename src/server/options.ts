@@ -66,6 +66,9 @@ export function takeDomainBindingOffUnlistedWarning(opts: EnterpriseOptions): st
  *   silent downgrade of that protection.
  * - `scimCredentialHashSecret` — `>= 32` characters and not the same value as
  *   `secretsKey`.
+ * - `resolveEntitlements` / `entitlements` — at least one of them (a function,
+ *   or `{ store: "table" }` with optional non-empty `staffRoles`), so the gate
+ *   never has nowhere to resolve entitlements from.
  * - `audit.retentionDays` — at least 1. `0` or a negative value puts the
  *   retention cutoff at or after "now", so the very next
  *   `GET /enterprise/audit/list` would compact the org's entire chain down to
@@ -100,6 +103,33 @@ export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
     throw new Error(
       "scimCredentialHashSecret must be an independent secret of at least 32 characters",
     );
+  }
+
+  const resolveEntitlements = opts.resolveEntitlements;
+  if (resolveEntitlements !== undefined && typeof resolveEntitlements !== "function") {
+    fail(`"resolveEntitlements" must be a function.`);
+  }
+  const entitlements = opts.entitlements;
+  if (entitlements !== undefined) {
+    if (
+      typeof entitlements !== "object" ||
+      entitlements === null ||
+      entitlements.store !== "table"
+    ) {
+      fail(`"entitlements.store" must be "table" (got ${JSON.stringify(entitlements?.store)}).`);
+    }
+    const staffRoles = entitlements.staffRoles;
+    if (
+      staffRoles !== undefined &&
+      (!Array.isArray(staffRoles) ||
+        staffRoles.length === 0 ||
+        !staffRoles.every((role) => typeof role === "string" && /^[^,\s]+$/.test(role)))
+    ) {
+      fail(`"entitlements.staffRoles" must be a non-empty array of role names without commas.`);
+    }
+  }
+  if (resolveEntitlements === undefined && entitlements === undefined) {
+    fail(`either "resolveEntitlements" or "entitlements: { store: 'table' }" is required.`);
   }
 
   const retentionDays = opts.audit?.retentionDays;

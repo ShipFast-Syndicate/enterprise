@@ -8,7 +8,7 @@
 // framework — `node:util`'s `parseArgs` per ruling (e).
 //
 // Commands:
-//   ab-enterprise migrate --out <dir> [--from <NNNN>]
+//   ab-enterprise migrate --out <dir> [--from <NNNN>] [--entitlements]
 //                                        write every package migration the
 //                                        folder does not hold yet (0001, 0002,
 //                                        0003, ...; with --from, only those
@@ -20,12 +20,18 @@
 //                                        one; a folder an earlier release
 //                                        wrote (0001 only) needs --from 0003
 //                                        (from 1.0.x) or --from 0002 (from
-//                                        0.1.x without 0002 applied)
-//   ab-enterprise verify [--url] [--token]
+//                                        0.1.x without 0002 applied).
+//                                        --entitlements (or --from 0004) also
+//                                        writes the optional 0004
+//                                        (org_entitlement), for a deployment
+//                                        with entitlements: { store: "table" };
+//                                        a plain run, and --from 0003, never do
+//   ab-enterprise verify [--url] [--token] [--entitlements]
 //                                        check a live database against
 //                                        EXPECTED_TABLES, one line per
 //                                        missing table/column; exit 1 if
-//                                        anything is missing
+//                                        anything is missing. --entitlements
+//                                        also expects org_entitlement
 //   ab-enterprise audit-verify --org <id> [--url] [--token]
 //                              [--expect-head <seq>:<hash> | <head JSON>]
 //                                        verify an org's audit_event hash
@@ -44,7 +50,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from "node:path";
 import { createClient, type Row } from "@libsql/client";
 import { verifyDatabase } from "../schema/verify";
-import { MIGRATION_FILES, migrationFilePath } from "../schema/migrate";
+import { MIGRATION_FILES, OPTIONAL_MIGRATION_FILES, migrationFilePath } from "../schema/migrate";
 import {
   RETENTION_COMPACTED_ACTION,
   RETENTION_COMPACTING_ACTION,
@@ -52,6 +58,10 @@ import {
   verifyChainHeadSignature,
   type AuditRow,
 } from "../server/audit/chain";
+
+// Every migration the package ships, optional ones last. Only the optional
+// ones are left out of a plain `migrate` / `verify` (`--entitlements` opts in).
+const ALL_MIGRATION_FILES: readonly string[] = [...MIGRATION_FILES, ...OPTIONAL_MIGRATION_FILES];
 
 const MIGRATION_FILE_RE = /^(\d{4})_.*\.sql$/;
 
@@ -333,7 +343,7 @@ function unprovenEnterpriseFiles(outDir: string): string[] {
     (entry) =>
       /\.sql$/.test(entry) &&
       /enterprise/i.test(entry) &&
-      !MIGRATION_FILES.some((file) => isEmissionOf(outDir, entry, file)),
+      !ALL_MIGRATION_FILES.some((file) => isEmissionOf(outDir, entry, file)),
   );
 }
 
@@ -366,25 +376,37 @@ function unprovenEnterpriseFiles(outDir: string): string[] {
 function cmdMigrate(argv: string[]): number {
   const { values } = parseArgs({
     args: argv,
-    options: { out: { type: "string" }, from: { type: "string" } },
+    options: {
+      out: { type: "string" },
+      from: { type: "string" },
+      entitlements: { type: "boolean" },
+    },
   });
   if (!values.out) {
     console.error("ab-enterprise migrate: --out <dir> is required");
     return 1;
   }
   const numbers = MIGRATION_FILES.map(migrationNumber);
+  const optionalNumbers: readonly string[] = OPTIONAL_MIGRATION_FILES.map(migrationNumber);
   const from = values.from;
-  if (from !== undefined && !numbers.includes(from)) {
+  if (from !== undefined && !numbers.includes(from) && !optionalNumbers.includes(from)) {
     console.error(
-      `ab-enterprise migrate: --from must be one of this package's migration numbers (${numbers.join(", ")}), got "${from}"`,
+      `ab-enterprise migrate: --from must be one of this package's migration numbers (${numbers.join(", ")}), or an optional one (${optionalNumbers.join(", ")}), got "${from}"`,
     );
     return 1;
   }
   const outDir = values.out;
   mkdirSync(outDir, { recursive: true });
 
-  const selected = MIGRATION_FILES.filter(
-    (file) => from === undefined || migrationNumber(file) >= from,
+  // The optional migrations are written only on request: `--entitlements`, or
+  // a `--from` that names an optional migration itself (`--from 0004`). A
+  // `--from 0003` upgrade from 1.0.x does not pick them up.
+  const withOptional =
+    values.entitlements === true || (from !== undefined && optionalNumbers.includes(from));
+  const selected = ALL_MIGRATION_FILES.filter(
+    (file) =>
+      (from === undefined || migrationNumber(file) >= from) &&
+      (withOptional || !optionalNumbers.includes(migrationNumber(file))),
   );
   for (const file of selected) {
     const state = emissionState(outDir, file);
@@ -454,6 +476,7 @@ async function cmdVerify(argv: string[]): Promise<number> {
     options: {
       url: { type: "string" },
       token: { type: "string" },
+      entitlements: { type: "boolean" },
     },
   });
   const url = values.url ?? process.env.TURSO_DATABASE_URL;
@@ -467,7 +490,9 @@ async function cmdVerify(argv: string[]): Promise<number> {
 
   const client = createClient(token ? { url, authToken: token } : { url });
   try {
-    const { ok, missing } = await verifyDatabase(client);
+    const { ok, missing } = await verifyDatabase(client, {
+      entitlements: values.entitlements === true,
+    });
     for (const item of missing) {
       console.log(
         item.column
@@ -655,7 +680,7 @@ async function cmdAuditVerify(argv: string[]): Promise<number> {
 }
 
 const USAGE =
-  "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] | verify [--url <url>] [--token <t>] | audit-verify --org <id> [--url <url>] [--token <t>] [--expect-head <seq>:<hash>]";
+  "usage: ab-enterprise migrate --out <dir> [--from <NNNN>] [--entitlements] | verify [--url <url>] [--token <t>] [--entitlements] | audit-verify --org <id> [--url <url>] [--token <t>] [--expect-head <seq>:<hash>]";
 
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);

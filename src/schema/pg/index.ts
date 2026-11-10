@@ -94,4 +94,15 @@ export function studioRefColumns() {
   return { studioRef: text("studio_ref") };
 }
 
+// Optional (`entitlements: { store: "table" }`; `../sql/pg/0002_org_entitlement.sql`).
+// Not part of `enterpriseSchema`; spread `orgEntitlementSchema` in when opted in.
+export const orgEntitlement = pgTable("org_entitlement", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull().unique(),
+  features: text("features").array().notNull().default([]),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  updatedBy: text("updated_by"),
+});
+
 export const enterpriseSchema = { orgPolicy, auditEvent, enterpriseScimMember };
+export const orgEntitlementSchema = { orgEntitlement };

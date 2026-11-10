@@ -310,6 +310,42 @@ cap)`) _and_ on every refresh: upstream `/get-session` rewrites `expiresAt = now
   `null`). A `customAPIKeyGetter` or another header name is still confined to the allow-list
   and judged by the validator, but forfeits the header-alone layer and the `null` answer.
 
+## Entitlements: why not `organization.metadata`
+
+Reading plan entitlements from `organization.metadata` is a privilege escalation: better-auth's
+`/organization/update` lets an organization's **owner** write that field, so an owner could grant
+its own org `sso`, `scim`, `audit_log` — every plan gate in this package — without paying
+(spike security finding 1). `organization.metadata` is therefore never an entitlement source in
+this package.
+
+`entitlements: { store: "table" }` resolves features from the `org_entitlement` table instead. No
+route a tenant can call writes it; the two writers are `POST /enterprise/entitlements/set` and
+the server function `setEntitlements(auth, orgId, features, { userId })`, both of which require
+**platform staff**:
+
+- a stored user whose `role` (comma-separated, as the `admin()` plugin writes it) holds one of
+  `entitlements.staffRoles` (default `["admin"]`) and who is not banned — read from the database
+  on each call, so a demoted or banned staff user loses the ability at once. Organization roles
+  (owner, admin) do not count.
+- **not an impersonation session** (`session.impersonatedBy`): staff acting as a user do not carry
+  staff authority, even when the impersonated user is staff themselves
+  (`403 IMPERSONATION_NOT_ALLOWED`). An API key never reaches the route (`API_KEY_NOT_ALLOWED_HERE`).
+
+The route is rate limited (20 per minute per client — keep better-auth's rate limiter enabled in
+production), is not entitlement-gated (the target org usually has no features yet), validates the
+organization exists and the features against the closed `Feature` list, and writes
+`entitlement.changed` (new and previous set, the staff user as actor) into the target
+organization's hash chain in the same transaction as the change: a change without its audit row
+does not commit. Fail closed throughout: no row, an unreadable row or an unknown name grants
+nothing, and a query error fails the request. A `resolveEntitlements` callback, when given, takes
+precedence over the table. The table is an opt-in migration (SQLite `0004`, Postgres `0002`) that
+`verify` ignores unless asked, so enabling the store is a deliberate step for each deployment.
+
+Tests: `test/security/entitlement-store.test.ts` (an owner cannot write entitlements through
+`/organization/update` metadata, the staff endpoint, role escalation or an API key; impersonated and
+demoted staff are refused; unentitled orgs get `403 FEATURE_NOT_ENTITLED` on SSO and SCIM routes;
+callback-only deployments are unchanged) and `test/security/entitlement-store-rate-limit.test.ts`.
+
 ## SSO providers without an organization
 
 Changing or deleting an SSO provider (`/sso/update-provider`, `/sso/delete-provider`) needs the
@@ -527,7 +563,8 @@ the CSV is built, so an export never contains its own row; an export that cannot
 not handed out); `/enterprise/audit/compact` and the compaction `/enterprise/audit/list`
 triggers → the retention anchor names the caller as its actor; `/enterprise/scim/tokens/*` →
 `scim.token_created|rotated|revoked`; `/enterprise/sso/test-login/finish` →
-`sso.test_login_passed`; `/enterprise/sso/register` forwards to `/sso/register`.
+`sso.test_login_passed`; `/enterprise/entitlements/set` → `entitlement.changed` (new and previous
+feature set), in the target organization's chain; `/enterprise/sso/register` forwards to `/sso/register`.
 
 **Actors.** The actor is the session making the request, never a field of the response (a role
 change is attributed to the admin who made it; the member whose role changed is the target,

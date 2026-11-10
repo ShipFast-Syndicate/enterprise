@@ -37,6 +37,21 @@ export const MIGRATION_FILES = [
   "0003_require2fa.sql",
 ] as const;
 
+/**
+ * Migrations a deployment applies only when it opts into the feature they
+ * serve — `0004_org_entitlement.sql` for `entitlements: { store: "table" }`.
+ * Not in `MIGRATION_FILES`: `applyMigration` runs them with
+ * `{ entitlements: true }`, `ab-enterprise migrate` writes them with
+ * `--entitlements` (or `--from <their number>`), and a deployment that never
+ * opts in is never asked to apply or verify them.
+ */
+export const OPTIONAL_MIGRATION_FILES = ["0004_org_entitlement.sql"] as const;
+
+export interface ApplyMigrationOptions {
+  /** Also create `org_entitlement` (`0004`) — for `entitlements: { store: "table" }`. */
+  entitlements?: boolean;
+}
+
 export function migrationFilePath(file: string = MIGRATION_FILES[0]): string {
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [join(here, "sql", file), join(here, "..", "..", "sql", file)];
@@ -129,10 +144,14 @@ async function tableInfo(client: Client, table: string) {
   return result.rows;
 }
 
-export async function applyMigration(client: Client): Promise<void> {
-  const sql = MIGRATION_FILES.map((file) => readFileSync(migrationFilePath(file), "utf8")).join(
-    "\n",
-  );
+export async function applyMigration(
+  client: Client,
+  options: ApplyMigrationOptions = {},
+): Promise<void> {
+  const files = options.entitlements
+    ? [...MIGRATION_FILES, ...OPTIONAL_MIGRATION_FILES]
+    : MIGRATION_FILES;
+  const sql = files.map((file) => readFileSync(migrationFilePath(file), "utf8")).join("\n");
 
   for (const statement of splitStatements(sql)) {
     const addColumn = ADD_COLUMN_STATEMENT.exec(statement);
