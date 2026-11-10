@@ -79,6 +79,7 @@ export function takeDomainBindingOffUnlistedWarning(opts: EnterpriseOptions): st
  * - `audit.chainKey` — `>= 32` characters and independent of the other two
  *   secrets: reusing `secretsKey` would let whoever recovers one key forge
  *   the other's artefacts too.
+ * - `database.dialect` — `"sqlite"` or `"pg"`.
  * - `sso.domainBinding` — one of the two literals; `"off"` re-opens the
  *   cross-tenant squatting class GHSA-8p84-pc7q-69jr describes, so it is
  *   accepted but warned about, naming the advisory.
@@ -152,6 +153,11 @@ export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
     if (chainKey === opts.secretsKey || chainKey === opts.scimCredentialHashSecret) {
       fail(`"audit.chainKey" must be independent of "secretsKey" and "scimCredentialHashSecret".`);
     }
+  }
+
+  const dialect = opts.database?.dialect;
+  if (dialect !== undefined && dialect !== "sqlite" && dialect !== "pg") {
+    fail(`"database.dialect" must be "sqlite" or "pg" (got ${JSON.stringify(dialect)}).`);
   }
 
   const domainBinding = opts.sso?.domainBinding;

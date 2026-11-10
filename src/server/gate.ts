@@ -149,19 +149,19 @@ export const GATE_ORG_SOURCES: Record<string, GateOrgSource> = {
     kind: "request",
     fields: [query("orgId")],
     activeOrganization: false,
-    refs: ["src/server/audit/plugin.ts:1303"],
+    refs: ["src/server/audit/plugin.ts:1304"],
   },
   "/enterprise/audit/export": {
     kind: "request",
     fields: [query("orgId")],
     activeOrganization: false,
-    refs: ["src/server/audit/plugin.ts:1333"],
+    refs: ["src/server/audit/plugin.ts:1334"],
   },
   "/enterprise/audit/compact": {
     kind: "request",
     fields: [body("orgId")],
     activeOrganization: false,
-    refs: ["src/server/audit/plugin.ts:1478"],
+    refs: ["src/server/audit/plugin.ts:1479"],
   },
   "/enterprise/policy/set": {
     kind: "request",

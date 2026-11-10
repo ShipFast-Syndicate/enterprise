@@ -14,11 +14,38 @@
 // database through the same auth context.
 import { describe, expect, it, vi } from "vitest";
 import type { GenericEndpointContext } from "better-auth";
-import { isUniqueViolation, verifyChain, type AuditRow } from "../../src/server/audit/chain";
-import { makeAuth, type TestAuth } from "../helpers/auth";
+import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
+import {
+  auditDialectOf,
+  compactChain,
+  isUniqueViolation,
+  verifyChain,
+  writeAudit,
+  type AuditRow,
+} from "../../src/server/audit/chain";
+import {
+  currentPgTransaction,
+  lockOrganizationInTransaction,
+  orgLockKey,
+  withPgAuditLock,
+  type PgTransactionHandle,
+} from "../../src/server/audit/pg-lock";
+import { createOrg, makeAuth, signUpOwner, type TestAuth } from "../helpers/auth";
 import { isPg, realPostgresUrl } from "../helpers/dialect";
 
 type ChainModule = typeof import("../../src/server/audit/chain");
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// A deadlock between two waits Postgres cannot see would hang the test; fail
+// it with a message instead.
+function withDeadline<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([work, guard]).finally(() => clearTimeout(timer));
+}
 
 async function freshChainModule(): Promise<ChainModule> {
   vi.resetModules();
@@ -140,9 +167,30 @@ describe.skipIf(!isPg)("audit write path on Postgres", () => {
     expect(isUniqueViolation(raw)).toBe(true);
   });
 
+  it("a drizzle-wrapped 23505 carries the SQLSTATE on error.cause, which isUniqueViolation reads", async () => {
+    const t = await makeAuth();
+    const insert = `INSERT INTO audit_event (id, org_id, seq, actor_type, action, target_type, created_at, prev_hash, hash)
+      VALUES ('drizzle_dup', 'org_drizzle', 1, 'system', 'x', 'org', now(), 'GENESIS', 'h')`;
+    const db = t.db as unknown as { execute(query: string): PromiseLike<unknown> };
+    await db.execute(insert);
+    const error = await Promise.resolve(db.execute(insert)).then(
+      () => null,
+      (e: unknown) => e as { message: string; cause?: { code?: string } },
+    );
+    // drizzle's own error: "Failed query: …" on the outside, the driver's
+    // SQLSTATE one level down — never "unique" in the top-level message.
+    expect(error).not.toBeNull();
+    expect(error!.message).toMatch(/^Failed query/);
+    expect(error!.message).not.toMatch(/unique/i);
+    expect(error!.cause?.code).toBe("23505");
+    expect(isUniqueViolation(error)).toBe(true);
+  });
+
   it("writers that all read the chain before any writes recover through the 23505 retry into a valid chain", async () => {
     const writers = 4;
-    const t = await makeAuth();
+    // Without the advisory lock (`database` unset): this is the safety net the
+    // lock leaves in place, outside a transaction.
+    const t = await makeAuth({ database: undefined });
     const base = await t.auth.$context;
     const orgId = "org_barrier";
 
@@ -191,6 +239,258 @@ describe.skipIf(!isPg)("audit write path on Postgres", () => {
     expect(chain[0]!.prevHash).toBe("GENESIS");
     await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
   });
+
+  it("a duplicate (org_id, seq) inside a transaction aborts it (25P02) — what the lock keeps writeAudit out of", async () => {
+    const t = await makeAuth({ database: undefined });
+    const { adapter } = await t.auth.$context;
+    const row = {
+      orgId: "org_abort",
+      seq: 1,
+      actorType: "system",
+      actorId: null,
+      action: "x",
+      targetType: "org",
+      targetId: null,
+      ip: null,
+      userAgent: null,
+      metadata: {},
+      createdAt: new Date(),
+      prevHash: "GENESIS",
+      hash: "h",
+    };
+    await adapter.create({ model: "auditEvent", data: row });
+    let failure: unknown = null;
+    await runWithTransaction(adapter, async () => {
+      const current = await getCurrentAdapter(adapter);
+      await current.create({ model: "auditEvent", data: row }).catch(() => undefined);
+      // The retry's read, in the same transaction.
+      failure = await current
+        .findMany({ model: "auditEvent", where: [{ field: "orgId", value: "org_abort" }] })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+    }).catch(() => undefined); // the aborted transaction cannot commit either
+    expect(String((failure as { code?: unknown } | null)?.code)).toBe("25P02");
+  });
+
+  it("a SCIM-style write inside a larger transaction succeeds next to concurrent writers", async () => {
+    // `database: { dialect: "pg" }` (makeAuth's default here): the lock is
+    // taken in the caller's transaction before the chain head is read, so the
+    // transaction is never aborted by a unique violation (25P02).
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_larger_tx";
+
+    const modules = [];
+    for (let i = 0; i < 4; i++) modules.push(await freshChainModule());
+    const [larger, ...others] = modules as [ChainModule, ...ChainModule[]];
+
+    let lockHeldInside = 0;
+    const largerTransaction = runWithTransaction(context.adapter, async () => {
+      await larger.writeAudit(ctx, input(orgId, 100));
+      // The lock is still held: it lasts until this transaction ends.
+      const handle = await currentPgTransaction();
+      const held = (await handle!.execute(
+        "select count(*)::int as n from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()",
+      )) as { rows: { n: number }[] };
+      lockHeldInside = held.rows[0]!.n;
+      await larger.writeAudit(ctx, input(orgId, 101));
+    });
+    const concurrent = others.map((chain, writer) => chain.writeAudit(ctx, input(orgId, writer)));
+    await expect(Promise.all([largerTransaction, ...concurrent])).resolves.toBeDefined();
+
+    expect(lockHeldInside).toBeGreaterThan(0);
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual([1, 2, 3, 4, 5]);
+    expect(chain[0]!.prevHash).toBe("GENESIS");
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
+    // The lock ended with the transaction.
+    const after = await t.pg!.query(
+      "select count(*)::int as n from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()",
+    );
+    expect((after.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it("one module: a transaction writing twice next to plain writers does not deadlock", async () => {
+    // The common deployment: every writer shares one copy of the module, so
+    // one in-process mutex. The transaction keeps the advisory lock after its
+    // first write; a plain writer must not hold the mutex while it waits for
+    // that lock, or the transaction's second write waits on the mutex forever.
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_one_module";
+
+    const run = async () => {
+      const larger = runWithTransaction(context.adapter, async () => {
+        await writeAudit(ctx, input(orgId, 100));
+        await sleep(100);
+        await writeAudit(ctx, input(orgId, 101));
+        await sleep(100);
+        await writeAudit(ctx, input(orgId, 102));
+      });
+      const plain = [0, 1, 2, 3].map(async (writer) => {
+        await sleep(50 + writer * 40);
+        return writeAudit(ctx, input(orgId, writer));
+      });
+      await Promise.all([larger, ...plain]);
+    };
+    await withDeadline(run(), 8000, "audit writers deadlocked");
+
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
+    // Compaction takes the same path: it must not deadlock against a
+    // transaction that holds the lock either.
+    const compacting = runWithTransaction(context.adapter, async () => {
+      await writeAudit(ctx, input(orgId, 200));
+      await sleep(100);
+      await writeAudit(ctx, input(orgId, 201));
+    });
+    await sleep(30);
+    const compacted = compactChain(ctx, orgId, new Date(Date.now() + 60_000));
+    await withDeadline(Promise.all([compacting, compacted]), 8000, "compaction deadlocked");
+    await expect(verifyChain(await readChain(t, orgId))).resolves.toEqual({ ok: true });
+  });
+
+  it("the real SCIM deactivate, next to concurrent writers for the same org, keeps a gap-free chain", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const tokenRes = await t.api.post(
+      "/enterprise/scim/tokens/create",
+      { providerId: "okta", orgId },
+      { cookie },
+    );
+    expect(tokenRes.status).toBe(200);
+    const { scimToken } = (await tokenRes.json()) as { scimToken: string };
+    const bearer = { authorization: `Bearer ${scimToken}` };
+    const email = "scim.pg@acme.test";
+    const createRes = await t.api.post(
+      "/scim/v2/Users",
+      {
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        userName: email,
+        emails: [{ value: email, primary: true }],
+      },
+      bearer,
+    );
+    expect(createRes.status).toBe(201);
+    const { id: scimId } = (await createRes.json()) as { id: string };
+
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const patch = t.api.patch(
+      `/scim/v2/Users/${scimId}`,
+      {
+        schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        Operations: [{ op: "replace", path: "active", value: false }],
+      },
+      bearer,
+    );
+    const plain = [0, 1, 2, 3, 4, 5].map(async (writer) => {
+      await sleep(writer * 5);
+      return writeAudit(ctx, input(orgId, writer));
+    });
+    const [patchRes] = await withDeadline(
+      Promise.all([patch, ...plain]),
+      15_000,
+      "SCIM deactivate deadlocked",
+    );
+    expect(patchRes.status).toBe(200);
+
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual(Array.from({ length: chain.length }, (_, i) => i + 1));
+    expect(chain.some((r) => r.action === "scim.user_deactivated")).toBe(true);
+    expect(chain.filter((r) => r.action === "member.invited")).toHaveLength(6);
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
+  });
+
+  it("a rolled-back transaction leaves no gap and no half-written chain", async () => {
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_rollback";
+    const chainModule = await freshChainModule();
+
+    await chainModule.writeAudit(ctx, input(orgId, 0));
+    await expect(
+      runWithTransaction(context.adapter, async () => {
+        await chainModule.writeAudit(ctx, input(orgId, 1));
+        throw new Error("the larger change failed");
+      }),
+    ).rejects.toThrow("the larger change failed");
+    await chainModule.writeAudit(ctx, input(orgId, 2));
+
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual([1, 2]);
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
+  });
+
+  it("a keyed chain written under the lock verifies, through the compaction anchor too", async () => {
+    const chainKey = "k".repeat(40);
+    const t = await makeAuth({ audit: { chainKey } });
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_keyed_compacted";
+    const chainModule = await freshChainModule();
+
+    for (let writer = 0; writer < 4; writer++) {
+      await chainModule.writeAudit(ctx, input(orgId, writer));
+    }
+    const compacted = await chainModule.compactChain(ctx, orgId, new Date(Date.now() + 60_000));
+    expect(compacted?.compactedCount).toBe(4);
+    await chainModule.writeAudit(ctx, input(orgId, 4));
+
+    const chain = await readChain(t, orgId);
+    expect(chain.some((r) => r.action === "audit.retention_compacted")).toBe(true);
+    await expect(verifyChain(chain, chainKey)).resolves.toEqual({ ok: true });
+  });
+});
+
+describe("withPgAuditLock and the organization lock key", () => {
+  it("records the transaction db.transaction opens, for the callback only", async () => {
+    const executed: string[] = [];
+    const tx: PgTransactionHandle = { execute: async (query) => void executed.push(query) };
+    const db = {
+      marker: "db",
+      transaction: async (callback: (tx: PgTransactionHandle) => Promise<unknown>) => callback(tx),
+    };
+    const wrapped = withPgAuditLock(db);
+    expect(wrapped.marker).toBe("db");
+
+    await expect(lockOrganizationInTransaction("org_a")).resolves.toBe(false);
+    await wrapped.transaction(async () => {
+      await expect(currentPgTransaction()).resolves.toBe(tx);
+      await expect(lockOrganizationInTransaction("org_a")).resolves.toBe(true);
+    });
+    await expect(currentPgTransaction()).resolves.toBeUndefined();
+
+    expect(executed).toHaveLength(1);
+    expect(executed[0]).toMatch(/^select pg_advisory_xact_lock\(\d+, -?\d+\)$/);
+  });
+
+  it("keys the lock by organization: stable per id, different between ids", async () => {
+    const a = await orgLockKey("org_a");
+    expect(await orgLockKey("org_a")).toBe(a);
+    expect(Number.isInteger(a)).toBe(true);
+    expect(a).toBeGreaterThanOrEqual(-(2 ** 31));
+    expect(a).toBeLessThan(2 ** 31);
+    expect(await orgLockKey("org_b")).not.toBe(a);
+  });
+
+  it("reads database.dialect off the enterprise plugins (sqlite when unset)", () => {
+    const withDialect = (dialect: unknown) => ({
+      options: { plugins: [{ id: "enterprise-gate", options: { database: { dialect } } }] },
+    });
+    expect(auditDialectOf(withDialect("pg"))).toBe("pg");
+    expect(auditDialectOf(withDialect("sqlite"))).toBe("sqlite");
+    expect(auditDialectOf(withDialect(undefined))).toBe("sqlite");
+    expect(auditDialectOf({ options: { plugins: [] } })).toBe("sqlite");
+    expect(auditDialectOf(null)).toBe("sqlite");
+  });
 });
 
 describe.skipIf(!realPostgresUrl)("audit chain on a real Postgres: concurrent writers", () => {
@@ -215,5 +515,29 @@ describe.skipIf(!realPostgresUrl)("audit chain on a real Postgres: concurrent wr
     expect(
       chain.map((r) => (r.metadata as { writer: number }).writer).sort((a, b) => a - b),
     ).toEqual(Array.from({ length: writers }, (_, i) => i));
+  });
+
+  it("N writers, each inside a larger transaction: no 25P02, a gap-free chain that verifies", async () => {
+    const writers = 12;
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_real_larger_tx";
+
+    const modules = [];
+    for (let i = 0; i < writers; i++) modules.push(await freshChainModule());
+    await Promise.all(
+      modules.map((chain, writer) =>
+        runWithTransaction(context.adapter, async () => {
+          await chain.writeAudit(ctx, input(orgId, writer));
+          await chain.writeAudit(ctx, input(orgId, writer + 1000));
+        }),
+      ),
+    );
+
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual(Array.from({ length: writers * 2 }, (_, i) => i + 1));
+    expect(chain[0]!.prevHash).toBe("GENESIS");
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
   });
 });

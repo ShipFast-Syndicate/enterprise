@@ -26,6 +26,7 @@ import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import { applyMigration, applyMigrationPg, enterpriseSchema } from "../../src/schema";
 import { enterprisePreset } from "../../src/server/preset";
 import { flushAuditWrites } from "../../src/server/audit/background";
+import { withPgAuditLock } from "../../src/server/audit/pg-lock";
 import type { EnterpriseOptions, Feature } from "../../src/server/types";
 import { isPg, realPostgresUrl } from "./dialect";
 import { openPgTestDatabase } from "./pg-db";
@@ -332,6 +333,9 @@ export async function makeAuth(
     secretsKey: "s".repeat(32),
     scimCredentialHashSecret: "catalog-test-key-".repeat(3),
     resolveEntitlements: async () => entitled,
+    // Postgres: the audit chain takes its per-organization advisory lock
+    // (the database is wrapped with `withPgAuditLock` below).
+    ...(isPg ? { database: { dialect: "pg" as const } } : {}),
     ...enterpriseOverrides,
   };
   const presetPlugins = enterprisePreset(opts).map((plugin) =>
@@ -394,7 +398,7 @@ export async function makeAuth(
         Boolean(entry[1]),
       ),
     }) as unknown as Client;
-    db = pgDatabase.drizzle(drizzleSchema) as unknown as typeof db;
+    db = withPgAuditLock(pgDatabase.drizzle(drizzleSchema) as object) as unknown as typeof db;
   } else {
     const directory = mkdtempSync(join(tmpdir(), "enterprise-auth-"));
     client = createClient({ url: `file:${join(directory, "auth.db")}` });
