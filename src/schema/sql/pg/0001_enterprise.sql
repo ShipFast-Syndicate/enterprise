@@ -20,6 +20,15 @@
 -- tables to exist; run this after the product's own migrations (applyMigrationPg
 -- skips them with a warning when a table is missing, and `verifyDatabase`
 -- then reports the column).
+--
+-- Concurrency: `applyMigrationPg` does NOT wrap the statements in a
+-- transaction (it skips an ALTER per statement, and a caller's `pg` Pool may
+-- hand each query to a different connection), so a failure part-way leaves
+-- the earlier statements applied. Re-running is safe because every statement
+-- is idempotent, but two runners must not execute it at the same time:
+-- concurrent `CREATE ... IF NOT EXISTS` can still fail on Postgres's catalog
+-- unique-violation race. Run it once per deploy (one migration job, or hold
+-- an advisory lock around it).
 
 CREATE TABLE IF NOT EXISTS org_policy (
   id text PRIMARY KEY,

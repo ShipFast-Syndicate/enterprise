@@ -9,6 +9,9 @@
 // layers onto an existing better-auth deployment — and `verifyDatabase`
 // reports the missing column until the runner is re-run.
 //
+// Not transactional and not safe to run concurrently: see the header of
+// `sql/pg/0001_enterprise.sql`. Run it once per deploy.
+//
 // `pgMigrationFilePath()` finds the SQL the same two ways `migrationFilePath`
 // does: `src/schema/sql/pg/…` from source, `<pkg root>/sql/pg/…` once built.
 import { existsSync, readFileSync } from "node:fs";

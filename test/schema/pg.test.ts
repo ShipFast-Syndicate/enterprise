@@ -167,7 +167,66 @@ describe("applyMigrationPg + verifyDatabase (pg)", () => {
     };
     const { ok } = await verifyDatabase(client);
     expect(ok).toBe(false);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
+  });
+
+  it.each([
+    ["the audit_event (org_id, seq) unique index", "DROP INDEX audit_event_org_seq", "audit_event"],
+    [
+      "the org_policy.org_id unique constraint",
+      "ALTER TABLE org_policy DROP CONSTRAINT org_policy_org_id_key",
+      "org_policy",
+    ],
+    [
+      "the enterprise_scim_member.member_id unique constraint",
+      "ALTER TABLE enterprise_scim_member DROP CONSTRAINT enterprise_scim_member_member_id_key",
+      "enterprise_scim_member",
+    ],
+  ])("FAILS verification when %s is dropped", async (_name, drop, table) => {
+    await createBetterAuthTables(db, "camel");
+    await applyMigrationPg(db);
+    expect((await verifyDatabase(db)).ok).toBe(true);
+
+    await db.exec(drop);
+
+    const { ok, missing } = await verifyDatabase(db);
+    expect(ok).toBe(false);
+    expect(missing).toEqual([{ table, reason: expect.stringContaining("no unique index") }]);
+  });
+
+  it("FAILS when the audit_event unique index is non-unique or covers the wrong columns", async () => {
+    await createBetterAuthTables(db, "camel");
+    await applyMigrationPg(db);
+    await db.exec("DROP INDEX audit_event_org_seq");
+    await db.exec("CREATE INDEX audit_event_org_seq ON audit_event (org_id, seq)");
+    expect((await verifyDatabase(db)).missing).toEqual([
+      { table: "audit_event", reason: expect.stringContaining("hash chain") },
+    ]);
+
+    await db.exec("DROP INDEX audit_event_org_seq");
+    await db.exec("CREATE UNIQUE INDEX audit_event_org_seq ON audit_event (org_id)");
+    expect((await verifyDatabase(db)).ok).toBe(false);
+    await db.exec("DROP INDEX audit_event_org_seq");
+    await db.exec("CREATE UNIQUE INDEX audit_event_org_seq ON audit_event (seq, org_id)");
+    expect((await verifyDatabase(db)).ok).toBe(false);
+  });
+
+  it("accepts a differently named unique index and snake_case products", async () => {
+    await createBetterAuthTables(db, "snake");
+    await applyMigrationPg(db);
+    await db.exec("DROP INDEX audit_event_org_seq");
+    await db.exec("CREATE UNIQUE INDEX my_chain_idx ON audit_event (org_id, seq)");
+    expect((await verifyDatabase(db)).ok).toBe(true);
+  });
+
+  it("re-applying the migration restores a dropped audit_event index", async () => {
+    await createBetterAuthTables(db, "camel");
+    await applyMigrationPg(db);
+    await db.exec("DROP INDEX audit_event_org_seq");
+    expect((await verifyDatabase(db)).ok).toBe(false);
+
+    await applyMigrationPg(db);
+    expect((await verifyDatabase(db)).ok).toBe(true);
   });
 });
 
@@ -215,19 +274,45 @@ describe("./schema/pg drizzle tables", () => {
   it("match the migration: same columns and types as the live tables", async () => {
     await createBetterAuthTables(db, "camel");
     await applyMigrationPg(db);
-    const { rows } = await db.query<{ table_name: string; column_name: string; data_type: string }>(
-      "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema()",
+    const { rows } = await db.query<{
+      table_name: string;
+      column_name: string;
+      data_type: string;
+      udt_name: string;
+      is_nullable: string;
+    }>(
+      "SELECT table_name, column_name, data_type, udt_name, is_nullable FROM information_schema.columns WHERE table_schema = current_schema()",
     );
+    const liveRows = (table: string) => rows.filter((r) => r.table_name === table);
     const live = (table: string) =>
-      Object.fromEntries(
-        rows.filter((r) => r.table_name === table).map((r) => [r.column_name, r.data_type]),
-      );
+      Object.fromEntries(liveRows(table).map((r) => [r.column_name, r.data_type]));
 
     for (const table of [orgPolicy, auditEvent, enterpriseScimMember]) {
       const config = getTableConfig(table);
+      const liveColumns = liveRows(config.name);
       expect(config.columns.map((c) => c.name).sort()).toEqual(
-        Object.keys(live(config.name)).sort(),
+        liveColumns.map((r) => r.column_name).sort(),
       );
+      // Every column: drizzle's SQL type must equal the live data_type/udt_name,
+      // and nullability must agree.
+      for (const column of config.columns) {
+        const actual = liveColumns.find((r) => r.column_name === column.name)!;
+        const sqlType = column.getSQLType();
+        if (sqlType.endsWith("[]")) {
+          expect(actual.data_type, `${config.name}.${column.name}`).toBe("ARRAY");
+          expect(actual.udt_name, `${config.name}.${column.name}`).toBe(`_${sqlType.slice(0, -2)}`);
+        } else {
+          expect(actual.data_type, `${config.name}.${column.name}`).toBe(sqlType);
+          expect(actual.udt_name, `${config.name}.${column.name}`).toBe(
+            { "timestamp with time zone": "timestamptz", boolean: "bool", integer: "int4" }[
+              sqlType
+            ] ?? sqlType,
+          );
+        }
+        expect(actual.is_nullable === "NO", `${config.name}.${column.name} not null`).toBe(
+          column.notNull,
+        );
+      }
     }
     expect(
       getTableConfig(auditEvent)
