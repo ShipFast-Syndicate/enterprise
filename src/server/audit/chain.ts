@@ -36,7 +36,7 @@ import type { AuthContext } from "better-auth";
 import type { Where } from "@better-auth/core/db/adapter";
 import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
 import { auditRowBounds } from "./bounds";
-import { lockOrganizationInTransaction } from "./pg-lock";
+import { lockOrganizationInTransaction, pgAuditLockInstalled } from "./pg-lock";
 
 type AuditAdapter = AuthContext["adapter"];
 
@@ -563,6 +563,8 @@ async function withPgChainLock<T>(
   orgId: string,
   work: (active: AuditAdapter) => Promise<T>,
 ): Promise<T> {
+  const isTransactionAdapter =
+    typeof (adapter as { transaction?: unknown }).transaction !== "function";
   const locked = async (): Promise<T> => {
     if (!(await lockOrganizationInTransaction(orgId)) && !warnedUnlockedPg) {
       warnedUnlockedPg = true;
@@ -570,10 +572,28 @@ async function withPgChainLock<T>(
         '@alphabros/enterprise: "database.dialect" is "pg" but the audit lock could not run — wrap the drizzle database with withPgAuditLock(db) so audit writes inside a transaction cannot hit the (org_id, seq) unique index; relying on the retry only.',
       );
     }
-    return work((await getCurrentAdapter(adapter)) as AuditAdapter);
+    // An explicitly passed transaction adapter (no `transaction` method) is
+    // the one the caller wants written through; only a root adapter follows
+    // the transaction `runWithTransaction` just opened.
+    return work(
+      isTransactionAdapter ? adapter : ((await getCurrentAdapter(adapter)) as AuditAdapter),
+    );
   };
-  if (typeof (adapter as { transaction?: unknown }).transaction !== "function") return locked();
+  if (isTransactionAdapter) return locked();
   return runWithTransaction(adapter, locked);
+}
+
+/**
+ * Serializes `task` per org. On Postgres with `withPgAuditLock` installed the
+ * advisory lock already does it — across processes — and the in-process mutex
+ * must NOT wrap it: a larger transaction keeps the advisory lock after its
+ * first audit write and then writes again, while a plain writer holding the
+ * mutex waits for that same advisory lock, so each would wait on the other
+ * (a deadlock Postgres cannot see). Without the wrapper the mutex stays, as
+ * the only in-process guard.
+ */
+function serializeOrg<T>(pg: boolean, orgId: string, task: () => Promise<T>): Promise<T> {
+  return pg && pgAuditLockInstalled() ? task() : withOrgLock(orgId, task);
 }
 
 async function insertNextRow(
@@ -645,7 +665,8 @@ const MAX_WRITE_ATTEMPTS = 16;
 /**
  * Appends one row to `input.orgId`'s chain: `seq` = max(seq)+1 for the org,
  * `prevHash` = the org's last row's hash (or `"GENESIS"` for the first
- * row). Serialized per org via `withOrgLock`; on a unique-index violation
+ * row). Serialized per org via `withOrgLock` (on Postgres with the lock
+ * installed, by the advisory lock alone — see `serializeOrg`); on a unique-index violation
  * (`audit_event_org_seq`, meaning another process/instance won the race for
  * this `seq`) it recomputes `seq` from the chain as it now stands and tries
  * again, up to `MAX_WRITE_ATTEMPTS`, then rethrows. Postgres reports the
@@ -672,7 +693,7 @@ export async function writeAudit(
   const row = { ...auditRowBounds(input), orgId: input.orgId };
   const pg = auditDialectOf(ctx.context) === "pg";
   const append = (active: AuditAdapter) => insertNextRow(active, row, chainKey);
-  return withOrgLock(row.orgId, async () => {
+  return serializeOrg(pg, row.orgId, async () => {
     for (let attempt = 1; ; attempt++) {
       try {
         return await (pg ? withPgChainLock(adapter, row.orgId, append) : append(adapter));
@@ -829,7 +850,9 @@ export async function compactChain(
       lastHash: through.hash,
     };
   };
-  return withOrgLock(orgId, () => (pg ? withPgChainLock(outer, orgId, compact) : compact(outer)));
+  return serializeOrg(pg, orgId, () =>
+    pg ? withPgChainLock(outer, orgId, compact) : compact(outer),
+  );
 }
 
 /**

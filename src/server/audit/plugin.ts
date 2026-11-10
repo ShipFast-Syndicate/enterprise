@@ -80,6 +80,7 @@ import {
   type CompactionResult,
 } from "./chain";
 import { auditInBackground } from "./background";
+import { pgAuditLockInstalled } from "./pg-lock";
 import {
   AUDIT_TIME_MAX,
   auditChangedKeys,
@@ -1500,6 +1501,11 @@ export function auditLog(opts: EnterpriseOptions) {
     // refusal to that user and their orgs (the victim org of a refused JIT
     // squat included). Never changes the row, never throws.
     init() {
+      if (opts.database?.dialect === "pg" && !pgAuditLockInstalled()) {
+        console.warn(
+          '@alphabros/enterprise: "database.dialect" is "pg" but no database was wrapped with withPgAuditLock(db) — audit writes inside a transaction can still abort on the (org_id, seq) unique index.',
+        );
+      }
       return {
         options: {
           databaseHooks: {

@@ -17,8 +17,10 @@ import type { GenericEndpointContext } from "better-auth";
 import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
 import {
   auditDialectOf,
+  compactChain,
   isUniqueViolation,
   verifyChain,
+  writeAudit,
   type AuditRow,
 } from "../../src/server/audit/chain";
 import {
@@ -28,10 +30,22 @@ import {
   withPgAuditLock,
   type PgTransactionHandle,
 } from "../../src/server/audit/pg-lock";
-import { makeAuth, type TestAuth } from "../helpers/auth";
+import { createOrg, makeAuth, signUpOwner, type TestAuth } from "../helpers/auth";
 import { isPg, realPostgresUrl } from "../helpers/dialect";
 
 type ChainModule = typeof import("../../src/server/audit/chain");
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+// A deadlock between two waits Postgres cannot see would hang the test; fail
+// it with a message instead.
+function withDeadline<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([work, guard]).finally(() => clearTimeout(timer));
+}
 
 async function freshChainModule(): Promise<ChainModule> {
   vi.resetModules();
@@ -297,6 +311,101 @@ describe.skipIf(!isPg)("audit write path on Postgres", () => {
       "select count(*)::int as n from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()",
     );
     expect((after.rows[0] as { n: number }).n).toBe(0);
+  });
+
+  it("one module: a transaction writing twice next to plain writers does not deadlock", async () => {
+    // The common deployment: every writer shares one copy of the module, so
+    // one in-process mutex. The transaction keeps the advisory lock after its
+    // first write; a plain writer must not hold the mutex while it waits for
+    // that lock, or the transaction's second write waits on the mutex forever.
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const orgId = "org_one_module";
+
+    const run = async () => {
+      const larger = runWithTransaction(context.adapter, async () => {
+        await writeAudit(ctx, input(orgId, 100));
+        await sleep(100);
+        await writeAudit(ctx, input(orgId, 101));
+        await sleep(100);
+        await writeAudit(ctx, input(orgId, 102));
+      });
+      const plain = [0, 1, 2, 3].map(async (writer) => {
+        await sleep(50 + writer * 40);
+        return writeAudit(ctx, input(orgId, writer));
+      });
+      await Promise.all([larger, ...plain]);
+    };
+    await withDeadline(run(), 8000, "audit writers deadlocked");
+
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
+    // Compaction takes the same path: it must not deadlock against a
+    // transaction that holds the lock either.
+    const compacting = runWithTransaction(context.adapter, async () => {
+      await writeAudit(ctx, input(orgId, 200));
+      await sleep(100);
+      await writeAudit(ctx, input(orgId, 201));
+    });
+    await sleep(30);
+    const compacted = compactChain(ctx, orgId, new Date(Date.now() + 60_000));
+    await withDeadline(Promise.all([compacting, compacted]), 8000, "compaction deadlocked");
+    await expect(verifyChain(await readChain(t, orgId))).resolves.toEqual({ ok: true });
+  });
+
+  it("the real SCIM deactivate, next to concurrent writers for the same org, keeps a gap-free chain", async () => {
+    const t = await makeAuth();
+    const { cookie } = await signUpOwner(t);
+    const { orgId } = await createOrg(t, cookie);
+    const tokenRes = await t.api.post(
+      "/enterprise/scim/tokens/create",
+      { providerId: "okta", orgId },
+      { cookie },
+    );
+    expect(tokenRes.status).toBe(200);
+    const { scimToken } = (await tokenRes.json()) as { scimToken: string };
+    const bearer = { authorization: `Bearer ${scimToken}` };
+    const email = "scim.pg@acme.test";
+    const createRes = await t.api.post(
+      "/scim/v2/Users",
+      {
+        schemas: ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        userName: email,
+        emails: [{ value: email, primary: true }],
+      },
+      bearer,
+    );
+    expect(createRes.status).toBe(201);
+    const { id: scimId } = (await createRes.json()) as { id: string };
+
+    const context = await t.auth.$context;
+    const ctx = { context } as unknown as GenericEndpointContext;
+    const patch = t.api.patch(
+      `/scim/v2/Users/${scimId}`,
+      {
+        schemas: ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+        Operations: [{ op: "replace", path: "active", value: false }],
+      },
+      bearer,
+    );
+    const plain = [0, 1, 2, 3, 4, 5].map(async (writer) => {
+      await sleep(writer * 5);
+      return writeAudit(ctx, input(orgId, writer));
+    });
+    const [patchRes] = await withDeadline(
+      Promise.all([patch, ...plain]),
+      15_000,
+      "SCIM deactivate deadlocked",
+    );
+    expect(patchRes.status).toBe(200);
+
+    const chain = await readChain(t, orgId);
+    expect(chain.map((r) => r.seq)).toEqual(Array.from({ length: chain.length }, (_, i) => i + 1));
+    expect(chain.some((r) => r.action === "scim.user_deactivated")).toBe(true);
+    expect(chain.filter((r) => r.action === "member.invited")).toHaveLength(6);
+    await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
   });
 
   it("a rolled-back transaction leaves no gap and no half-written chain", async () => {

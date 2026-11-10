@@ -34,6 +34,16 @@ interface TransactionStorage {
 
 const STORAGE_KEY = Symbol.for("@alphabros/enterprise.pg-audit-lock.storage");
 
+// Set once any database has been wrapped by `withPgAuditLock`, process-wide
+// (on `globalThis`, like the storage), so `chain.ts` knows the advisory lock
+// can run and the in-process mutex must stay out of its way.
+const INSTALLED_KEY = Symbol.for("@alphabros/enterprise.pg-audit-lock.installed");
+
+/** Whether `withPgAuditLock` has wrapped a database in this process. */
+export function pgAuditLockInstalled(): boolean {
+  return (globalThis as { [INSTALLED_KEY]?: boolean })[INSTALLED_KEY] === true;
+}
+
 function transactionStorage(): Promise<TransactionStorage> {
   const holder = globalThis as { [STORAGE_KEY]?: Promise<TransactionStorage> };
   holder[STORAGE_KEY] ??= getAsyncLocalStorage().then(
@@ -52,6 +62,7 @@ function transactionStorage(): Promise<TransactionStorage> {
  * Only needed with `database: { dialect: "pg" }`.
  */
 export function withPgAuditLock<Db extends object>(db: Db): Db {
+  (globalThis as { [INSTALLED_KEY]?: boolean })[INSTALLED_KEY] = true;
   return new Proxy(db, {
     get(target, prop, receiver) {
       const value = Reflect.get(target, prop, receiver) as unknown;
@@ -94,7 +105,11 @@ export async function lockOrganizationInTransaction(orgId: string): Promise<bool
   if (!transaction) return false;
   const key = await orgLockKey(orgId);
   // Both arguments are integers this module computed (a constant and a hash
-  // of the id), never text taken from a caller.
+  // of the id), never text taken from a caller; asserted so the statement can
+  // never carry anything else.
+  if (!Number.isInteger(key) || !Number.isInteger(LOCK_NAMESPACE)) {
+    throw new Error("audit lock key is not an integer");
+  }
   await transaction.execute(`select pg_advisory_xact_lock(${LOCK_NAMESPACE}, ${key})`);
   return true;
 }
