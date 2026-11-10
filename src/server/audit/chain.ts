@@ -493,6 +493,14 @@ function nextSeqBaseOf(row: {
  */
 export interface ChainWriteOptions {
   chainKey?: string;
+  /**
+   * The deployment's `database.dialect`, for a caller whose context carries
+   * no plugin options (SCIM's `{ context: { adapter: trx } }`): without it the
+   * chain reads `"sqlite"` off the bare context, skips the Postgres advisory
+   * lock and, inside the caller's transaction, can hit the `(org_id, seq)`
+   * unique index — which aborts that transaction (`25P02`).
+   */
+  dialect?: "sqlite" | "pg";
   actor?: {
     actorType: AuditActorType;
     actorId: string | null;
@@ -546,6 +554,10 @@ export interface AuditWriteContext {
 
 function effectiveChainKey(ctx: AuditWriteContext, options: ChainWriteOptions): string | undefined {
   return options.chainKey ?? auditChainKeyOf(ctx.context);
+}
+
+function effectiveDialect(ctx: AuditWriteContext, options: ChainWriteOptions): "sqlite" | "pg" {
+  return options.dialect ?? auditDialectOf(ctx.context);
 }
 
 let warnedUnlockedPg = false;
@@ -691,7 +703,7 @@ export async function writeAudit(
   // through the same backstop (`./bounds.ts`), so a value one of them did not
   // bound can never grow a chain.
   const row = { ...auditRowBounds(input), orgId: input.orgId };
-  const pg = auditDialectOf(ctx.context) === "pg";
+  const pg = effectiveDialect(ctx, options) === "pg";
   const append = (active: AuditAdapter) => insertNextRow(active, row, chainKey);
   return serializeOrg(pg, row.orgId, async () => {
     for (let attempt = 1; ; attempt++) {

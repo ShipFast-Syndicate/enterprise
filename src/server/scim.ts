@@ -167,7 +167,13 @@ async function holdsOwnerMembership(
 }
 
 export function enterpriseScim(opts: EnterpriseOptions): SCIMPlugin {
-  const chain: ChainWriteOptions = { chainKey: opts.audit?.chainKey };
+  // Every write below goes through a bare `{ context: { adapter: trx } }`,
+  // which carries no plugin options: the chain key and the dialect (which
+  // decides whether the Postgres advisory lock is taken) travel here.
+  const chain: ChainWriteOptions = {
+    chainKey: opts.audit?.chainKey,
+    dialect: opts.database?.dialect,
+  };
   const plugin = scim({
     connections: [],
     managedConnections: { credentialHashSecret: opts.scimCredentialHashSecret },

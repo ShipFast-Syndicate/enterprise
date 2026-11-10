@@ -408,6 +408,31 @@ describe.skipIf(!isPg)("audit write path on Postgres", () => {
     await expect(verifyChain(chain)).resolves.toEqual({ ok: true });
   });
 
+  it("a bare { context: { adapter } } (SCIM's) with dialect 'pg' still takes the advisory lock", async () => {
+    // The SCIM hooks hand the chain `{ context: { adapter: trx } }` — no
+    // plugin options to read the dialect from. Before `ChainWriteOptions.dialect`
+    // that read "sqlite", skipped the lock, and a concurrent plain writer
+    // could abort the SCIM transaction (the develop CI flake, run 42891881516).
+    const t = await makeAuth();
+    const context = await t.auth.$context;
+    const orgId = "org_bare_context";
+
+    let lockHeldInside = 0;
+    await runWithTransaction(context.adapter, async () => {
+      const bare = { context: { adapter: await getCurrentAdapter(context.adapter) } };
+      await writeAudit(bare as unknown as GenericEndpointContext, input(orgId, 0), {
+        dialect: "pg",
+      });
+      const handle = await currentPgTransaction();
+      const held = (await handle!.execute(
+        "select count(*)::int as n from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()",
+      )) as { rows: { n: number }[] };
+      lockHeldInside = held.rows[0]!.n;
+    });
+    expect(lockHeldInside).toBeGreaterThan(0);
+    await expect(verifyChain(await readChain(t, orgId))).resolves.toEqual({ ok: true });
+  });
+
   it("a rolled-back transaction leaves no gap and no half-written chain", async () => {
     const t = await makeAuth();
     const context = await t.auth.$context;
