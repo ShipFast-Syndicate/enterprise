@@ -11,9 +11,14 @@
 import type { Client } from "@libsql/client";
 import { EXPECTED_TABLES } from "./expected";
 
+import type { PgClient } from "./pg-client";
+import { verifyDatabasePg } from "./verify-pg";
+
 export interface MissingItem {
   table: string;
   column?: string;
+  /** Postgres only: the column exists but is wrong (e.g. `jsonb` audit metadata). */
+  reason?: string;
 }
 
 export interface VerifyResult {
@@ -21,7 +26,15 @@ export interface VerifyResult {
   missing: MissingItem[];
 }
 
-export async function verifyDatabase(client: Client): Promise<VerifyResult> {
+/**
+ * Verifies a SQLite/libSQL `Client` (unchanged) or, given a Postgres client
+ * (anything with `query()` and no `execute()`: `pg`, PGlite), the same
+ * contract through `information_schema` — see `verifyDatabasePg`.
+ */
+export async function verifyDatabase(client: Client): Promise<VerifyResult>;
+export async function verifyDatabase(client: PgClient): Promise<VerifyResult>;
+export async function verifyDatabase(client: Client | PgClient): Promise<VerifyResult> {
+  if (!("execute" in client)) return verifyDatabasePg(client);
   const missing: MissingItem[] = [];
 
   for (const [table, columns] of Object.entries(EXPECTED_TABLES)) {

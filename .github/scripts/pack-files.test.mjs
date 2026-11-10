@@ -4,6 +4,7 @@ import { checkPackFiles, required } from "./pack-files.mjs";
 
 test("pack allow-list accepts the package surface and rejects drift", () => {
   const files = [...required, "dist/plugin-BNrEGuul.d.ts", "sql/0002_scim_1_7.sql"];
+  assert.ok(files.includes("sql/pg/0001_enterprise.sql"));
   checkPackFiles(files);
   for (const extra of ["dist/server/index.js.map", "src/server/index.ts", ".env", "test/x.ts"])
     assert.throws(() => checkPackFiles([...files, extra]), /not allow-listed/);

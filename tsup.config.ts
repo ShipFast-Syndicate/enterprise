@@ -33,6 +33,7 @@ export default defineConfig({
   entry: {
     "server/index": "src/server/index.ts",
     "schema/index": "src/schema/index.ts",
+    "schema/pg/index": "src/schema/pg/index.ts",
     "client/index": "src/client/index.ts",
     "portal/index": "src/portal/index.ts",
     "cli/index": "src/cli/index.ts",

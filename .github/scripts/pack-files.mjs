@@ -11,7 +11,9 @@ export const allowed = [
   /^dist\/(server|schema|client|portal|cli)\/index\.(js|d\.ts)$/,
   // tsup's shared chunks (hashed names), JavaScript or declarations only.
   /^dist\/[\w-]+\.(js|d\.ts)$/,
+  /^dist\/schema\/pg\/index\.(js|d\.ts)$/,
   /^sql\/\d{4}_[a-z0-9_]+\.sql$/,
+  /^sql\/pg\/\d{4}_[a-z0-9_]+\.sql$/,
 ];
 
 export const required = [
@@ -19,6 +21,9 @@ export const required = [
   "README.md",
   "LICENSE",
   "sql/0001_enterprise.sql",
+  "sql/pg/0001_enterprise.sql",
+  "dist/schema/pg/index.js",
+  "dist/schema/pg/index.d.ts",
   ...["server", "schema", "client", "portal", "cli"].flatMap((entry) => [
     `dist/${entry}/index.js`,
     `dist/${entry}/index.d.ts`,
