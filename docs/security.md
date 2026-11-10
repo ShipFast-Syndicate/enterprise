@@ -346,6 +346,68 @@ Tests: `test/security/entitlement-store.test.ts` (an owner cannot write entitlem
 demoted staff are refused; unentitled orgs get `403 FEATURE_NOT_ENTITLED` on SSO and SCIM routes;
 callback-only deployments are unchanged) and `test/security/entitlement-store-rate-limit.test.ts`.
 
+## Staff-only organization creation and metadata
+
+The second half of spike finding 1: even with entitlements out of `organization.metadata`, the
+field stays writable by an organization's owner (`/organization/update`) and by whoever creates the
+organization (`/organization/create`), and a product that keeps plans, quotas or flags there trusts
+tenant-written data. Two opt-in options (`EnterpriseOptions.organization`, defaults unchanged):
+
+- `creation`: `"self-service"` (default), `"staff-only"` or `(ctx) => boolean`. Refusal:
+  `403 ORG_CREATION_STAFF_ONLY`.
+- `metadata`: `"open"` (default) or `"staff-only"`. Refusal: `403 ORG_METADATA_STAFF_ONLY`, for any
+  `/organization/create` body carrying `metadata` and any `/organization/update` body carrying
+  `data.metadata` (`null` counts as a write; an absent field does not).
+
+Both are `hooks.before` of the `enterprise-org-lock` plugin, which runs after the gate (so an
+`x-api-key` request is refused first, `API_KEY_NOT_ALLOWED_HERE`). Who passes:
+
+- **platform staff**: the same definition as `setEntitlements` (`isPlatformStaff`: a stored,
+  non-banned user whose `role` holds one of `entitlements.staffRoles`, default `["admin"]`, read from
+  the database), **never from an impersonation session** (`session.impersonatedBy`): staff acting as
+  a user do not carry staff authority, even if the impersonated user is staff;
+- a **server-only call**: `auth.api.*` with neither a `Request` nor `headers`, the product's own
+  code (a billing webhook, an admin console provisioning an organization). A call that passes
+  `headers` is a session call and is judged as one.
+
+An anonymous request is left to upstream's `401`. A `creation` function is consulted only for
+callers who are not staff; metadata is then still judged on its own.
+
+**Audit.** Each refusal is appended to the hash chain as `organization.write_refused` (actor the
+session's user, or `impersonated` with `metadata.impersonatedBy`; `metadata.code`, `metadata.path`),
+written before the `403` and never throwing (a failed write is logged, the refusal stands). Where it
+goes: for an update, the chain of the organization the request names (or the session's active one)
+**only if the caller is a member** (a caller cannot append rows to a chain they are not part of); for
+a creation, which names no organization yet, the chain of each organization the caller belongs to
+(at most 20). A refusal for a caller who belongs to no organization has no chain to land in and is
+logged at `warn` instead: this is a deliberate carve-out, because the audit chain is per organization
+and a sentinel or per-user chain would let an arbitrary caller grow a chain nobody owns. The common
+case is a fresh user trying to create a first organization under `creation: "staff-only"`: the `403`
+is returned but only the log records it. A `creation` function that throws is treated as a refusal
+(error logged, `403 ORG_CREATION_STAFF_ONLY`, audited as above). Only the two routes above are
+covered; re-check upstream's organization routes on every better-auth upgrade. The rows are not throttled: keep better-auth's rate limiter enabled.
+
+**Why a plugin, not `organization()` options.** The preset's `organization()` entry is replaced by
+products that mount their own (nomi, klar style). The lock is a separate plugin, so it holds for
+them too, and it is mounted only when an option departs from its default: an existing consumer's
+plugin list, routes and behaviour are identical.
+
+**Upstream `allowUserToCreateOrganization: false`** (verified against better-auth 1.7.19,
+`plugins/organization/routes/crud-org.mjs`): `/organization/create` refuses every caller with a
+session, staff included (`YOU_ARE_NOT_ALLOWED_TO_CREATE_A_NEW_ORGANIZATION`); the only bypass is a
+server call with `body.userId` and no session. It checks nothing about existing owners or
+memberships, and says nothing about metadata. It is a different tool: use `creation: "staff-only"`
+when staff must still be able to create organizations over HTTP. Both apply when both are set.
+
+**Owner bans (`scim.ts`, F-07).** A SCIM deactivation of a user holding an `owner` membership does
+not ban the user platform-wide. That comment read as if it followed from self-serve creation being
+on. It does not depend on it: with `creation: "staff-only"` an `owner` membership can no longer be
+self-created, but it can still be a manual grant (staff-created organization, `add-member`,
+`body.userId` server call), and none of those is something an IdP deactivation should turn into a
+platform-wide ban. The behaviour is unchanged by this option.
+
+Tests: `test/security/org-lock.test.ts`.
+
 ## SSO providers without an organization
 
 Changing or deleting an SSO provider (`/sso/update-provider`, `/sso/delete-provider`) needs the

@@ -296,6 +296,9 @@ export async function makeAuth(
     // `enableSessionForAPIKeys` recipe. Appending a second `apiKey()` via
     // `plugins` would register every `/api-key/*` endpoint twice.
     apiKeyPlugin?: BetterAuthPlugin;
+    // Replaces the preset's upstream `organization()` entry in place — what a
+    // product that mounts its own does (`test/security/org-lock.test.ts`).
+    organizationPlugin?: BetterAuthPlugin;
     // Extra `rateLimit.customRules` merged over `TEST_RATE_LIMIT`'s — for a
     // file that drives one plugin-rate-limited path (upstream `twoFactor()`
     // caps `/two-factor/*` at 3 per 10 s per IP, and the limiter's store is
@@ -322,6 +325,7 @@ export async function makeAuth(
   ]);
   const {
     apiKeyPlugin,
+    organizationPlugin,
     plugins: extraPlugins,
     trustedOrigins,
     rateLimitCustomRules,
@@ -339,7 +343,11 @@ export async function makeAuth(
     ...enterpriseOverrides,
   };
   const presetPlugins = enterprisePreset(opts).map((plugin) =>
-    apiKeyPlugin && plugin.id === "api-key" ? apiKeyPlugin : plugin,
+    apiKeyPlugin && plugin.id === "api-key"
+      ? apiKeyPlugin
+      : organizationPlugin && plugin.id === "organization"
+        ? organizationPlugin
+        : plugin,
   );
   const baseOptions: BetterAuthOptions = {
     secret: "x".repeat(32),

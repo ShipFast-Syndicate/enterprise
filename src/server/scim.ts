@@ -203,9 +203,14 @@ export function enterpriseScim(opts: EnterpriseOptions): SCIMPlugin {
             { ...chain, orgIds: provisioningOrgIds },
           );
           // F-07: SCIM can never *produce* an owner (M-01), so an `owner`
-          // membership is a manual grant — or, since self-serve org creation
+          // membership is a manual grant — or, while self-serve org creation
           // stays on (`organization.allowUserToCreateOrganization`, default
-          // `true`), an org the user created themselves. Neither an IdP
+          // `true`, and `organization.creation`, default `"self-service"`),
+          // an org the user created themselves. With creation staff-only the
+          // self-created case goes away but the manual grant (a staff-created
+          // org, `add-member`, a `body.userId` server call) does not, so this
+          // protection does not depend on the option (`docs/security.md`,
+          // "Staff-only organization creation and metadata"). Neither an IdP
           // deactivation nor a connection decommission (which replays every
           // provisioned user as inactive) may turn that into a platform-wide
           // ban. Upstream still revokes the sessions; the SCIM-owned

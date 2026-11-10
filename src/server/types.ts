@@ -14,6 +14,16 @@ export type Feature = (typeof FEATURES)[number];
 
 export type ResolveEntitlements = (orgId: string) => Promise<Iterable<Feature>>;
 
+/**
+ * `organization.creation` as a function: called for a `/organization/create`
+ * caller who is not platform staff; `true` allows the creation.
+ */
+export type OrganizationCreationPredicate = (ctx: {
+  user: { id: string; email: string };
+  /** The request body as sent (unvalidated). */
+  body: unknown;
+}) => boolean | Promise<boolean>;
+
 export interface EnterpriseOptions {
   /** Product slug this deployment belongs to, e.g. "my-app". */
   product: string;
@@ -216,11 +226,36 @@ export interface EnterpriseOptions {
    * kept deliberately: self-serve org creation is a product feature, and
    * the policy layer now applies the union of every org's policy, so a
    * second organization is no longer an escape hatch).
+   *
+   * `creation` (default `"self-service"`, behaviour unchanged): who may call
+   * `/organization/create`. `"staff-only"` refuses every caller but platform
+   * staff (`entitlements.staffRoles`, default `["admin"]`; never an
+   * impersonation session) with `403 ORG_CREATION_STAFF_ONLY`. A function is
+   * consulted for callers who are not staff and allows the creation when it
+   * returns `true`. A server-only call (`auth.api.createOrganization` without
+   * request headers, e.g. provisioning on behalf of `body.userId`) is never
+   * refused. Enforced by a `hooks.before` of the `enterprise-org-lock` plugin,
+   * so it also holds when the product mounts its own `organization()`;
+   * unlike `allowUserToCreateOrganization: false` (which upstream applies to
+   * staff too) it lets staff through. Both settings apply when both are set.
+   *
+   * `metadata` (default `"open"`, behaviour unchanged): who may write
+   * `organization.metadata`, which the organization's own owner can otherwise
+   * write through `/organization/update` and at creation. `"staff-only"`
+   * refuses any request carrying a `metadata` field to those two routes
+   * unless the caller is staff or the call is server-only, with `403
+   * ORG_METADATA_STAFF_ONLY`. Every refusal is appended to the hash-chained
+   * audit as `organization.write_refused` in the chain of each organization
+   * the caller belongs to that the request concerns (see `docs/security.md`);
+   * a caller with no organization has no chain, and that refusal is only
+   * logged. A `creation` function that throws is a refusal.
    */
   organization?: {
     requireEmailVerificationOnInvitation?: boolean;
     allowUserToCreateOrganization?:
       boolean | ((user: { id: string; email: string }) => boolean | Promise<boolean>);
+    creation?: "self-service" | "staff-only" | OrganizationCreationPredicate;
+    metadata?: "open" | "staff-only";
   };
   /**
    * Sign-in policy classification.

@@ -11,6 +11,7 @@ import { auditLog } from "./audit/plugin";
 import { orgPolicy } from "./policy/plugin";
 import { enterpriseApi } from "./enterprise-api/plugin";
 import { assertEnterpriseOptions } from "./options";
+import { orgLockConfigured, orgWriteLock } from "./org-lock";
 import {
   API_KEY_HEADERS,
   API_KEY_LIFECYCLE_PLUGIN_ID,
@@ -95,6 +96,11 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
     }),
     enterpriseScim(opts),
     enterpriseGate(opts),
+    // Only when `organization.creation` / `organization.metadata` depart from
+    // their defaults: right after the gate (whose API-key refusal runs first),
+    // and absent otherwise so the plugin list of an existing consumer is
+    // unchanged. See `./org-lock.ts`.
+    ...(orgLockConfigured(opts) ? [orgWriteLock(opts)] : []),
     auditLog(opts),
     orgPolicy(opts),
     scimMembershipSchema(),

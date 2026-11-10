@@ -18,6 +18,7 @@ const PG_CORE_SUITES = [
   "test/security/c03-scim-role-demotion.test.ts",
   "test/security/scim-catalog.test.ts",
   "test/security/gap2-require2fa-product-schema.test.ts",
+  "test/security/org-lock.test.ts",
   "test/pg/audit-concurrency.test.ts",
   "test/cli/cli-pg.test.ts",
 ];
