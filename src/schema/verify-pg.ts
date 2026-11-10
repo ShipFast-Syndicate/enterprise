@@ -18,9 +18,9 @@
 // depends on `(org_id, seq)` being unique; a product that created the table
 // itself without the index would otherwise verify clean. Any non-partial
 // unique index or constraint over exactly those columns counts, whatever its name.
-import { EXPECTED_TABLES } from "./expected";
+import { expectedTables } from "./expected";
 import type { PgClient } from "./pg-client";
-import type { VerifyResult, MissingItem } from "./verify";
+import type { VerifyOptions, VerifyResult, MissingItem } from "./verify";
 
 function snakeCase(name: string): string {
   return name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
@@ -43,6 +43,11 @@ const EXPECTED_UNIQUES: ReadonlyArray<{ table: string; columns: readonly string[
   { table: "enterprise_scim_member", columns: ["member_id"] },
 ];
 
+/** Only checked on opt-in (`verifyDatabase(client, { entitlements: true })`). */
+const EXPECTED_ENTITLEMENT_UNIQUES: ReadonlyArray<{ table: string; columns: readonly string[] }> = [
+  { table: "org_entitlement", columns: ["org_id"] },
+];
+
 interface UniqueRow {
   table_name: string;
   cols: string;
@@ -57,7 +62,10 @@ JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
 WHERE i.indisunique AND i.indpred IS NULL AND n.nspname = current_schema()
 GROUP BY i.indexrelid, t.relname`;
 
-export async function verifyDatabasePg(client: PgClient): Promise<VerifyResult> {
+export async function verifyDatabasePg(
+  client: PgClient,
+  options: VerifyOptions = {},
+): Promise<VerifyResult> {
   const { rows } = await client.query(
     "SELECT table_name, column_name, data_type FROM information_schema.columns WHERE table_schema = current_schema()",
   );
@@ -69,7 +77,7 @@ export async function verifyDatabasePg(client: PgClient): Promise<VerifyResult> 
   }
 
   const missing: MissingItem[] = [];
-  for (const [table, expected] of Object.entries(EXPECTED_TABLES)) {
+  for (const [table, expected] of Object.entries(expectedTables(options))) {
     const found = candidates(table).find((name) => tables.has(name));
     const existing = found ? tables.get(found) : undefined;
     if (!existing) {
@@ -101,7 +109,10 @@ export async function verifyDatabasePg(client: PgClient): Promise<VerifyResult> 
     set.add(row.cols);
     uniques.set(row.table_name, set);
   }
-  for (const { table, columns } of EXPECTED_UNIQUES) {
+  const uniquesToCheck = options.entitlements
+    ? [...EXPECTED_UNIQUES, ...EXPECTED_ENTITLEMENT_UNIQUES]
+    : EXPECTED_UNIQUES;
+  for (const { table, columns } of uniquesToCheck) {
     const found = candidates(table).find((name) => tables.has(name));
     if (!found) continue; // already reported as a missing table
     const existing = tables.get(found)!;

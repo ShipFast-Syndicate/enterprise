@@ -1,7 +1,15 @@
 // Alpha Bros enterprise layer — server entry point.
 
 export type { Feature, ResolveEntitlements, EnterpriseOptions } from "./types";
-export { FeatureNotEntitledError, requireFeature } from "./entitlements";
+export { FEATURES } from "./types";
+export { FeatureNotEntitledError, requireFeature, resolveEntitledFeatures } from "./entitlements";
+export {
+  ENTITLEMENT_CHANGED_ACTION,
+  ENTITLEMENT_SET_PATH,
+  isPlatformStaff,
+  setEntitlements,
+  type EntitlementActor,
+} from "./entitlement-store";
 export { enterpriseGate, GATED_PATHS } from "./gate";
 export { enterprisePreset } from "./preset";
 export {

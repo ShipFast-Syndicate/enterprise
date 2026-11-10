@@ -23,6 +23,19 @@ import type { PgClient } from "./pg-client";
 /** Every Postgres migration this package ships, in the order they apply. */
 export const PG_MIGRATION_FILES = ["0001_enterprise.sql"] as const;
 
+/**
+ * Postgres migrations applied only on opt-in: `0002_org_entitlement.sql`, for
+ * `entitlements: { store: "table" }` (`applyMigrationPg(client, { entitlements:
+ * true })`). Not in `PG_MIGRATION_FILES`, so a deployment that does not opt in
+ * is never asked to apply or verify it.
+ */
+export const OPTIONAL_PG_MIGRATION_FILES = ["0002_org_entitlement.sql"] as const;
+
+export interface ApplyMigrationPgOptions {
+  /** Also create `org_entitlement` (`0002`) — for `entitlements: { store: "table" }`. */
+  entitlements?: boolean;
+}
+
 export function pgMigrationFilePath(file: string = PG_MIGRATION_FILES[0]): string {
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [join(here, "sql", "pg", file), join(here, "..", "..", "sql", "pg", file)];
@@ -43,10 +56,14 @@ async function tableExists(client: PgClient, table: string): Promise<boolean> {
   return result.rows.length > 0;
 }
 
-export async function applyMigrationPg(client: PgClient): Promise<void> {
-  const sql = PG_MIGRATION_FILES.map((file) =>
-    readFileSync(pgMigrationFilePath(file), "utf8"),
-  ).join("\n");
+export async function applyMigrationPg(
+  client: PgClient,
+  options: ApplyMigrationPgOptions = {},
+): Promise<void> {
+  const files = options.entitlements
+    ? [...PG_MIGRATION_FILES, ...OPTIONAL_PG_MIGRATION_FILES]
+    : PG_MIGRATION_FILES;
+  const sql = files.map((file) => readFileSync(pgMigrationFilePath(file), "utf8")).join("\n");
 
   for (const statement of splitStatements(sql)) {
     const addColumn = ADD_COLUMN_STATEMENT.exec(statement);

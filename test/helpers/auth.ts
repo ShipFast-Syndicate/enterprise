@@ -421,16 +421,18 @@ export async function makeAuth(
     await flushAuditWrites();
     return response;
   };
+  const entitlementsTable = opts.entitlements?.store === "table";
   if (pgDatabase) {
     for (const statement of ddl) await pgDatabase.query(statement);
     // The real Postgres migration: org_policy/audit_event/enterprise_scim_member
-    // and the studio_ref columns, now that user/organization exist.
-    await applyMigrationPg(pgDatabase);
+    // and the studio_ref columns, now that user/organization exist (+ the opt-in
+    // org_entitlement table for the staff-managed store).
+    await applyMigrationPg(pgDatabase, { entitlements: entitlementsTable });
   } else {
     await applyMigrations(ddl, client);
     // Real migration (ruling (a)): creates org_policy/audit_event/scim_group
     // and adds the two studio_ref columns, now that user/organization exist.
-    await applyMigration(client);
+    await applyMigration(client, { entitlements: entitlementsTable });
   }
 
   const withBody =

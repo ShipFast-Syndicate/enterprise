@@ -86,7 +86,10 @@ unique index (`audit_event (org_id, seq)` anchors the hash chain; `org_policy (o
 `enterprise_scim_member (member_id)` too). `applyMigrationPg` is not wrapped in a transaction
 and must not run concurrently: a failure part-way leaves earlier statements applied (re-running
 is safe, every statement is idempotent), so run it once per deploy. The CLI stays
-SQLite (`TURSO_*`); a `--dialect pg` option is not part of this release.
+SQLite (`TURSO_*`); a `--dialect pg` option is not part of this release. The optional
+`sql/pg/0002_org_entitlement.sql` (the staff-managed entitlement table,
+[below](#staff-managed-entitlement-table)) is applied only by `applyMigrationPg(client, { entitlements: true })`
+and checked only by `verifyDatabase(client, { entitlements: true })`; the default calls skip it.
 
 Upgrading from 0.1 requires new SCIM tables, a separate credential HMAC secret and
 IdP reprovisioning. Read [the migration guide](./docs/migration-1-7.md) first.
@@ -151,7 +154,8 @@ needs **no per-framework server code** beyond this.
 `enterpriseGate` already calls it in front of every path listed in `GATED_PATHS` (SSO/SCIM
 registration, team creation, API key creation, audit reads, policy writes, and the portal's
 `/enterprise/sso/*` and `/enterprise/scim/tokens*` wrappers) — you only need to implement
-`resolveEntitlements`. `Feature` is `"sso" | "scim" | "audit_log" | "enforce_2fa" | "api_keys" | "teams"`.
+`resolveEntitlements` (or opt into the [staff-managed table](#staff-managed-entitlement-table)).
+`Feature` is `"sso" | "scim" | "audit_log" | "enforce_2fa" | "api_keys" | "teams"`.
 
 A typical implementation maps a Stripe price/plan onto the feature set it unlocks:
 
@@ -182,6 +186,61 @@ export async function resolveEntitlementsFromStripe(orgId: string): Promise<Feat
 Entitlements are cached per request (one `resolveEntitlements` call per org per request, however
 many gated paths/`requireFeature` calls it serves), so it's safe to hit your own database or a
 cached plan lookup here without worrying about N+1 calls on a single request.
+`GET /enterprise/features` answers through the same cached resolver.
+
+### Staff-managed entitlement table
+
+Do **not** keep entitlements in `organization.metadata`: an organization's owner can write it
+through better-auth's `/organization/update`, so an owner could grant itself SSO or SCIM. If the
+plan lives in your own billing system, `resolveEntitlements` above is the right source. If it
+does not — you grant features by hand, per organization — use the staff-managed table:
+
+```ts
+enterprisePreset({
+  product: "my-app",
+  entitlements: { store: "table" }, // no resolveEntitlements needed
+  // staffRoles: ["admin"] (default) — the `user.role` values that count as platform staff
+  // ...secretsKey, scimCredentialHashSecret
+});
+```
+
+Features then resolve from the `org_entitlement` table (one row per organization, a missing row
+means **no features**, unknown names in a row are ignored). Nothing a tenant can call writes it.
+The only writers are platform staff:
+
+- `POST /enterprise/entitlements/set` with `{ orgId, features: Feature[] }` (the whole set is
+  replaced; `[]` revokes everything). The caller must be a signed-in, non-banned user whose `role`
+  holds one of `entitlements.staffRoles` (the `admin()` plugin's role, default `"admin"`), reading
+  the role from the database on every call, and **must not be in an impersonation session** — an
+  org owner, an org admin, an API key and a staff member impersonating a user are all refused
+  (`403 NOT_PLATFORM_STAFF`, `IMPERSONATION_NOT_ALLOWED`, `API_KEY_NOT_ALLOWED_HERE`). It is rate
+  limited (20 per minute per client; keep rate limiting enabled in production) and not
+  entitlement-gated, since the target org usually has no features yet.
+- `setEntitlements(auth, orgId, features, { userId })` from `@alphabros/enterprise/server`, for
+  your own server code (an admin console, or a billing webhook running as a dedicated staff
+  service user). It applies the same staff check to `userId` and throws an `APIError` otherwise.
+
+Every change is audited as `entitlement.changed` (new and previous feature set, the staff user as
+actor) in the target organization's hash chain, in the same transaction as the write.
+
+The table is **opt-in**: it comes from an optional migration that the default migration set and
+`verify` do not include, so a deployment that never sets `entitlements.store` is unaffected.
+
+```bash
+ab-enterprise migrate --out ./drizzle/migrations --entitlements   # or: --from 0004
+ab-enterprise verify --entitlements
+```
+
+```ts
+await applyMigration(client, { entitlements: true }); // SQLite / libSQL
+await applyMigrationPg(client, { entitlements: true }); // Postgres (sql/pg/0002_org_entitlement.sql)
+await verifyDatabase(client, { entitlements: true });
+```
+
+For Drizzle, spread `orgEntitlementSchema` from `@alphabros/enterprise/schema` (or
+`/schema/pg`) into your schema next to `enterpriseSchema`. A `resolveEntitlements` callback given
+together with `entitlements: { store: "table" }` still takes precedence: the table is then
+written but not read for gating. Upgrade notes: [`docs/upgrading-to-1.3.md`](./docs/upgrading-to-1.3.md).
 
 ## Quick start — client
 
@@ -404,6 +463,12 @@ ab-enterprise migrate --out ./drizzle/migrations --from 0003
 # Upgrading from 0.1.x, where 0002 was never applied: 0002 and 0003.
 ab-enterprise migrate --out ./drizzle/migrations --from 0002
 
+# Opt-in 0004 (the staff-managed `org_entitlement` table, for `entitlements: {
+# store: "table" }`) is written only on request — never by a plain run or by
+# --from 0003: add --entitlements, or use --from 0004 for just that file.
+ab-enterprise migrate --out ./drizzle/migrations --entitlements
+ab-enterprise migrate --out ./drizzle/migrations --from 0004
+
 # A plain run (no --from) is for a new install, or a folder whose 0002 this
 # command wrote. It refuses, writing nothing, a folder holding an
 # *enterprise*.sql file this command did not write, or this command's 0001
@@ -419,6 +484,8 @@ ab-enterprise migrate --out ./drizzle/migrations --from 0002
 ab-enterprise verify --url $TURSO_DATABASE_URL --token $TURSO_AUTH_TOKEN
 # Prefer TURSO_DATABASE_URL / TURSO_AUTH_TOKEN env vars over --url/--token —
 # CLI flags are visible in `ps` output and shell history.
+# A deployment with `entitlements: { store: "table" }` adds --entitlements, which
+# also expects `org_entitlement`; without it that table is not checked.
 
 # Recompute an org's audit_event hash chain and confirm nothing was tampered
 # with (within the retention window — see docs/security.md). A keyed chain

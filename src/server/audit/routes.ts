@@ -271,6 +271,8 @@ export const SELF_AUDITED_PATHS: Record<string, string> = {
   "/enterprise/sso/register":
     "forwards to `/sso/register` through the same dispatch, which is audited (`sso.provider_registered`)",
   "/enterprise/sso/test-login/finish": "`sso.test_login_passed`, in the handler",
+  "/enterprise/entitlements/set":
+    "`entitlement.changed` (new and previous feature set) in the target organization's chain, written in the same transaction as the change",
 };
 
 const READ = "read-only: returns data and changes nothing an organization governs";

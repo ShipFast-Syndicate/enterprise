@@ -11,9 +11,12 @@
 
 import type { GenericEndpointContext } from "better-auth";
 import { APIError } from "better-auth/api";
+import {
+  enterpriseOptionsOfContext,
+  readEntitlementRow,
+  usesEntitlementTable,
+} from "./entitlement-store";
 import type { EnterpriseOptions, Feature } from "./types";
-
-const ENTERPRISE_GATE_PLUGIN_ID = "enterprise-gate";
 
 export class FeatureNotEntitledError extends APIError {
   constructor(feature: Feature, orgId: string) {
@@ -27,14 +30,7 @@ export class FeatureNotEntitledError extends APIError {
 }
 
 function getEnterpriseOptions(ctx: GenericEndpointContext): EnterpriseOptions {
-  const plugin = ctx.context.options.plugins?.find((p) => p.id === ENTERPRISE_GATE_PLUGIN_ID) as
-    { options?: EnterpriseOptions } | undefined;
-  if (!plugin?.options) {
-    throw new Error(
-      "requireFeature() requires the enterpriseGate() plugin to be registered on this auth instance.",
-    );
-  }
-  return plugin.options;
+  return enterpriseOptionsOfContext(ctx.context);
 }
 
 // Per-request cache: ctx -> orgId -> the org's entitled features. Keyed by
@@ -56,10 +52,37 @@ async function getEntitledFeatures(
   }
   let entitled = byOrg.get(orgId);
   if (!entitled) {
-    entitled = new Set(await opts.resolveEntitlements(orgId));
+    entitled = new Set(await resolveFeatures(ctx, opts, orgId));
     byOrg.set(orgId, entitled);
   }
   return entitled;
+}
+
+// Where an organization's features come from. The product's callback decides
+// when it is given; otherwise the staff-managed table (`entitlements: { store:
+// "table" }`) — never `organization.metadata`, which an org owner can write.
+// With neither there is nothing to resolve from, and nothing is granted.
+async function resolveFeatures(
+  ctx: GenericEndpointContext,
+  opts: EnterpriseOptions,
+  orgId: string,
+): Promise<Iterable<Feature>> {
+  if (opts.resolveEntitlements) return opts.resolveEntitlements(orgId);
+  if (usesEntitlementTable(opts)) return readEntitlementRow(ctx.context.adapter, orgId);
+  return [];
+}
+
+/**
+ * The features `orgId` is entitled to, through the same per-request cache
+ * `requireFeature` uses — so a gate check and the `/enterprise/features` read
+ * of one request resolve once. `opts` defaults to the deployment's own.
+ */
+export async function resolveEntitledFeatures(
+  ctx: GenericEndpointContext,
+  orgId: string,
+  opts: EnterpriseOptions = getEnterpriseOptions(ctx),
+): Promise<Feature[]> {
+  return [...(await getEntitledFeatures(ctx, opts, orgId))];
 }
 
 export async function requireFeature(

@@ -37,6 +37,8 @@ import { getOrgPolicy, isOrgOwner, requireOrgMember } from "../policy/store";
 import { buildSsoEndpoints } from "./sso";
 import { buildScimEndpoints } from "./scim";
 import { buildMembersEndpoint } from "./members";
+import { ENTITLEMENT_SET_RATE_LIMIT, buildSetEntitlementsEndpoint } from "./entitlements";
+import { resolveEntitledFeatures } from "../entitlements";
 
 const featuresQuerySchema = z.object({ orgId: orgIdSchema });
 
@@ -48,7 +50,9 @@ function buildFeaturesEndpoint(opts: EnterpriseOptions) {
       const fullCtx = ctx as unknown as GenericEndpointContext;
       const { orgId } = ctx.query;
       await requireOrgMember(fullCtx, orgId);
-      const features = [...new Set(await opts.resolveEntitlements(orgId))];
+      // The cached resolver the gate uses (`../entitlements.ts`): the product
+      // callback, else the staff-managed table — never `organization.metadata`.
+      const features = await resolveEntitledFeatures(fullCtx, orgId, opts);
       return ctx.json({ features });
     },
   );
@@ -123,7 +127,9 @@ export function enterpriseApi(opts: EnterpriseOptions) {
       ...buildSsoEndpoints(),
       ...buildScimEndpoints(),
       enterpriseMembers: buildMembersEndpoint(),
+      enterpriseEntitlementsSet: buildSetEntitlementsEndpoint(opts),
     },
+    rateLimit: [ENTITLEMENT_SET_RATE_LIMIT],
     hooks: {
       before: [buildSsoEnforcePreconditionHook()],
     },

@@ -7,15 +7,37 @@
 
 import type { sso } from "@better-auth/sso";
 
-export type Feature = "sso" | "scim" | "audit_log" | "enforce_2fa" | "api_keys" | "teams";
+/** Every feature an organization can be entitled to — the closed `Feature` vocabulary. */
+export const FEATURES = ["sso", "scim", "audit_log", "enforce_2fa", "api_keys", "teams"] as const;
+
+export type Feature = (typeof FEATURES)[number];
 
 export type ResolveEntitlements = (orgId: string) => Promise<Iterable<Feature>>;
 
 export interface EnterpriseOptions {
   /** Product slug this deployment belongs to, e.g. "my-app". */
   product: string;
-  /** Resolves the set of features an org is entitled to (billing/plan lookup). */
-  resolveEntitlements: ResolveEntitlements;
+  /**
+   * Resolves the set of features an org is entitled to (billing/plan lookup).
+   * Required unless `entitlements: { store: "table" }` is set; when both are
+   * given, this callback decides and the table is not read.
+   */
+  resolveEntitlements?: ResolveEntitlements;
+  /**
+   * Staff-managed entitlement store. `store: "table"` resolves an
+   * organization's features from the `org_entitlement` table (optional
+   * migration `0004` / Postgres `0002`), which only platform staff can write
+   * (`POST /enterprise/entitlements/set`, `setEntitlements()`); a tenant —
+   * including its owner — has no route to it. `organization.metadata`, which
+   * an org owner can write, is never an entitlement source. A
+   * `resolveEntitlements` callback, when given, still takes precedence. A
+   * missing row means no features (fail closed).
+   *
+   * `staffRoles` (default `["admin"]`): the `user.role` values (the `admin()`
+   * plugin's roles, comma-separated on the row) that count as platform
+   * staff. Set it to match `adminRoles` if the product configures that.
+   */
+  entitlements?: { store: "table"; staffRoles?: string[] };
   /**
    * Reserved — not yet consumed by `enterprisePreset` (`./preset.ts`).
    * `@better-auth/sso@1.7.7`'s `sso()` constructor has no plugin-level slot

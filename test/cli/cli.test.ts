@@ -591,7 +591,7 @@ describe("ab-enterprise CLI (built binary)", () => {
     it("--from must name one of the package's migrations", () => {
       const dir = join(workDir, "product-bad-from");
       cpSync(fixture, dir, { recursive: true });
-      for (const bad of ["3", "0004", "0000", "latest"]) {
+      for (const bad of ["3", "0005", "0000", "latest"]) {
         const result = runCli(["migrate", "--out", dir, "--from", bad]);
         expect(result.status, bad).toBe(1);
         expect(result.stderr, bad).toMatch(
@@ -762,6 +762,81 @@ describe("ab-enterprise CLI (built binary)", () => {
       expect(again.status).toBe(0);
       expect(again.stdout).toMatch(/already holds every migration — nothing written/);
       client.close();
+    });
+  });
+
+  // The optional org_entitlement migration (0004) is opt-in everywhere: a
+  // plain `migrate` / `verify` and `--from 0003` never see it.
+  describe("optional entitlement migration (0004)", () => {
+    function written(dir: string): string[] {
+      return readdirSync(dir)
+        .filter((entry) => entry.endsWith(".sql"))
+        .sort();
+    }
+    function mentionsEntitlements(dir: string): boolean {
+      return written(dir).some((entry) =>
+        readFileSync(join(dir, entry), "utf8").includes("org_entitlement"),
+      );
+    }
+
+    it("a plain migrate writes 0001-0003 and not the entitlement table", () => {
+      const dir = join(workDir, "ent-plain");
+      const run = runCli(["migrate", "--out", dir]);
+      expect(run.status, run.stderr).toBe(0);
+      expect(written(dir)).toHaveLength(3);
+      expect(mentionsEntitlements(dir)).toBe(false);
+    });
+
+    it("--entitlements also writes 0004; later plain runs recognise it", () => {
+      const dir = join(workDir, "ent-flag");
+      const run = runCli(["migrate", "--out", dir, "--entitlements"]);
+      expect(run.status, run.stderr).toBe(0);
+      expect(written(dir)).toEqual([
+        "0000_enterprise.sql",
+        "0001_enterprise_0002_scim_1_7.sql",
+        "0002_enterprise_0003_require2fa.sql",
+        "0003_enterprise_0004_org_entitlement.sql",
+      ]);
+      expect(readFileSync(join(dir, "0003_enterprise_0004_org_entitlement.sql"), "utf8")).toContain(
+        "CREATE TABLE IF NOT EXISTS org_entitlement",
+      );
+
+      const again = runCli(["migrate", "--out", dir, "--entitlements"]);
+      expect(again.status).toBe(0);
+      expect(again.stdout).toMatch(/already holds every migration — nothing written/);
+      const plain = runCli(["migrate", "--out", dir]);
+      expect(plain.status, plain.stderr).toBe(0);
+      expect(written(dir)).toHaveLength(4);
+    });
+
+    it("--from 0004 writes exactly that one file; --from 0003 does not include it", () => {
+      const only = join(workDir, "ent-from-0004");
+      const run = runCli(["migrate", "--out", only, "--from", "0004"]);
+      expect(run.status, run.stderr).toBe(0);
+      expect(written(only)).toEqual(["0000_enterprise_0004_org_entitlement.sql"]);
+
+      const upgrade = join(workDir, "ent-from-0003");
+      const second = runCli(["migrate", "--out", upgrade, "--from", "0003"]);
+      expect(second.status, second.stderr).toBe(0);
+      expect(written(upgrade)).toEqual(["0000_enterprise_0003_require2fa.sql"]);
+      expect(mentionsEntitlements(upgrade)).toBe(false);
+    });
+
+    it("verify checks org_entitlement only with --entitlements", async () => {
+      const dbPath = join(workDir, "ent-verify.db");
+      const client = createClient({ url: `file:${dbPath}` });
+      await runMigrations({ options: baseOptions() }, client);
+      await applyMigration(client);
+
+      expect(runCli(["verify", "--url", `file:${dbPath}`]).status).toBe(0);
+      const missing = runCli(["verify", "--url", `file:${dbPath}`, "--entitlements"]);
+      expect(missing.status).toBe(1);
+      expect(missing.stdout).toMatch(/missing table: org_entitlement/);
+
+      await applyMigration(client, { entitlements: true });
+      client.close();
+      const ok = runCli(["verify", "--url", `file:${dbPath}`, "--entitlements"]);
+      expect(ok.status, ok.stdout).toBe(0);
     });
   });
 });
