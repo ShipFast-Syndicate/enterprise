@@ -2,6 +2,25 @@ import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 import { IDP_CERT } from "./test/helpers/fixtures/saml-keys";
 
+// The suites that also run on Postgres: makeAuth/buildDynamicSchema and the
+// product-shaped harness, the preset, SCIM, policy, and the audit log
+// (golden vectors and hash chain included).
+const PG_CORE_SUITES = [
+  "test/server/preset.test.ts",
+  "test/server/policy.test.ts",
+  "test/server/effective-policy.test.ts",
+  "test/server/scim-groups.test.ts",
+  "test/server/audit-chain.test.ts",
+  "test/server/audit-golden-vectors.test.ts",
+  "test/server/audit-plugin.test.ts",
+  "test/security/audit-cluster.test.ts",
+  "test/security/c02-retention-compaction.test.ts",
+  "test/security/c03-scim-role-demotion.test.ts",
+  "test/security/scim-catalog.test.ts",
+  "test/security/gap2-require2fa-product-schema.test.ts",
+  "test/pg/audit-concurrency.test.ts",
+];
+
 export default defineConfig({
   test: {
     testTimeout: 20000,
@@ -38,6 +57,23 @@ export default defineConfig({
           include: ["test/**/*.test.ts"],
           exclude: ["test/portal/**", "test/workerd/**"],
           environment: "node",
+        },
+      },
+      {
+        // The core suites again, against Postgres: `TEST_DIALECT=pg` makes
+        // `makeAuth` (test/helpers/auth.ts) build the Postgres schema and apply
+        // `applyMigrationPg`. PGlite in-process by default; a real Postgres
+        // when `TEST_DATABASE_URL` is set (the `postgres` CI job), where the
+        // concurrency suite (test/pg/audit-concurrency.test.ts) also runs.
+        // The files are the same ones the `server` project runs on SQLite,
+        // not copies: a dialect-specific statement in one is guarded with
+        // `isPg`/`ts()` from test/helpers/dialect.ts.
+        extends: true,
+        test: {
+          name: "server-pg",
+          include: PG_CORE_SUITES,
+          environment: "node",
+          env: { TEST_DIALECT: "pg" },
         },
       },
       {

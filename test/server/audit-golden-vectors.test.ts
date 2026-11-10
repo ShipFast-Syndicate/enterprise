@@ -24,6 +24,7 @@ import {
   type AuditRowForHash,
 } from "../../src/server/audit/chain";
 import { makeAuth } from "../helpers/auth";
+import { isPg } from "../helpers/dialect";
 
 const KEY = "golden-vector-chain-key";
 const T = 1_700_000_000_000;
@@ -230,7 +231,9 @@ describe("audit hash golden vectors: chain and head signature", () => {
   });
 });
 
-describe("audit hash golden vectors: compaction anchor (sqlite/libSQL)", () => {
+// The same frozen literals hold on both engines: Postgres' `json` column keeps
+// the serialised bytes (a `jsonb` column would not).
+describe(`audit hash golden vectors: compaction anchor (${isPg ? "postgres" : "sqlite/libSQL"})`, () => {
   const ORG = "org_golden_anchor";
   const input = {
     orgId: ORG,
