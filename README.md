@@ -85,14 +85,28 @@ regenerate this table with it. `verifyDatabase` fails on a `jsonb` column and on
 unique index (`audit_event (org_id, seq)` anchors the hash chain; `org_policy (org_id)` and
 `enterprise_scim_member (member_id)` too). `applyMigrationPg` is not wrapped in a transaction
 and must not run concurrently: a failure part-way leaves earlier statements applied (re-running
-is safe, every statement is idempotent), so run it once per deploy. The CLI stays
-SQLite (`TURSO_*`); a `--dialect pg` option is not part of this release. The optional
+is safe, every statement is idempotent), so run it once per deploy. The CLI takes
+`--dialect pg` ([below](#cli-ab-enterprise)). The optional
 `sql/pg/0002_org_entitlement.sql` (the staff-managed entitlement table,
 [below](#staff-managed-entitlement-table)) is applied only by `applyMigrationPg(client, { entitlements: true })`
 and checked only by `verifyDatabase(client, { entitlements: true })`; the default calls skip it.
 
 Upgrading from 0.1 requires new SCIM tables, a separate credential HMAC secret and
 IdP reprovisioning. Read [the migration guide](./docs/migration-1-7.md) first.
+
+#### Postgres audit writes
+
+Set `database: { dialect: "pg" }` (default `"sqlite"`, unchanged) and wrap the Drizzle database
+your adapter is built on: `drizzleAdapter(withPgAuditLock(db), { provider: "pg", transaction:
+true })` (`withPgAuditLock` is exported from `@alphabros/enterprise/server`). The audit writer
+then takes a transaction-scoped advisory lock per organization (`pg_advisory_xact_lock`, keyed by
+a hash of the org id) before it reads the chain head, inside the transaction the row is written
+in — the caller's own when the write is part of a larger one (SCIM, an entitlement change), else
+one it opens. A writer never hits the `(org_id, seq)` unique index (`23505`) inside an open
+transaction, so the transaction is not aborted (`25P02`); the unique-violation retry stays as a
+safety net. Without `withPgAuditLock` the lock cannot be taken (one warning is logged) and only
+the retry guards the write. The lock is held until the surrounding transaction ends, so keep
+transactions that write audit rows short.
 
 ## Quick start — server
 
@@ -495,6 +509,21 @@ ab-enterprise verify --url $TURSO_DATABASE_URL --token $TURSO_AUTH_TOKEN
 ab-enterprise audit-verify --org org_123 --url $TURSO_DATABASE_URL
 AB_AUDIT_CHAIN_KEY=... ab-enterprise audit-verify --org org_123 --expect-head "$(cat head.json)"
 ```
+
+Postgres: every command takes `--dialect pg`, and a `postgres://` / `postgresql://` URL is
+detected on its own (so `--dialect` is optional there). Credentials stay out of argv: the URL is
+read from `AB_DATABASE_URL`, `DATABASE_URL` or `TURSO_DATABASE_URL`; `--url` is accepted only for a
+URL without a password, and `--dialect pg` with no URL at all uses the `PG*` environment
+variables. The driver is `pg` (an optional peer — install it next to this package).
+
+```sh
+ab-enterprise migrate --dialect pg --out ./drizzle/migrations    # sql/pg/0001 (+ 0002 with --entitlements)
+AB_DATABASE_URL=postgres://... ab-enterprise verify              # also checks metadata is json + unique indexes
+AB_DATABASE_URL=postgres://... AB_AUDIT_CHAIN_KEY=... ab-enterprise audit-verify --org org_123
+```
+
+`audit-verify` reads the `json` metadata column as an object and `timestamptz` `created_at` as a
+date, so keyed (`AB_AUDIT_CHAIN_KEY`) and compacted chains verify the same as on SQLite.
 
 Run `ab-enterprise verify` after every deploy (fleet migrations have historically not reached
 Turso even when the migration file itself was committed).

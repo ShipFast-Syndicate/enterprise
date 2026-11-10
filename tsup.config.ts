@@ -5,6 +5,8 @@ const external = [
   /^@better-auth\//,
   "drizzle-orm",
   "@libsql/client",
+  // The Postgres CLI commands load it on demand (`src/cli/pg.ts`).
+  "pg",
   "lit",
   /^lit\//,
   // The SAML trust root is derived through samlify with the inputs
