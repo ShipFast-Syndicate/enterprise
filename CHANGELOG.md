@@ -1,3 +1,17 @@
+## [1.2.0](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.1.3...v1.2.0) (2026-11-11)
+
+### Features
+
+* **entitlements:** add a staff-managed entitlement store ([#78](https://github.com/ShipFast-Syndicate/enterprise/issues/78)) ([269007c](https://github.com/ShipFast-Syndicate/enterprise/commit/269007c6bd71f9be1d015692dd0a5898cd3759d7))
+* **org:** add staff-only org creation and metadata lock ([#80](https://github.com/ShipFast-Syndicate/enterprise/issues/80)) ([9176016](https://github.com/ShipFast-Syndicate/enterprise/commit/9176016c67c07bf0201f9a6759918efdf0b3a074))
+* **pg:** add postgres schema, migration and verify ([#76](https://github.com/ShipFast-Syndicate/enterprise/issues/76)) ([0371645](https://github.com/ShipFast-Syndicate/enterprise/commit/0371645fb49da393d6e4a611ad3bcfd139236e00))
+
+### Bug Fixes
+
+* **audit:** take the pg advisory lock on SCIM's bare adapter context ([#81](https://github.com/ShipFast-Syndicate/enterprise/issues/81)) ([a03f599](https://github.com/ShipFast-Syndicate/enterprise/commit/a03f599c582dc57012cd372c470b6f42a32a2e1c))
+* **deps:** override minimatch to 11.0.1+ to close GHSA-g3hv-75wg-m249 ([#69](https://github.com/ShipFast-Syndicate/enterprise/issues/69)) ([bbc97d5](https://github.com/ShipFast-Syndicate/enterprise/commit/bbc97d54be42c8e7a307d26c4a45f74bcb67729f))
+* **pg:** advisory-lock audit seq and pg cli dialect ([#79](https://github.com/ShipFast-Syndicate/enterprise/issues/79)) ([28d1236](https://github.com/ShipFast-Syndicate/enterprise/commit/28d1236f6763d0537dd5a4d3eb580ac157d313b5))
+
 ## [1.1.3](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.1.2...v1.1.3) (2026-10-25)
 
 ### Bug Fixes
