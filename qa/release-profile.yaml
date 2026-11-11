@@ -36,7 +36,7 @@ migrations:
   rationale_ref: "The package emits SQL into a consumer's migration folder (ab-enterprise migrate) and applies nothing itself. Each consumer release rehearses the emitted migration on its hosted engine."
   manifest_path: src/schema/sql
 qa:
-  runner_checks_ref: ".github/workflows/ci.yml: ci / summary (contracts, node quality with tests and coverage, semgrep, trivy, gitleaks, audit, build)"
+  runner_checks_ref: ".github/workflows/ci.yml: ci / summary (contracts, node quality with tests and coverage, postgres suites against a digest-pinned Postgres service container, semgrep, trivy, gitleaks, audit, build)"
   browser_applicability: not-applicable
   rationale_ref: "The Lit portal has no standalone runtime: it renders only inside a host that supplies the --ab-* tokens and the auth routes. Component behaviour is covered by the happy-dom tests in test/portal; browser QA runs in each embedding product's release."
   identity_applicability: not-applicable
@@ -47,9 +47,9 @@ qa:
   cleanup_rationale_ref: "The isolated consumer is a disposable local directory"
   evidence_recorder_ref: "bros-brain knowledge/releases/enterprise/<release-id>/"
   required_checks:
-    - "ci / summary green on the release PR to main"
+    - "ci / summary green on the release PR to main, including the postgres job (core suites on both sqlite and Postgres)"
     - "pnpm pack tarball installs into an isolated consumer with the pinned peer set"
-    - "every export (server, schema, client, portal) and the ab-enterprise bin load from the installed tarball"
+    - "every export (server, schema, schema/pg, client, portal) and the ab-enterprise bin load from the installed tarball"
     - "a consumer TypeScript file compiles against the published types"
     - "registry readback after publish: version, latest dist-tag, provenance attestation"
 protection:

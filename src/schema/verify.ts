@@ -9,11 +9,16 @@
 // table missing one of its tracked columns reports `{ table, column }` per
 // missing column.
 import type { Client } from "@libsql/client";
-import { EXPECTED_TABLES } from "./expected";
+import { expectedTables } from "./expected";
+
+import type { PgClient } from "./pg-client";
+import { verifyDatabasePg } from "./verify-pg";
 
 export interface MissingItem {
   table: string;
   column?: string;
+  /** Postgres only: the column exists but is wrong (e.g. `jsonb` audit metadata). */
+  reason?: string;
 }
 
 export interface VerifyResult {
@@ -21,10 +26,36 @@ export interface VerifyResult {
   missing: MissingItem[];
 }
 
-export async function verifyDatabase(client: Client): Promise<VerifyResult> {
+export interface VerifyOptions {
+  /**
+   * Also expect `org_entitlement` (optional migration `0004` / Postgres
+   * `0002`) — for a deployment with `entitlements: { store: "table" }`.
+   * Off by default, so a deployment that did not opt in verifies as before.
+   */
+  entitlements?: boolean;
+}
+
+/**
+ * Verifies a SQLite/libSQL `Client` (unchanged) or, given a Postgres client
+ * (anything with `query()` and no `execute()`: `pg`, PGlite), the same
+ * contract through `information_schema` — see `verifyDatabasePg`.
+ */
+export async function verifyDatabase(
+  client: Client,
+  options?: VerifyOptions,
+): Promise<VerifyResult>;
+export async function verifyDatabase(
+  client: PgClient,
+  options?: VerifyOptions,
+): Promise<VerifyResult>;
+export async function verifyDatabase(
+  client: Client | PgClient,
+  options: VerifyOptions = {},
+): Promise<VerifyResult> {
+  if (!("execute" in client)) return verifyDatabasePg(client, options);
   const missing: MissingItem[] = [];
 
-  for (const [table, columns] of Object.entries(EXPECTED_TABLES)) {
+  for (const [table, columns] of Object.entries(expectedTables(options))) {
     const info = await client.execute(`PRAGMA table_info("${table}")`);
     if (info.rows.length === 0) {
       missing.push({ table });

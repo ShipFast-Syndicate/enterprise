@@ -22,7 +22,7 @@
 // errors (schema mismatch, an empty `incrementOne`) — passes through
 // unchanged, message included.
 
-import { isAPIError } from "better-auth/api";
+import { APIError, isAPIError } from "better-auth/api";
 import type { AuthContext } from "better-auth";
 
 type Adapter = AuthContext["adapter"];
@@ -83,11 +83,55 @@ export function carriesQuery(error: unknown): boolean {
 const SCHEMA_HINT =
   /no such (?:table|column): [\w."]+|table [\w."]+ has no column named [\w."]+|(?:relation|column) "[^"]{1,128}"(?: of relation "[^"]{1,128}")? does not exist|Unknown column '[^']{1,128}'/i;
 
-/** `error` without its SQL: a `DatabaseQueryError` when it carries a query, else `error` itself. */
+// Driver codes and wording for "a row with this unique key already exists":
+// libsql/sqlite, postgres (`23505`), mysql (`ER_DUP_ENTRY`/1062). The bare
+// `SQLITE_CONSTRAINT` is left out: it is also a NOT NULL or CHECK failure.
+const UNIQUE_CODES = new Set([
+  "SQLITE_CONSTRAINT_UNIQUE",
+  "SQLITE_CONSTRAINT_PRIMARYKEY",
+  "23505",
+  "ER_DUP_ENTRY",
+  "1062",
+]);
+const UNIQUE_TEXT = /unique constraint failed|duplicate key value|duplicate entry/i;
+
+function isUniqueConflict(error: unknown): boolean {
+  return chainOf(error).some(
+    (link) =>
+      ((typeof link.code === "string" || typeof link.code === "number") &&
+        UNIQUE_CODES.has(String(link.code))) ||
+      (typeof link.message === "string" && UNIQUE_TEXT.test(link.message)),
+  );
+}
+
+/**
+ * Registering a `providerId` that already exists is answered by upstream's
+ * own lookup with a 422 — but that lookup and the insert are separate
+ * statements, so two registrations racing for one `providerId` (typically two
+ * organizations) leave the loser to the unique index, which surfaced as an
+ * opaque 500. The only caller-chosen unique key on `ssoProvider` is
+ * `providerId`, so a unique violation on its insert becomes the same 422,
+ * with the same body, upstream's lookup gives: nothing more is disclosed than
+ * a sequential duplicate already discloses, and the row that won is untouched.
+ */
+function providerIdConflict(
+  error: unknown,
+  where: { model?: unknown; method: string },
+): APIError | null {
+  if (where.model !== "ssoProvider" || where.method !== "create") return null;
+  if (isAPIError(error) || !isUniqueConflict(error)) return null;
+  return new APIError("UNPROCESSABLE_ENTITY", {
+    message: "SSO provider with this providerId already exists",
+  });
+}
+
+/** `error` without its SQL: a `DatabaseQueryError` when it carries a query, else `error` itself. A `providerId` unique-index conflict on `ssoProvider` becomes upstream's 422. */
 export function redactDatabaseError(
   error: unknown,
   where: { model?: unknown; method: string },
 ): unknown {
+  const conflict = providerIdConflict(error, where);
+  if (conflict) return conflict;
   if (!carriesQuery(error)) return error;
   const chain = chainOf(error);
   const codes: Partial<Record<(typeof CODE_FIELDS)[number], string | number>> = {};

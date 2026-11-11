@@ -1,4 +1,4 @@
-// Snapshot of Better Auth 1.7.5 plus enterprise plugin models.
+// Snapshot of Better Auth 1.7.19 (the version the suite runs against) plus enterprise plugin models.
 // The schema drift test compares this contract to getAuthTables().
 export const EXPECTED_TABLES: Record<string, string[]> = {
   user: [
@@ -237,3 +237,18 @@ export const EXPECTED_TABLES: Record<string, string[]> = {
   ],
   enterprise_scim_member: ["id", "org_id", "user_id", "member_id", "last_role"],
 };
+
+// Tables a deployment has only when it opts into `entitlements: { store:
+// "table" }` (optional migration `0004` / Postgres `0002`). Kept out of
+// `EXPECTED_TABLES` so a deployment that did not opt in verifies exactly as
+// before; `verifyDatabase(client, { entitlements: true })` adds them.
+export const EXPECTED_ENTITLEMENT_TABLES: Record<string, string[]> = {
+  org_entitlement: ["id", "org_id", "features", "updated_at", "updated_by"],
+};
+
+/** The tables to check: the default contract, plus the opt-in ones. */
+export function expectedTables(options: { entitlements?: boolean } = {}): Record<string, string[]> {
+  return options.entitlements
+    ? { ...EXPECTED_TABLES, ...EXPECTED_ENTITLEMENT_TABLES }
+    : EXPECTED_TABLES;
+}

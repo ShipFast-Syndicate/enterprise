@@ -27,6 +27,7 @@ test("Vitest projects inherit the declared timeout and cover executable source",
       })),
       [
         { name: "server", timeout: 20000, environment: "node" },
+        { name: "server-pg", timeout: 20000, environment: "node" },
         { name: "portal", timeout: 20000, environment: "happy-dom" },
         { name: "workerd", timeout: 20000, environment: "node" },
       ],
@@ -264,6 +265,9 @@ const publicActions = new Set([
   // The v7.0.1 pin above stays only until the Dependabot bump lands.
   "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
   "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+  // Verified upstream v7.1.0 tag (lightweight tag, commit 6d4fd22b20465ccc0f7354476588e8df7c9ca0e0).
+  // The v7.0.0 pin above stays only until the Dependabot bump lands.
+  "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
 ]);
 
 test("public release uses a local job and confines registry authority to protected publication", () => {
@@ -367,6 +371,15 @@ function assertClosure(caller, workflow) {
   for (const command of ["pnpm lint", "pnpm typecheck", "pnpm format:check", "pnpm test:coverage"])
     assert.ok(workflow.jobs.node.steps.some((step) => step.run === command));
   assert.ok(workflow.jobs.build.steps.some((step) => step.run === "pnpm build"));
+  // The Postgres job: the core suites against a digest-pinned service
+  // container, reached through TEST_DATABASE_URL (which also enables the
+  // concurrent-writer audit test).
+  const postgres = workflow.jobs.postgres;
+  assert.match(postgres.services.postgres.image, /^postgres:[\w.-]+@sha256:[0-9a-f]{64}$/);
+  const pgSuites = postgres.steps.find((step) => step.run === "pnpm test:pg");
+  assert.ok(pgSuites, "postgres job runs pnpm test:pg");
+  assert.match(pgSuites.env.TEST_DATABASE_URL, /^postgres:\/\/\w+@localhost:5432\/\w+$/);
+  assert.ok(workflow.jobs.summary.needs.includes("postgres"));
   assert.ok(workflow.jobs.audit.steps.some((step) => step.run === "pnpm audit --audit-level=high"));
   assert.ok(
     workflow.jobs.contracts.steps.some(

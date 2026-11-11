@@ -8,8 +8,11 @@ framework-agnostic admin portal — as one package with four subpath entry point
 
 ## Status
 
-**v1.1.** Server plugins, schema/CLI, client helpers, and all seven portal elements are
-implemented and tested (1026 tests). Upgrading from 1.0.x or 0.1.x: read
+**v1.2.** Server plugins, schema/CLI, client helpers, and all seven portal elements are
+implemented and tested (1494 tests, the core suites on both SQLite and Postgres). Postgres,
+the staff-managed entitlement table and staff-only organization creation are optional and
+additive: upgrading from 1.1.x, read [`docs/upgrading-to-1.2.md`](./docs/upgrading-to-1.2.md).
+Upgrading from 1.0.x or 0.1.x: read
 [`docs/upgrading-to-1.1.md`](./docs/upgrading-to-1.1.md) first — every change is on by default,
 a few change what existing users see, and a product that replaces one of the preset's plugins
 sets the preset's settings on its own call (step 2). Read
@@ -63,16 +66,50 @@ dev toolchain).
 
 ## Package layout
 
-| Entry point                    | What it's for                                                     |
-| ------------------------------ | ----------------------------------------------------------------- |
-| `@alphabros/enterprise/server` | better-auth plugin preset (`enterprisePreset`) and its pieces     |
-| `@alphabros/enterprise/schema` | Drizzle table definitions + SQL migrations (Node-only, see below) |
-| `@alphabros/enterprise/client` | better-auth client plugins + home-realm login helpers             |
-| `@alphabros/enterprise/portal` | Lit web components for a security-settings admin UI               |
-| `ab-enterprise` (bin)          | CLI: `migrate`, `verify`, `audit-verify` (Node-only)              |
+| Entry point                       | What it's for                                                     |
+| --------------------------------- | ----------------------------------------------------------------- |
+| `@alphabros/enterprise/server`    | better-auth plugin preset (`enterprisePreset`) and its pieces     |
+| `@alphabros/enterprise/schema`    | Drizzle table definitions + SQL migrations (Node-only, see below) |
+| `@alphabros/enterprise/schema/pg` | Postgres Drizzle tables (`pg-core`); see "Postgres" below         |
+| `@alphabros/enterprise/client`    | better-auth client plugins + home-realm login helpers             |
+| `@alphabros/enterprise/portal`    | Lit web components for a security-settings admin UI               |
+| `ab-enterprise` (bin)             | CLI: `migrate`, `verify`, `audit-verify` (Node-only)              |
+
+### Postgres (schema only)
+
+`@alphabros/enterprise/schema/pg` exports `orgPolicy`, `auditEvent`,
+`enterpriseScimMember`, `enterpriseSchema` and `studioRefColumns()` (spread it into your
+`user` and `organization` tables for the `studio_ref` column). `sql/pg/0001_enterprise.sql`
+is one idempotent migration; `applyMigrationPg(client)` and `verifyDatabase(client)` from
+`@alphabros/enterprise/schema` accept any client with `query(sql, params?)` (`pg`, PGlite).
+`audit_event.metadata` is `json`, never `jsonb`: `jsonb` re-orders keys and breaks the audit
+hash chain, and `@better-auth/cli generate` emits `jsonb` for `json` fields, so do not
+regenerate this table with it. `verifyDatabase` fails on a `jsonb` column and on a missing
+unique index (`audit_event (org_id, seq)` anchors the hash chain; `org_policy (org_id)` and
+`enterprise_scim_member (member_id)` too). `applyMigrationPg` is not wrapped in a transaction
+and must not run concurrently: a failure part-way leaves earlier statements applied (re-running
+is safe, every statement is idempotent), so run it once per deploy. The CLI takes
+`--dialect pg` ([below](#cli-ab-enterprise)). The optional
+`sql/pg/0002_org_entitlement.sql` (the staff-managed entitlement table,
+[below](#staff-managed-entitlement-table)) is applied only by `applyMigrationPg(client, { entitlements: true })`
+and checked only by `verifyDatabase(client, { entitlements: true })`; the default calls skip it.
 
 Upgrading from 0.1 requires new SCIM tables, a separate credential HMAC secret and
 IdP reprovisioning. Read [the migration guide](./docs/migration-1-7.md) first.
+
+#### Postgres audit writes
+
+Set `database: { dialect: "pg" }` (default `"sqlite"`, unchanged) and wrap the Drizzle database
+your adapter is built on: `drizzleAdapter(withPgAuditLock(db), { provider: "pg", transaction:
+true })` (`withPgAuditLock` is exported from `@alphabros/enterprise/server`). The audit writer
+then takes a transaction-scoped advisory lock per organization (`pg_advisory_xact_lock`, keyed by
+a hash of the org id) before it reads the chain head, inside the transaction the row is written
+in — the caller's own when the write is part of a larger one (SCIM, an entitlement change), else
+one it opens. A writer never hits the `(org_id, seq)` unique index (`23505`) inside an open
+transaction, so the transaction is not aborted (`25P02`); the unique-violation retry stays as a
+safety net. Without `withPgAuditLock` the lock cannot be taken (one warning is logged) and only
+the retry guards the write. The lock is held until the surrounding transaction ends, so keep
+transactions that write audit rows short.
 
 ## Quick start — server
 
@@ -134,7 +171,8 @@ needs **no per-framework server code** beyond this.
 `enterpriseGate` already calls it in front of every path listed in `GATED_PATHS` (SSO/SCIM
 registration, team creation, API key creation, audit reads, policy writes, and the portal's
 `/enterprise/sso/*` and `/enterprise/scim/tokens*` wrappers) — you only need to implement
-`resolveEntitlements`. `Feature` is `"sso" | "scim" | "audit_log" | "enforce_2fa" | "api_keys" | "teams"`.
+`resolveEntitlements` (or opt into the [staff-managed table](#staff-managed-entitlement-table)).
+`Feature` is `"sso" | "scim" | "audit_log" | "enforce_2fa" | "api_keys" | "teams"`.
 
 A typical implementation maps a Stripe price/plan onto the feature set it unlocks:
 
@@ -165,6 +203,98 @@ export async function resolveEntitlementsFromStripe(orgId: string): Promise<Feat
 Entitlements are cached per request (one `resolveEntitlements` call per org per request, however
 many gated paths/`requireFeature` calls it serves), so it's safe to hit your own database or a
 cached plan lookup here without worrying about N+1 calls on a single request.
+`GET /enterprise/features` answers through the same cached resolver.
+
+### Staff-managed entitlement table
+
+Do **not** keep entitlements in `organization.metadata`: an organization's owner can write it
+through better-auth's `/organization/update`, so an owner could grant itself SSO or SCIM. If the
+plan lives in your own billing system, `resolveEntitlements` above is the right source. If it
+does not — you grant features by hand, per organization — use the staff-managed table:
+
+```ts
+enterprisePreset({
+  product: "my-app",
+  entitlements: { store: "table" }, // no resolveEntitlements needed
+  // staffRoles: ["admin"] (default) — the `user.role` values that count as platform staff
+  // ...secretsKey, scimCredentialHashSecret
+});
+```
+
+Features then resolve from the `org_entitlement` table (one row per organization, a missing row
+means **no features**, unknown names in a row are ignored). Nothing a tenant can call writes it.
+The only writers are platform staff:
+
+- `POST /enterprise/entitlements/set` with `{ orgId, features: Feature[] }` (the whole set is
+  replaced; `[]` revokes everything). The caller must be a signed-in, non-banned user whose `role`
+  holds one of `entitlements.staffRoles` (the `admin()` plugin's role, default `"admin"`), reading
+  the role from the database on every call, and **must not be in an impersonation session** — an
+  org owner, an org admin, an API key and a staff member impersonating a user are all refused
+  (`403 NOT_PLATFORM_STAFF`, `IMPERSONATION_NOT_ALLOWED`, `API_KEY_NOT_ALLOWED_HERE`). It is rate
+  limited (20 per minute per client; keep rate limiting enabled in production) and not
+  entitlement-gated, since the target org usually has no features yet.
+- `setEntitlements(auth, orgId, features, { userId })` from `@alphabros/enterprise/server`, for
+  your own server code (an admin console, or a billing webhook running as a dedicated staff
+  service user). It applies the same staff check to `userId` and throws an `APIError` otherwise.
+
+Every change is audited as `entitlement.changed` (new and previous feature set, the staff user as
+actor) in the target organization's hash chain, in the same transaction as the write.
+
+The table is **opt-in**: it comes from an optional migration that the default migration set and
+`verify` do not include, so a deployment that never sets `entitlements.store` is unaffected.
+
+```bash
+ab-enterprise migrate --out ./drizzle/migrations --entitlements   # or: --from 0004
+ab-enterprise verify --entitlements
+```
+
+```ts
+await applyMigration(client, { entitlements: true }); // SQLite / libSQL
+await applyMigrationPg(client, { entitlements: true }); // Postgres (sql/pg/0002_org_entitlement.sql)
+await verifyDatabase(client, { entitlements: true });
+```
+
+For Drizzle, spread `orgEntitlementSchema` from `@alphabros/enterprise/schema` (or
+`/schema/pg`) into your schema next to `enterpriseSchema`. A `resolveEntitlements` callback given
+together with `entitlements: { store: "table" }` still takes precedence: the table is then
+written but not read for gating. Upgrade notes: [`docs/upgrading-to-1.2.md`](./docs/upgrading-to-1.2.md).
+
+### Staff-only organization creation and metadata
+
+An organization's owner can write `organization.metadata` through `/organization/update` (and at
+creation), so any plan, quota or flag your product keeps there is owner-controlled. Two opt-in
+options lock the writes down; the defaults are unchanged.
+
+```ts
+enterprisePreset({
+  // ...
+  organization: {
+    creation: "staff-only", // "self-service" (default) | "staff-only" | (ctx) => boolean
+    metadata: "staff-only", // "open" (default) | "staff-only"
+  },
+});
+```
+
+- `creation: "staff-only"` refuses `/organization/create` with `403 ORG_CREATION_STAFF_ONLY` for
+  everyone but platform staff. A function `({ user, body }) => boolean` decides for callers who are
+  not staff (`true` allows).
+- `metadata: "staff-only"` refuses any `/organization/create` or `/organization/update` request
+  that carries a `metadata` field with `403 ORG_METADATA_STAFF_ONLY`, unless the caller is staff.
+- Staff is the same test as `setEntitlements` (`entitlements.staffRoles`, default `["admin"]`, read
+  from the database, **never an impersonation session**). A server-only call (`auth.api.*` with
+  neither a `Request` nor headers) is never refused.
+- Each refusal is appended to the hash-chained audit as `organization.write_refused` (code and path
+  in the metadata), in the chain of the organization the request names when the caller belongs to
+  it (update), or of each organization the caller belongs to (creation). A caller who belongs to no
+  organization (a first creation under `staff-only`) has no chain: that refusal is only logged at
+  `warn`. A `creation` function that throws counts as a refusal.
+- The lock is a separate plugin (`enterprise-org-lock`, mounted by the preset only when an option
+  is set), so it also holds when your product replaces the preset's `organization()` with its own.
+  Hand-composed lists mount `orgWriteLock(opts)` from `@alphabros/enterprise/server` after
+  `enterpriseGate(opts)`.
+
+Details and the relation to upstream's `allowUserToCreateOrganization`:
+[`docs/security.md`](./docs/security.md#staff-only-organization-creation-and-metadata).
 
 ## Quick start — client
 
@@ -387,6 +517,12 @@ ab-enterprise migrate --out ./drizzle/migrations --from 0003
 # Upgrading from 0.1.x, where 0002 was never applied: 0002 and 0003.
 ab-enterprise migrate --out ./drizzle/migrations --from 0002
 
+# Opt-in 0004 (the staff-managed `org_entitlement` table, for `entitlements: {
+# store: "table" }`) is written only on request — never by a plain run or by
+# --from 0003: add --entitlements, or use --from 0004 for just that file.
+ab-enterprise migrate --out ./drizzle/migrations --entitlements
+ab-enterprise migrate --out ./drizzle/migrations --from 0004
+
 # A plain run (no --from) is for a new install, or a folder whose 0002 this
 # command wrote. It refuses, writing nothing, a folder holding an
 # *enterprise*.sql file this command did not write, or this command's 0001
@@ -402,6 +538,8 @@ ab-enterprise migrate --out ./drizzle/migrations --from 0002
 ab-enterprise verify --url $TURSO_DATABASE_URL --token $TURSO_AUTH_TOKEN
 # Prefer TURSO_DATABASE_URL / TURSO_AUTH_TOKEN env vars over --url/--token —
 # CLI flags are visible in `ps` output and shell history.
+# A deployment with `entitlements: { store: "table" }` adds --entitlements, which
+# also expects `org_entitlement`; without it that table is not checked.
 
 # Recompute an org's audit_event hash chain and confirm nothing was tampered
 # with (within the retention window — see docs/security.md). A keyed chain
@@ -411,6 +549,21 @@ ab-enterprise verify --url $TURSO_DATABASE_URL --token $TURSO_AUTH_TOKEN
 ab-enterprise audit-verify --org org_123 --url $TURSO_DATABASE_URL
 AB_AUDIT_CHAIN_KEY=... ab-enterprise audit-verify --org org_123 --expect-head "$(cat head.json)"
 ```
+
+Postgres: every command takes `--dialect pg`, and a `postgres://` / `postgresql://` URL is
+detected on its own (so `--dialect` is optional there). Credentials stay out of argv: the URL is
+read from `AB_DATABASE_URL`, `DATABASE_URL` or `TURSO_DATABASE_URL`; `--url` is accepted only for a
+URL without a password, and `--dialect pg` with no URL at all uses the `PG*` environment
+variables. The driver is `pg` (an optional peer — install it next to this package).
+
+```sh
+ab-enterprise migrate --dialect pg --out ./drizzle/migrations    # sql/pg/0001 (+ 0002 with --entitlements)
+AB_DATABASE_URL=postgres://... ab-enterprise verify              # also checks metadata is json + unique indexes
+AB_DATABASE_URL=postgres://... AB_AUDIT_CHAIN_KEY=... ab-enterprise audit-verify --org org_123
+```
+
+`audit-verify` reads the `json` metadata column as an object and `timestamptz` `created_at` as a
+date, so keyed (`AB_AUDIT_CHAIN_KEY`) and compacted chains verify the same as on SQLite.
 
 Run `ab-enterprise verify` after every deploy (fleet migrations have historically not reached
 Turso even when the migration file itself was committed).
@@ -431,6 +584,8 @@ start, SAML SP metadata, SCIM ServiceProviderConfig and Groups, and an audit wri
 - [`docs/security.md`](./docs/security.md) — patched SCIM migration, secrets/token storage,
   policy enforcement, API keys, audit coverage and chain limits, retention/GDPR, and this
   package's trusted-publishing setup.
+- [`docs/upgrading-to-1.2.md`](./docs/upgrading-to-1.2.md) — upgrading from 1.1.x: optional
+  Postgres support, the staff-managed entitlement table and staff-only organization creation.
 - [`docs/upgrading-to-1.1.md`](./docs/upgrading-to-1.1.md) — upgrading from 1.0.x: pre-upgrade
   checks, steps, behaviour changes, new options and error codes.
 - [`docs/releases/1.1.0.md`](./docs/releases/1.1.0.md) — 1.1.0 release notes.

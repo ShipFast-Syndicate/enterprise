@@ -1,4 +1,4 @@
-// Enterprise-owned SQLite models. Native SCIM models come from Better Auth 1.7.5.
+// Enterprise-owned SQLite models. Native SCIM models come from Better Auth (1.7.19 in the test suite).
 // SQL migrations preserve legacy tables and add the projection ownership marker.
 
 import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqlite-core";
@@ -49,8 +49,22 @@ export const enterpriseScimMember = sqliteTable("enterprise_scim_member", {
   lastRole: text("last_role").notNull(),
 });
 
-export const enterpriseSchema = { orgPolicy, auditEvent, enterpriseScimMember };
+// Optional (`entitlements: { store: "table" }`; migration `0004`). Not part of
+// `enterpriseSchema`, so a product that did not opt in does not get a table
+// in its drizzle schema either — spread `orgEntitlementSchema` in when it does.
+export const orgEntitlement = sqliteTable("org_entitlement", {
+  id: text("id").primaryKey(),
+  orgId: text("org_id").notNull().unique(),
+  features: text("features").notNull().default("[]"),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  updatedBy: text("updated_by"),
+});
 
-export { EXPECTED_TABLES } from "./expected";
-export { verifyDatabase, type MissingItem, type VerifyResult } from "./verify";
-export { applyMigration } from "./migrate";
+export const enterpriseSchema = { orgPolicy, auditEvent, enterpriseScimMember };
+export const orgEntitlementSchema = { orgEntitlement };
+
+export { EXPECTED_TABLES, EXPECTED_ENTITLEMENT_TABLES } from "./expected";
+export { verifyDatabase, type MissingItem, type VerifyOptions, type VerifyResult } from "./verify";
+export { applyMigration, type ApplyMigrationOptions } from "./migrate";
+export { applyMigrationPg, type ApplyMigrationPgOptions } from "./migrate-pg";
+export type { PgClient } from "./pg-client";

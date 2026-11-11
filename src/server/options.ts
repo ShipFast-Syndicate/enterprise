@@ -66,6 +66,9 @@ export function takeDomainBindingOffUnlistedWarning(opts: EnterpriseOptions): st
  *   silent downgrade of that protection.
  * - `scimCredentialHashSecret` — `>= 32` characters and not the same value as
  *   `secretsKey`.
+ * - `resolveEntitlements` / `entitlements` — at least one of them (a function,
+ *   or `{ store: "table" }` with optional non-empty `staffRoles`), so the gate
+ *   never has nowhere to resolve entitlements from.
  * - `audit.retentionDays` — at least 1. `0` or a negative value puts the
  *   retention cutoff at or after "now", so the very next
  *   `GET /enterprise/audit/list` would compact the org's entire chain down to
@@ -76,12 +79,15 @@ export function takeDomainBindingOffUnlistedWarning(opts: EnterpriseOptions): st
  * - `audit.chainKey` — `>= 32` characters and independent of the other two
  *   secrets: reusing `secretsKey` would let whoever recovers one key forge
  *   the other's artefacts too.
+ * - `database.dialect` — `"sqlite"` or `"pg"`.
  * - `sso.domainBinding` — one of the two literals; `"off"` re-opens the
  *   cross-tenant squatting class GHSA-8p84-pc7q-69jr describes, so it is
  *   accepted but warned about, naming the advisory.
  * - `sso.allowedIssuers` — an array of strings/RegExps or a function.
  * - `organization.*` — a boolean (or, for `allowUserToCreateOrganization`, a
- *   function), never a truthy string that would silently mean "on".
+ *   function), never a truthy string that would silently mean "on";
+ *   `organization.creation` — `"self-service"`, `"staff-only"` or a function;
+ *   `organization.metadata` — `"open"` or `"staff-only"`.
  * - `policy.signInMethods` — every key is a request path (`/…`, optionally
  *   ending in `/*`) and every value a `[a-z_][a-z0-9_]*` method name.
  * - `policy.twoFactor.satisfiedBy` — method names; `enrollmentPaths` — paths.
@@ -100,6 +106,33 @@ export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
     throw new Error(
       "scimCredentialHashSecret must be an independent secret of at least 32 characters",
     );
+  }
+
+  const resolveEntitlements = opts.resolveEntitlements;
+  if (resolveEntitlements !== undefined && typeof resolveEntitlements !== "function") {
+    fail(`"resolveEntitlements" must be a function.`);
+  }
+  const entitlements = opts.entitlements;
+  if (entitlements !== undefined) {
+    if (
+      typeof entitlements !== "object" ||
+      entitlements === null ||
+      entitlements.store !== "table"
+    ) {
+      fail(`"entitlements.store" must be "table" (got ${JSON.stringify(entitlements?.store)}).`);
+    }
+    const staffRoles = entitlements.staffRoles;
+    if (
+      staffRoles !== undefined &&
+      (!Array.isArray(staffRoles) ||
+        staffRoles.length === 0 ||
+        !staffRoles.every((role) => typeof role === "string" && /^[^,\s]+$/.test(role)))
+    ) {
+      fail(`"entitlements.staffRoles" must be a non-empty array of role names without commas.`);
+    }
+  }
+  if (resolveEntitlements === undefined && entitlements === undefined) {
+    fail(`either "resolveEntitlements" or "entitlements: { store: 'table' }" is required.`);
   }
 
   const retentionDays = opts.audit?.retentionDays;
@@ -122,6 +155,11 @@ export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
     if (chainKey === opts.secretsKey || chainKey === opts.scimCredentialHashSecret) {
       fail(`"audit.chainKey" must be independent of "secretsKey" and "scimCredentialHashSecret".`);
     }
+  }
+
+  const dialect = opts.database?.dialect;
+  if (dialect !== undefined && dialect !== "sqlite" && dialect !== "pg") {
+    fail(`"database.dialect" must be "sqlite" or "pg" (got ${JSON.stringify(dialect)}).`);
   }
 
   const domainBinding = opts.sso?.domainBinding;
@@ -191,6 +229,27 @@ export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
     typeof allowUserToCreateOrganization !== "function"
   ) {
     fail(`"organization.allowUserToCreateOrganization" must be a boolean or a function.`);
+  }
+  const creation = opts.organization?.creation;
+  if (
+    creation !== undefined &&
+    creation !== "self-service" &&
+    creation !== "staff-only" &&
+    typeof creation !== "function"
+  ) {
+    fail(
+      `"organization.creation" must be "self-service", "staff-only" or a function (got ${JSON.stringify(creation)}).`,
+    );
+  }
+  const organizationMetadata = opts.organization?.metadata;
+  if (
+    organizationMetadata !== undefined &&
+    organizationMetadata !== "open" &&
+    organizationMetadata !== "staff-only"
+  ) {
+    fail(
+      `"organization.metadata" must be "open" or "staff-only" (got ${JSON.stringify(organizationMetadata)}).`,
+    );
   }
 
   const signInMethods = opts.policy?.signInMethods;

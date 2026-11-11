@@ -13,6 +13,7 @@ import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/a
 import type { BetterAuthPlugin, GenericEndpointContext } from "better-auth";
 import type { EnterpriseOptions, Feature } from "./types";
 import { requireFeature } from "./entitlements";
+import { usesEntitlementTable } from "./entitlement-store";
 import { getMemberRoles } from "./policy/store";
 import { withSecretEncryption } from "./secrets";
 import { buildSsoDomainGuardHook } from "./sso-domain";
@@ -121,10 +122,10 @@ export const GATE_ORG_SOURCES: Record<string, GateOrgSource> = {
     refs: [`${SSO}:3379`, `${SSO}:3528`],
   },
   // `checkProviderAccess(ctx, body.providerId)` / `ctx.body.providerId`.
-  "/sso/request-domain-verification": { kind: "provider", refs: [`${SSO}:2563`] },
-  "/sso/verify-domain": { kind: "provider", refs: [`${SSO}:2601`] },
-  "/sso/update-provider": { kind: "provider", refs: [`${SSO}:2387`] },
-  "/sso/delete-provider": { kind: "provider", refs: [`${SSO}:2490`] },
+  "/sso/request-domain-verification": { kind: "provider", refs: [`${SSO}:2562`] },
+  "/sso/verify-domain": { kind: "provider", refs: [`${SSO}:2600`] },
+  "/sso/update-provider": { kind: "provider", refs: [`${SSO}:2386`] },
+  "/sso/delete-provider": { kind: "provider", refs: [`${SSO}:2489`] },
   // `ctx.body.organizationId || session?.session.activeOrganizationId`.
   "/organization/create-team": {
     kind: "request",
@@ -141,26 +142,26 @@ export const GATE_ORG_SOURCES: Record<string, GateOrgSource> = {
     kind: "request",
     fields: [body("organizationId")],
     activeOrganization: true,
-    refs: ["node_modules/@better-auth/api-key/dist/index.mjs:739"],
+    refs: ["node_modules/@better-auth/api-key/dist/index.mjs:741"],
   },
   // This package's own endpoints: exactly the field each handler reads.
   "/enterprise/audit/list": {
     kind: "request",
     fields: [query("orgId")],
     activeOrganization: false,
-    refs: ["src/server/audit/plugin.ts:1303"],
+    refs: ["src/server/audit/plugin.ts:1304"],
   },
   "/enterprise/audit/export": {
     kind: "request",
     fields: [query("orgId")],
     activeOrganization: false,
-    refs: ["src/server/audit/plugin.ts:1333"],
+    refs: ["src/server/audit/plugin.ts:1334"],
   },
   "/enterprise/audit/compact": {
     kind: "request",
     fields: [body("orgId")],
     activeOrganization: false,
-    refs: ["src/server/audit/plugin.ts:1478"],
+    refs: ["src/server/audit/plugin.ts:1479"],
   },
   "/enterprise/policy/set": {
     kind: "request",
@@ -255,6 +256,27 @@ export function enterpriseGate(opts: EnterpriseOptions) {
     // `ctx.context.options.plugins` so it isn't tied to this specific
     // closure.
     options: opts,
+    // The staff-managed entitlement table (`./entitlement-store.ts`), declared
+    // only when the product opted into `entitlements: { store: "table" }` —
+    // so a deployment that did not has no new model, and `verifyDatabase`
+    // expects no new table. Declared here (not in a plugin of its own) so a
+    // hand-composed plugin list that mounts the gate gets the model too. No
+    // route of the layer or of upstream writes it except the staff endpoint.
+    ...(usesEntitlementTable(opts)
+      ? {
+          schema: {
+            orgEntitlement: {
+              modelName: "org_entitlement",
+              fields: {
+                orgId: { type: "string", required: true, unique: true, fieldName: "org_id" },
+                features: { type: "string[]", required: true, fieldName: "features" },
+                updatedAt: { type: "date", required: true, fieldName: "updated_at" },
+                updatedBy: { type: "string", required: false, fieldName: "updated_by" },
+              },
+            },
+          },
+        }
+      : {}),
     // Encryption at rest for IdP secrets (C-04). better-auth merges a
     // plugin's returned `context` into the live `AuthContext` and builds
     // `internalAdapter` from `context.adapter` *after* every plugin's

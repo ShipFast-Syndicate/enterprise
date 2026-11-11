@@ -34,7 +34,9 @@
 
 import type { AuthContext } from "better-auth";
 import type { Where } from "@better-auth/core/db/adapter";
+import { getCurrentAdapter, runWithTransaction } from "@better-auth/core/context";
 import { auditRowBounds } from "./bounds";
+import { lockOrganizationInTransaction, pgAuditLockInstalled } from "./pg-lock";
 
 type AuditAdapter = AuthContext["adapter"];
 
@@ -321,12 +323,12 @@ export async function verifyChainPage(
 
 // Driver error codes that mean "a row with this unique key already exists"
 // (L-03): libsql/sqlite (`SQLITE_CONSTRAINT_UNIQUE`/`…_PRIMARYKEY`),
-// postgres (`23505`), mysql (`ER_DUP_ENTRY`/1062). Checked *in addition to*
-// — not instead of — the message heuristic: adapters differ in whether they
-// preserve the driver's code at all (the drizzle/libsql path this package is
-// tested on frequently rewraps the error), so dropping the regex would turn
-// a real race into a hard failure on those. The code check is what makes the
-// common cases exact rather than wording-dependent.
+// postgres (SQLSTATE `23505`, `unique_violation`), mysql (`ER_DUP_ENTRY`/1062).
+// Checked *in addition to* — not instead of — the message heuristic: adapters
+// differ in whether they preserve the driver's code at all (the drizzle/libsql
+// path this package is tested on frequently rewraps the error), so dropping
+// the regex would turn a real race into a hard failure on those. The code
+// check is what makes the common cases exact rather than wording-dependent.
 const UNIQUE_VIOLATION_CODES = new Set([
   "SQLITE_CONSTRAINT_UNIQUE",
   "SQLITE_CONSTRAINT_PRIMARYKEY",
@@ -336,13 +338,30 @@ const UNIQUE_VIOLATION_CODES = new Set([
   "1062",
 ]);
 
+// The error and its `cause` chain, outermost first. A Postgres driver error
+// reaches `writeAudit` wrapped (drizzle's `DrizzleQueryError` puts the
+// driver's `DatabaseError` — the one carrying SQLSTATE `code` — in `cause`, and
+// its own message is "Failed query: …", never "unique"), so the code has to be
+// looked for down the chain, not on the top-level error only.
+function causeChain(err: unknown): unknown[] {
+  const chain: unknown[] = [];
+  let current: unknown = err;
+  while (current && typeof current === "object" && chain.length < 8 && !chain.includes(current)) {
+    chain.push(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return chain;
+}
+
 export function isUniqueViolation(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  if (
-    (typeof code === "string" || typeof code === "number") &&
-    UNIQUE_VIOLATION_CODES.has(String(code))
-  ) {
-    return true;
+  for (const link of causeChain(err)) {
+    const code = (link as { code?: unknown }).code;
+    if (
+      (typeof code === "string" || typeof code === "number") &&
+      UNIQUE_VIOLATION_CODES.has(String(code))
+    ) {
+      return true;
+    }
   }
   const message = err instanceof Error ? err.message : String(err);
   return /unique/i.test(message);
@@ -474,6 +493,14 @@ function nextSeqBaseOf(row: {
  */
 export interface ChainWriteOptions {
   chainKey?: string;
+  /**
+   * The deployment's `database.dialect`, for a caller whose context carries
+   * no plugin options (SCIM's `{ context: { adapter: trx } }`): without it the
+   * chain reads `"sqlite"` off the bare context, skips the Postgres advisory
+   * lock and, inside the caller's transaction, can hit the `(org_id, seq)`
+   * unique index — which aborts that transaction (`25P02`).
+   */
+  dialect?: "sqlite" | "pg";
   actor?: {
     actorType: AuditActorType;
     actorId: string | null;
@@ -503,6 +530,23 @@ export function auditChainKeyOf(context: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * The `database.dialect` the running auth instance is configured with
+ * (`"sqlite"` when none is), read from the enterprise plugins the same way
+ * `auditChainKeyOf` reads the key.
+ */
+export function auditDialectOf(context: unknown): "sqlite" | "pg" {
+  const plugins = (context as { options?: { plugins?: unknown } } | null | undefined)?.options
+    ?.plugins;
+  if (!Array.isArray(plugins)) return "sqlite";
+  for (const id of OPTION_CARRYING_PLUGIN_IDS) {
+    const plugin = plugins.find((p: unknown) => (p as { id?: unknown } | null)?.id === id) as
+      { options?: { database?: { dialect?: unknown } } } | undefined;
+    if (plugin?.options?.database?.dialect === "pg") return "pg";
+  }
+  return "sqlite";
+}
+
 /** The context shape the chain writers need: the adapter, and the options they read `chainKey` from. */
 export interface AuditWriteContext {
   context: Pick<AuthContext, "adapter"> & { options?: unknown };
@@ -510,6 +554,58 @@ export interface AuditWriteContext {
 
 function effectiveChainKey(ctx: AuditWriteContext, options: ChainWriteOptions): string | undefined {
   return options.chainKey ?? auditChainKeyOf(ctx.context);
+}
+
+function effectiveDialect(ctx: AuditWriteContext, options: ChainWriteOptions): "sqlite" | "pg" {
+  return options.dialect ?? auditDialectOf(ctx.context);
+}
+
+let warnedUnlockedPg = false;
+
+/**
+ * Runs `work` — a read of the organization's chain head plus the write that
+ * extends it — under the organization's Postgres advisory lock (see
+ * `./pg-lock.ts`), inside one transaction: the caller's when there is one,
+ * else one opened here. `work` receives the adapter that transaction uses.
+ * An adapter without a `transaction` method is itself a transaction adapter
+ * (SCIM's `trx`), so the caller's transaction is the one in force.
+ */
+async function withPgChainLock<T>(
+  adapter: AuditAdapter,
+  orgId: string,
+  work: (active: AuditAdapter) => Promise<T>,
+): Promise<T> {
+  const isTransactionAdapter =
+    typeof (adapter as { transaction?: unknown }).transaction !== "function";
+  const locked = async (): Promise<T> => {
+    if (!(await lockOrganizationInTransaction(orgId)) && !warnedUnlockedPg) {
+      warnedUnlockedPg = true;
+      console.warn(
+        '@alphabros/enterprise: "database.dialect" is "pg" but the audit lock could not run — wrap the drizzle database with withPgAuditLock(db) so audit writes inside a transaction cannot hit the (org_id, seq) unique index; relying on the retry only.',
+      );
+    }
+    // An explicitly passed transaction adapter (no `transaction` method) is
+    // the one the caller wants written through; only a root adapter follows
+    // the transaction `runWithTransaction` just opened.
+    return work(
+      isTransactionAdapter ? adapter : ((await getCurrentAdapter(adapter)) as AuditAdapter),
+    );
+  };
+  if (isTransactionAdapter) return locked();
+  return runWithTransaction(adapter, locked);
+}
+
+/**
+ * Serializes `task` per org. On Postgres with `withPgAuditLock` installed the
+ * advisory lock already does it — across processes — and the in-process mutex
+ * must NOT wrap it: a larger transaction keeps the advisory lock after its
+ * first audit write and then writes again, while a plain writer holding the
+ * mutex waits for that same advisory lock, so each would wait on the other
+ * (a deadlock Postgres cannot see). Without the wrapper the mutex stays, as
+ * the only in-process guard.
+ */
+function serializeOrg<T>(pg: boolean, orgId: string, task: () => Promise<T>): Promise<T> {
+  return pg && pgAuditLockInstalled() ? task() : withOrgLock(orgId, task);
 }
 
 async function insertNextRow(
@@ -570,11 +666,31 @@ async function insertNextRow(
 }
 
 /**
+ * How many times `writeAudit` will try to append one row before giving up on
+ * unique-index collisions. A collision means another process/instance took the
+ * `seq` this call computed; each round of losers re-reads the chain and at
+ * least one of them wins, so a handful of writers racing for one org all land
+ * within as many rounds as there are writers.
+ */
+const MAX_WRITE_ATTEMPTS = 16;
+
+/**
  * Appends one row to `input.orgId`'s chain: `seq` = max(seq)+1 for the org,
  * `prevHash` = the org's last row's hash (or `"GENESIS"` for the first
- * row). Serialized per org via `withOrgLock`; on a unique-index violation
+ * row). Serialized per org via `withOrgLock` (on Postgres with the lock
+ * installed, by the advisory lock alone — see `serializeOrg`); on a unique-index violation
  * (`audit_event_org_seq`, meaning another process/instance won the race for
- * this `seq`) retries once with a freshly recomputed `seq`, then rethrows.
+ * this `seq`) it recomputes `seq` from the chain as it now stands and tries
+ * again, up to `MAX_WRITE_ATTEMPTS`, then rethrows. Postgres reports the
+ * violation as SQLSTATE `23505` (see `isUniqueViolation`); a write inside an
+ * already-open transaction cannot be retried there — the failed statement
+ * aborted it — and rethrows whatever the aborted transaction answers.
+ *
+ * With `database: { dialect: "pg" }` the read of the head and the insert run
+ * under the organization's advisory lock (`withPgChainLock`), so the
+ * collision — and with it the aborted transaction — does not arise; the retry
+ * above stays as the safety net (and, when `writeAudit` opened the
+ * transaction itself, each attempt gets a fresh one).
  */
 export async function writeAudit(
   ctx: AuditWriteContext,
@@ -587,12 +703,15 @@ export async function writeAudit(
   // through the same backstop (`./bounds.ts`), so a value one of them did not
   // bound can never grow a chain.
   const row = { ...auditRowBounds(input), orgId: input.orgId };
-  return withOrgLock(row.orgId, async () => {
-    try {
-      return await insertNextRow(adapter, row, chainKey);
-    } catch (err) {
-      if (!isUniqueViolation(err)) throw err;
-      return await insertNextRow(adapter, row, chainKey);
+  const pg = effectiveDialect(ctx, options) === "pg";
+  const append = (active: AuditAdapter) => insertNextRow(active, row, chainKey);
+  return serializeOrg(pg, row.orgId, async () => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await (pg ? withPgChainLock(adapter, row.orgId, append) : append(adapter));
+      } catch (err) {
+        if (attempt >= MAX_WRITE_ATTEMPTS || !isUniqueViolation(err)) throw err;
+      }
     }
   });
 }
@@ -639,9 +758,13 @@ export async function compactChain(
   cutoff: Date,
   options: ChainWriteOptions = {},
 ): Promise<CompactionResult | null> {
-  const adapter = ctx.context.adapter as unknown as AuditAdapter;
+  const outer = ctx.context.adapter as unknown as AuditAdapter;
   const chainKey = effectiveChainKey(ctx, options);
-  return withOrgLock(orgId, async () => {
+  const pg = auditDialectOf(ctx.context) === "pg";
+  // On Postgres the whole compaction runs under the organization's audit lock
+  // (one transaction), so a writer on another instance cannot take a `seq`
+  // while the anchor is being placed.
+  const compact = async (adapter: AuditAdapter): Promise<CompactionResult | null> => {
     const expired = await adapter.findMany<{ seq: number; hash: string }>({
       model: "auditEvent",
       where: [
@@ -738,7 +861,10 @@ export async function compactChain(
       compactedCount,
       lastHash: through.hash,
     };
-  });
+  };
+  return serializeOrg(pg, orgId, () =>
+    pg ? withPgChainLock(outer, orgId, compact) : compact(outer),
+  );
 }
 
 /**

@@ -1,8 +1,28 @@
 // Alpha Bros enterprise layer — server entry point.
 
-export type { Feature, ResolveEntitlements, EnterpriseOptions } from "./types";
-export { FeatureNotEntitledError, requireFeature } from "./entitlements";
+export type {
+  Feature,
+  ResolveEntitlements,
+  EnterpriseOptions,
+  OrganizationCreationPredicate,
+} from "./types";
+export { FEATURES } from "./types";
+export { FeatureNotEntitledError, requireFeature, resolveEntitledFeatures } from "./entitlements";
+export {
+  ENTITLEMENT_CHANGED_ACTION,
+  ENTITLEMENT_SET_PATH,
+  isPlatformStaff,
+  setEntitlements,
+  type EntitlementActor,
+} from "./entitlement-store";
 export { enterpriseGate, GATED_PATHS } from "./gate";
+export {
+  ORG_CREATION_STAFF_ONLY,
+  ORG_LOCK_PLUGIN_ID,
+  ORG_METADATA_STAFF_ONLY,
+  ORG_WRITE_REFUSED_ACTION,
+  orgWriteLock,
+} from "./org-lock";
 export { enterprisePreset } from "./preset";
 export {
   API_KEY_ALLOWED_PATHS,
@@ -44,8 +64,10 @@ export {
   SIGN_IN_REFUSED_ACTION,
   type RefusalInput,
 } from "./audit/refusal";
+export { withPgAuditLock } from "./audit/pg-lock";
 export {
   auditChainKeyOf,
+  auditDialectOf,
   canonical,
   hashRow,
   isKeyedHash,

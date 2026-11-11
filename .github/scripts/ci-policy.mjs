@@ -6,6 +6,7 @@ class PolicyError extends Error {}
 export const requiredJobs = [
   "contracts",
   "node",
+  "postgres",
   "semgrep",
   "trivy",
   "gitleaks",

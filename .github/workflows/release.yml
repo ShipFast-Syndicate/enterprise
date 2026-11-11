@@ -261,5 +261,8 @@ jobs:
           else
             echo "@alphabros/enterprise@$VERSION is not published yet (latest: $LATEST); a real run would publish it." >> "$GITHUB_STEP_SUMMARY"
           fi
+      # develop's package.json trails the registry (semantic-release commits the
+      # bump on main only), so npm refuses to imply `latest`. A dry run never
+      # writes the tag.
       - name: Publish dry run
-        run: npm publish --dry-run --access public
+        run: npm publish --dry-run --access public --tag dry-run

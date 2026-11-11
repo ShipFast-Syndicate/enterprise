@@ -416,7 +416,7 @@ export async function revokeUserApiKeys(
           targetId: keyId,
           metadata: { ...actor.metadata, reason, userId },
         },
-        { chainKey: options.chainKey },
+        { chainKey: options.chainKey, dialect: options.dialect },
       );
     }
   }

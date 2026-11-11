@@ -12,18 +12,31 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { getAuthTables } from "better-auth/db";
 import { createClient, type Client } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
+import {
+  boolean as pgBoolean,
+  getTableConfig,
+  integer as pgInteger,
+  json as pgJson,
+  jsonb as pgJsonb,
+  pgTable,
+  text as pgText,
+  timestamp as pgTimestamp,
+} from "drizzle-orm/pg-core";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
-import { applyMigration, enterpriseSchema } from "../../src/schema";
+import { applyMigration, applyMigrationPg, enterpriseSchema } from "../../src/schema";
 import { enterprisePreset } from "../../src/server/preset";
 import { flushAuditWrites } from "../../src/server/audit/background";
+import { withPgAuditLock } from "../../src/server/audit/pg-lock";
 import type { EnterpriseOptions, Feature } from "../../src/server/types";
+import { isPg, realPostgresUrl } from "./dialect";
+import { openPgTestDatabase } from "./pg-db";
 
-const databases: { client: Client; directory: string }[] = [];
-afterEach(() => {
-  for (const { client, directory } of databases.splice(0)) {
-    client.close();
-    rmSync(directory, { recursive: true, force: true });
-  }
+// Everything a `makeAuth()` opened, closed after each test: the SQLite file
+// and its directory, or the Postgres database (a PGlite instance, or the
+// throwaway schema on the real server).
+const databases: (() => void | Promise<void>)[] = [];
+afterEach(async () => {
+  for (const close of databases.splice(0)) await close();
 });
 
 function sqliteColumn(name: string, type: string, notNull: boolean) {
@@ -49,7 +62,94 @@ export interface DynamicSchema {
   ddl: string[];
 }
 
+// Tables the package's own migration creates (`sql/pg/0001_enterprise.sql`):
+// on Postgres they are left out of the derived DDL so the migration under test
+// is what builds them, with its `json` audit metadata and native array/jsonb
+// policy columns. (On SQLite the derived DDL creates them first and the
+// migration's `IF NOT EXISTS` is a no-op — the baseline, left as it was.)
+const PG_MIGRATION_TABLES = new Set(["audit_event", "org_policy", "enterprise_scim_member"]);
+
+// How the Postgres columns the package's migration owns differ from the
+// generic mapping (better-auth calls both `json`).
+const PG_JSON_COLUMNS: Record<string, "json" | "jsonb"> = {
+  "audit_event.metadata": "json",
+  "org_policy.group_role_map": "jsonb",
+};
+
+function pgColumn(model: string, name: string, type: string, notNull: boolean) {
+  const base =
+    type === "number"
+      ? pgInteger(name)
+      : type === "boolean"
+        ? pgBoolean(name)
+        : type === "date"
+          ? pgTimestamp(name, { withTimezone: true })
+          : type === "json"
+            ? PG_JSON_COLUMNS[`${model}.${name}`] === "json"
+              ? pgJson(name)
+              : pgJsonb(name)
+            : type === "string[]"
+              ? pgText(name).array()
+              : type === "number[]"
+                ? pgInteger(name).array()
+                : pgText(name);
+  return notNull ? base.notNull() : base;
+}
+
+function pgColumnType(type: string): string {
+  switch (type) {
+    case "number":
+      return "integer";
+    case "boolean":
+      return "boolean";
+    case "date":
+      return "timestamptz";
+    case "json":
+      return "jsonb";
+    case "string[]":
+      return "text[]";
+    case "number[]":
+      return "integer[]";
+    default:
+      return "text";
+  }
+}
+
+// The Postgres twin of `buildSqliteSchema`: one `pgTable` per model, columns
+// keyed by their physical name (what the drizzle adapter's field resolution
+// looks up), plus the DDL for every model the package migration does not own.
+function buildPostgresSchema(authOptions: BetterAuthOptions): DynamicSchema {
+  const tables = getAuthTables(authOptions);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const drizzleSchema: Record<string, any> = {};
+  const ddl: string[] = [];
+  for (const table of Object.values(tables)) {
+    const columns: Record<string, unknown> = { id: pgText("id").primaryKey() };
+    const columnDdl = [`"id" text PRIMARY KEY NOT NULL`];
+    for (const [key, field] of Object.entries(table.fields)) {
+      const name = field.fieldName ?? key;
+      const notNull = field.required !== false;
+      const type = field.type as string;
+      columns[name] = pgColumn(table.modelName, name, type, notNull);
+      columnDdl.push(
+        `"${name}" ${pgColumnType(type)}${notNull ? " NOT NULL" : ""}${field.unique ? " UNIQUE" : ""}`,
+      );
+    }
+    drizzleSchema[table.modelName] = pgTable(table.modelName, columns as never);
+    if (!PG_MIGRATION_TABLES.has(table.modelName)) {
+      ddl.push(
+        `CREATE TABLE IF NOT EXISTS "${table.modelName}" (\n  ${columnDdl.join(",\n  ")}\n)`,
+      );
+    }
+  }
+  return { drizzleSchema, ddl };
+}
+
 function buildDynamicSchema(authOptions: BetterAuthOptions): DynamicSchema {
+  return isPg ? buildPostgresSchema(authOptions) : buildSqliteSchema(authOptions);
+}
+
+function buildSqliteSchema(authOptions: BetterAuthOptions): DynamicSchema {
   const tables = getAuthTables(authOptions);
   // Each `sqliteTable(...)` call below returns a distinctly-shaped type (its
   // own column set), so the map that collects them across every model can't
@@ -196,6 +296,9 @@ export async function makeAuth(
     // `enableSessionForAPIKeys` recipe. Appending a second `apiKey()` via
     // `plugins` would register every `/api-key/*` endpoint twice.
     apiKeyPlugin?: BetterAuthPlugin;
+    // Replaces the preset's upstream `organization()` entry in place — what a
+    // product that mounts its own does (`test/security/org-lock.test.ts`).
+    organizationPlugin?: BetterAuthPlugin;
     // Extra `rateLimit.customRules` merged over `TEST_RATE_LIMIT`'s — for a
     // file that drives one plugin-rate-limited path (upstream `twoFactor()`
     // caps `/two-factor/*` at 3 per 10 s per IP, and the limiter's store is
@@ -222,6 +325,7 @@ export async function makeAuth(
   ]);
   const {
     apiKeyPlugin,
+    organizationPlugin,
     plugins: extraPlugins,
     trustedOrigins,
     rateLimitCustomRules,
@@ -233,10 +337,17 @@ export async function makeAuth(
     secretsKey: "s".repeat(32),
     scimCredentialHashSecret: "catalog-test-key-".repeat(3),
     resolveEntitlements: async () => entitled,
+    // Postgres: the audit chain takes its per-organization advisory lock
+    // (the database is wrapped with `withPgAuditLock` below).
+    ...(isPg ? { database: { dialect: "pg" as const } } : {}),
     ...enterpriseOverrides,
   };
   const presetPlugins = enterprisePreset(opts).map((plugin) =>
-    apiKeyPlugin && plugin.id === "api-key" ? apiKeyPlugin : plugin,
+    apiKeyPlugin && plugin.id === "api-key"
+      ? apiKeyPlugin
+      : organizationPlugin && plugin.id === "organization"
+        ? organizationPlugin
+        : plugin,
   );
   const baseOptions: BetterAuthOptions = {
     secret: "x".repeat(32),
@@ -256,12 +367,57 @@ export async function makeAuth(
   const { drizzleSchema, ddl } = tables ? tables(derived) : derived;
   // Interactive libsql transactions use separate connections; file-backed SQLite
   // keeps the same database visible after commit. Each test gets its own file.
-  const directory = mkdtempSync(join(tmpdir(), "enterprise-auth-"));
-  const client = createClient({ url: `file:${join(directory, "auth.db")}` });
-  databases.push({ client, directory });
-  const db = drizzle(client, { schema: { ...enterpriseSchema, ...drizzleSchema } });
+  // Postgres (`TEST_DIALECT=pg`): a fresh PGlite instance, or a fresh schema on
+  // the server `TEST_DATABASE_URL` names.
+  const pgDatabase = isPg ? await openPgTestDatabase(realPostgresUrl) : undefined;
+  let client: Client;
+  let db: ReturnType<typeof drizzle>;
+  if (pgDatabase) {
+    databases.push(() => pgDatabase.close());
+    // What the Postgres test client needs of the schema: the identifiers it
+    // must quote (mixed-case names — Postgres folds the rest to lower case —
+    // and the reserved `user`), and the columns whose bound values differ
+    // from SQLite's (see ./pg-db.ts). A name typed differently in two tables
+    // is left out rather than guessed.
+    const identifiers = new Set(["user"]);
+    const kinds = new Map<string, "date" | "boolean" | "array" | null>();
+    for (const table of Object.values(drizzleSchema)) {
+      const config = getTableConfig(table);
+      if (/[A-Z]/.test(config.name)) identifiers.add(config.name);
+      for (const column of config.columns) {
+        if (/[A-Z]/.test(column.name)) identifiers.add(column.name);
+        const sqlType = column.getSQLType();
+        const kind = sqlType.startsWith("timestamp")
+          ? "date"
+          : sqlType === "boolean"
+            ? "boolean"
+            : sqlType.endsWith("[]")
+              ? "array"
+              : null;
+        const seen = kinds.get(column.name);
+        kinds.set(column.name, seen === undefined || seen === kind ? kind : null);
+      }
+    }
+    // Typed as the libsql client the suites are written against: the Postgres
+    // twin answers `execute`/`batch` with the same `{ rows, rowsAffected }`.
+    client = pgDatabase.sqlClient({
+      identifiers,
+      kinds: [...kinds].filter((entry): entry is [string, "date" | "boolean" | "array"] =>
+        Boolean(entry[1]),
+      ),
+    }) as unknown as Client;
+    db = withPgAuditLock(pgDatabase.drizzle(drizzleSchema) as object) as unknown as typeof db;
+  } else {
+    const directory = mkdtempSync(join(tmpdir(), "enterprise-auth-"));
+    client = createClient({ url: `file:${join(directory, "auth.db")}` });
+    databases.push(() => {
+      client.close();
+      rmSync(directory, { recursive: true, force: true });
+    });
+    db = drizzle(client, { schema: { ...enterpriseSchema, ...drizzleSchema } });
+  }
   const auth = betterAuth({
-    database: drizzleAdapter(db, { provider: "sqlite", transaction: true }),
+    database: drizzleAdapter(db, { provider: isPg ? "pg" : "sqlite", transaction: true }),
     ...baseOptions,
   });
   // Audit rows about an address the caller chose (failed/refused/2FA-pending
@@ -277,10 +433,19 @@ export async function makeAuth(
     await flushAuditWrites();
     return response;
   };
-  await applyMigrations(ddl, client);
-  // Real migration (ruling (a)): creates org_policy/audit_event/scim_group
-  // and adds the two studio_ref columns, now that user/organization exist.
-  await applyMigration(client);
+  const entitlementsTable = opts.entitlements?.store === "table";
+  if (pgDatabase) {
+    for (const statement of ddl) await pgDatabase.query(statement);
+    // The real Postgres migration: org_policy/audit_event/enterprise_scim_member
+    // and the studio_ref columns, now that user/organization exist (+ the opt-in
+    // org_entitlement table for the staff-managed store).
+    await applyMigrationPg(pgDatabase, { entitlements: entitlementsTable });
+  } else {
+    await applyMigrations(ddl, client);
+    // Real migration (ruling (a)): creates org_policy/audit_event/scim_group
+    // and adds the two studio_ref columns, now that user/organization exist.
+    await applyMigration(client, { entitlements: entitlementsTable });
+  }
 
   const withBody =
     (method: string) =>
@@ -351,7 +516,7 @@ export async function makeAuth(
       ),
   };
 
-  return { auth, db, client, api, entitled, rawHandler };
+  return { auth, db, client, api, entitled, rawHandler, pg: pgDatabase };
 }
 
 export type TestAuth = Awaited<ReturnType<typeof makeAuth>>;
