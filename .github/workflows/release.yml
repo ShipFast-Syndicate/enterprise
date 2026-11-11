@@ -200,7 +200,7 @@ jobs:
     needs: publish
     if: needs.publish.outputs.published == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
@@ -216,11 +216,21 @@ jobs:
           VERSION_RE: ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$
         run: |
           [[ "$VERSION" =~ $VERSION_RE ]] || { echo "refusing suspicious version: $VERSION"; exit 1; }
-          for attempt in 1 2 3 4 5 6; do
-            npm view "@alphabros/enterprise@$VERSION" version >/dev/null 2>&1 && break
-            echo "waiting for @alphabros/enterprise@$VERSION on the registry (attempt $attempt)"
+          # npm can take several minutes after `npm publish` to list a new
+          # version ("being processed"); 30 polls x 30 s waits up to 15 minutes.
+          listed=false
+          for attempt in $(seq 1 30); do
+            if npm view "@alphabros/enterprise@$VERSION" version >/dev/null 2>&1; then
+              listed=true
+              break
+            fi
+            echo "waiting for @alphabros/enterprise@$VERSION on the registry (attempt $attempt of 30)"
             sleep 30
           done
+          if [ "$listed" != "true" ]; then
+            echo "@alphabros/enterprise@$VERSION not listed on npm after 15 minutes"
+            exit 1
+          fi
           .github/scripts/consumer-install.sh "@alphabros/enterprise@$VERSION"
 
   # Manual rehearsal of the publish job. Read-only token, no OIDC, no `npm`
