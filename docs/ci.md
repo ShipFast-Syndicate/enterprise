@@ -73,7 +73,9 @@ locally with the command in the workflow to inspect findings privately.
 `release.yml` runs semantic-release locally on pushes to `main`, then the
 `publish` job (OIDC trusted publishing, `npm` environment) and a
 `post-release-smoke` job that installs the just-published version from the
-registry with `consumer-install.sh`. Dispatching the workflow manually runs only
+registry with `consumer-install.sh`. The smoke polls `npm view` for up to 15
+minutes first, because npm can take several minutes to list a new version, and
+fails with its own "not listed on npm" line if the version never appears. Dispatching the workflow manually runs only
 `publish-dry-run`: build, version check against the registry and
 `npm publish --dry-run`, with a read-only token, no OIDC and no `npm`
 environment, so a rehearsal can never publish. The main-PR release-readiness
