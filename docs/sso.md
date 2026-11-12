@@ -16,7 +16,9 @@ machine (`WizardStep` in `src/portal/ab-sso-wizard.ts`):
    `GET /enterprise/sso/providers`'s `verificationRecord` field, a "Check
    DNS" button that calls upstream `POST /sso/verify-domain` directly (there
    is no `/enterprise/*` wrapper for this one), and auto-polls it every
-   `pollIntervalMs` up to `maxPollMs`.
+   `pollIntervalMs` up to `maxPollMs`. With `domainVerificationMode: "operator"`
+   this step cannot complete from the wizard; see
+   [SSO on Cloudflare Workers](#sso-on-cloudflare-workers).
 4. **`test-login`** — opens `POST /enterprise/sso/test-login/start`'s
    returned `url` (via the overridable `openWindow`), then detects
    completion either via a `storage` event keyed `ab_sso_test` (written by
@@ -295,26 +297,94 @@ IdP-initiated SAML (a response with no prior `AuthnRequest`) is accepted —
 explicitly (matching upstream's own default, made explicit so the intent is
 visible in this repo rather than relying on a default that could change).
 
-## DNS verification on Cloudflare Workers
+## SSO on Cloudflare Workers
 
-`POST /sso/verify-domain` uses `node:dns/promises.resolveTxt`. Cloudflare
-Workers supports `resolveTxt` when `nodejs_compat` is enabled; see the
+Three things differ from a Node deployment, and the first one decides whether
+SSO sign-in works at all.
+
+**Native transactions.** The preset's `resolveUser` (SCIM pairing in 1.2, and
+the 1.3 options below) runs inside the sign-in transaction, and upstream
+refuses to run it on an adapter without native transactions
+(`SSO_USER_RESOLUTION_REQUIRES_NATIVE_TRANSACTIONS`). On Workers that means a
+Postgres driver that opens real transactions over a connection or a socket
+(`node-postgres` or `postgres` through Hyperdrive, for example). An HTTP-only
+driver such as `neon-http` has no interactive transactions, and **every** SSO
+sign-in would fail with that error; better-auth's `memoryAdapter` fails the same
+way, which is why `test/workerd/preset.test.ts` boots the preset there but does
+not run a sign-in. Prove sign-in against a staging deployment on your real
+driver, not against this repository's CI.
+
+**DNS verification.** `POST /sso/verify-domain` uses
+`node:dns/promises.resolveTxt`. A probe in `test/workerd/preset.test.ts` (the
+real workerd runtime, `nodejs_compat`, compatibility date `2026-08-01`) records
+that the module imports, `resolveTxt` is a function, and a name that does not
+exist ends in an ordinary `ENOTFOUND`; see the
 [Cloudflare DNS compatibility documentation](https://developers.cloudflare.com/workers/runtime-apis/nodejs/dns/).
-Use a supported compatibility date and verify the real TXT challenge in the
-deployed runtime. The old v0.1 statement that Workers has no `node:dns` support
-is no longer accurate.
+So the standard flow is available there, and it is the one to keep when it
+works for you: a database flag set by a test fixture does not prove control of
+a customer's domain. Verify the real TXT challenge in your deployed runtime
+once. When it cannot run — a runtime without `node:dns`, a resolver you cannot
+reach — use **operator mode**:
 
-Keep the provider's normal domain-verification flow. A database flag set by a
-test fixture does not prove control of a customer's domain.
+```ts
+enterprisePreset({ ...options, sso: { domainVerificationMode: "operator" } });
+
+// after registering the provider, from your own server code (never an HTTP route):
+import { verifySsoDomainOperator } from "@alphabros/enterprise/server";
+await verifySsoDomainOperator(auth, {
+  providerId: "acme-google",
+  evidence: "gamesaccessibilityhub.com is our own domain; DNS checked in the registrar, OPS-123",
+  actor: "ops:alice",
+});
+```
+
+In operator mode `POST /sso/request-domain-verification` and
+`POST /sso/verify-domain` answer `403 SSO_DOMAIN_VERIFICATION_OPERATOR_ONLY`
+(one way to verify, never both), and the function sets `domainVerified` with the
+same write upstream makes. It throws unless the mode is on, refuses a provider
+that does not exist, one already verified, one with no organization, and a
+domain another organization has verified (`409 SSO_DOMAIN_TAKEN`, the rule of
+"Domain ownership and uniqueness"), and writes one `sso.domain_verified` row in
+the provider's organization chain with `metadata` `{ method: "operator", actor,
+evidence }` (`evidence`: 1–500 characters; `actor`: 1–200). It is an
+**assertion by the operator, not a proof** — nothing checks DNS — so keep it
+server-only, and keep the evidence honest: the row is what a later reader has.
+A DNS-over-HTTPS check is not part of 1.3.
+
+**`<ab-sso-wizard>` in operator mode.** The wizard's `verify-domain` step cannot
+complete there. A freshly registered provider is not `domainVerified`, so the
+wizard lands on that step, shows the DNS TXT record (which operator mode never
+checks) and polls `POST /sso/verify-domain` every `pollIntervalMs`; each poll is
+answered `403 SSO_DOMAIN_VERIFICATION_OPERATOR_ONLY`, which the wizard shows as
+an error until `maxPollMs` runs out. The wizard never calls
+`verifySsoDomainOperator` and cannot. The flow in operator mode is: the admin
+registers the provider in the wizard (steps 1–2), the operator calls
+`verifySsoDomainOperator` from server code, and the admin reloads the wizard.
+Its step is derived from the stored provider, so with `domainVerified` now true
+it opens on `test-login` and continues from there. Until a product has its own
+screen for that wait, tell the admin to ignore the TXT record and the error on
+that step.
+
+**PKCE and nonce.** Upstream sends PKCE (`S256`) and the signed `state`, and
+authenticates the client at the token endpoint, but it sends **no OIDC `nonce`**
+(and refuses `nonce` as an `additionalParams` key), so the ID token is not bound
+to the browser session by a nonce. The remaining binding is state, PKCE, client
+authentication and the `iss`/`aud`/`azp` checks. A test
+(`test/security/sso-existing-users-only.test.ts`) asserts the authorization URL
+carries no nonce so the gap stays documented; the fix belongs upstream.
+`sso.oidcClaims.requirePkce` makes the PKCE half a requirement.
 
 ## Just-in-time (JIT) provisioning
 
+By default (none of the 1.3 options in
+["Pre-provisioned users only"](#pre-provisioned-users-only) set),
 `enterprisePreset` enables `disableImplicitSignUp: false` and forwards
 `opts.provisionUser` to `sso()` verbatim. On a first SSO login from a
 verified domain, the user is created and auto-joins that domain's
 organization with the default role `member` in one step. A pending
 invitation takes precedence over domain-based auto-join (upstream's own
-behaviour, unchanged).
+behaviour, unchanged). This is the behaviour of 1.2 and it is what every
+deployment gets until it opts out of it.
 
 ### Domain binding (`sso.domainBinding`, default `"verified-domain"`)
 
@@ -383,6 +453,188 @@ upstream's code). A domain-bound SSO user is verified and claims the invited
 role at once; a password sign-up without a verification e-mail is not. Opt
 out with `organization.requireEmailVerificationOnInvitation: false` only when
 every sign-up path in the product verifies e-mail some other way.
+
+## Pre-provisioned users only
+
+For a deployment whose users exist before they sign in through SSO (an internal
+tool behind one company's identity provider), SSO should be a way to sign in as
+an existing account, never a way to create one or to join an organization. Five
+opt-in keys under `EnterpriseOptions.sso` do that. **Every key is off by
+default and a no-op when absent**: with none set, the `sso({...})` configuration
+the preset builds is the 1.2 one, and `resolveUser` is the same function
+reference as before (pinned by `test/server/preset.test.ts`).
+
+```ts
+enterprisePreset({
+  ...options,
+  sso: {
+    existingUsersOnly: true,
+    requireMembership: true, // the default with existingUsersOnly
+    organizationProvisioning: "off",
+    oidcClaims: { requireEmailVerified: true, requireHostedDomain: true, requirePkce: true },
+    domainVerificationMode: "operator",
+  },
+});
+```
+
+| Key                                  | What it does                                                                                                                                                                                  |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `existingUsersOnly`                  | An OIDC sign-in never creates a user: it links a user that already exists (found by the ID token's e-mail) or is refused. Implies `requireEmailVerified`. Sets `disableImplicitSignUp: true`. |
+| `requireMembership` (default `true`) | With `existingUsersOnly`: the user must already be a member of the provider's organization. Setting it without `existingUsersOnly` is a construction error.                                   |
+| `organizationProvisioning: "off"`    | Stops both of upstream's automatic org joins: the provider-bound `member` row, and the verified-domain join after a social `/callback/` sign-in. Default `"member"` is today's behaviour.     |
+| `oidcClaims.requireEmailVerified`    | `email_verified` must be the boolean `true` in the verified ID token (upstream also accepts the string `"true"`).                                                                             |
+| `oidcClaims.requireHostedDomain`     | The `hd` claim must match (see [the next section](#google-workspace-and-the-hd-claim)). `true`, or an array of lower-case hostnames as an explicit allow-list.                                |
+| `oidcClaims.requirePkce`             | Refuses a provider without PKCE at registration, at update, and at every sign-in.                                                                                                             |
+| `domainVerificationMode: "operator"` | Replaces the DNS check with `verifySsoDomainOperator` ([SSO on Cloudflare Workers](#sso-on-cloudflare-workers)).                                                                              |
+
+### How it is enforced
+
+One composed `resolveUser` (`src/server/sso-resolve.ts`) is the single
+enforcement point. Upstream runs it on **every** SSO sign-in — first logins and
+returning ones, inside the transaction that links the account and mints the
+session — and it is the only layer that sees `verifiedIdTokenClaims`, the claims
+of the signature-verified ID token. The claims are never read from the userinfo
+response or the profile. In order, an OIDC sign-in is checked for:
+
+1. the provider being persisted (`SSO_PROVIDER_UNRESOLVED` otherwise — a
+   `defaultSSO` entry has no row to judge, so strict mode refuses it);
+2. the ID-token e-mail equalling the e-mail upstream is about to sign in
+   (`SSO_EMAIL_CLAIM_MISMATCH`) — with a `userInfoEndpoint` upstream takes the
+   profile from the userinfo response, which the ID-token signature does not
+   cover; the claim name follows the provider's `mapping.email`;
+3. `email_verified` (`SSO_EMAIL_NOT_VERIFIED`), `hd` (`SSO_HOSTED_DOMAIN_MISMATCH`)
+   and PKCE (`SSO_PKCE_REQUIRED`) as configured;
+4. with `existingUsersOnly`: the provider being domain-verified for the e-mail's
+   domain (`SSO_DOMAIN_NOT_ALLOWED`);
+5. SCIM, exactly as in 1.2 — a SCIM-managed org still requires an active SCIM
+   user (`SCIM_PROVISIONING_REQUIRED`, `SCIM_USER_NOT_ACTIVE`); a SCIM link is
+   kept but still gets step 6;
+6. the user: it must exist (`SSO_USER_NOT_PROVISIONED`), not be banned
+   (`SSO_USER_BANNED`: `banned` and no `banExpires`, or one in the future; a
+   missing `banned` column counts as not banned), be a member of the provider's
+   organization when `requireMembership` is on (`SSO_NOT_MEMBER`), and have no
+   conflicting account: the same IdP subject linked to another user, or this
+   user already linked to a different subject through the same provider
+   (`SSO_ACCOUNT_CONFLICT`).
+
+Every refusal is a redirect with `?error=<code>`, no session, no row written, and
+an `auth.sign_in_refused` audit row naming the code and the provider. A database
+error becomes upstream's `SSO_USER_RESOLUTION_FAILED`, which also refuses. With
+`existingUsersOnly` on, the resolver never lets an OIDC sign-in continue. A SAML
+sign-in (when no `oidcClaims` option is on) is handed to the 1.2 resolver, which
+can let it continue; it still cannot create a user, because
+`disableImplicitSignUp` and the `user.create.before` backstop below refuse the
+creation.
+
+Two backstops sit beside it: a `user.create.before` hook that refuses any user
+created from an SSO callback (`SSO_SIGNUP_DISABLED`), because upstream computes
+`disableSignUp = disableImplicitSignUp && !requestSignUp` and `requestSignUp` is
+client-controlled; and the registration guards, which refuse a SAML provider
+while an `oidcClaims` option is on and `pkce: false` while `requirePkce` is on
+(`SSO_POLICY_UNSUPPORTED_PROTOCOL`, `SSO_PKCE_REQUIRED`).
+
+### Linking, and why account linking can stay off
+
+The resolver returns `{ action: "link", userId, profile: "preserve" }`.
+Upstream skips its `account.accountLinking.enabled === false` refusal when a
+user is selected by a resolver, so the product's global `accountLinking` stays
+`{ enabled: false }`: nothing but this resolver, after every check above, can
+link an SSO account. That also makes the resolver the only thing standing
+between an IdP assertion and somebody else's account, so a bug in it is an
+account-takeover path; the suite in `test/security/sso-existing-users-only.test.ts`
+and the unit tests in `test/server/sso-resolve.test.ts` pin every branch.
+
+The local `user.emailVerified` is neither required nor changed: the IdP is the
+e-mail authority, and `profile: "preserve"` leaves the user's name, image and
+e-mail alone. If you need the local flag too, that is a separate decision
+(`requireLocalEmailVerified` is not part of 1.3).
+
+SAML is **not** linked by this option. A SAML assertion for an existing, unlinked
+user still ends in upstream's "account not linked", and no SAML sign-in creates
+a user. With any `oidcClaims` option set, SAML is refused outright.
+
+Email reassignment (the IdP gives an address to a new person) ends in
+`SSO_ACCOUNT_CONFLICT` for the new subject; there is no unlink procedure in 1.3,
+so an admin resolves it by deleting the stale `account` row.
+
+### The wizard's test login is a real sign-in
+
+`<ab-sso-wizard>`'s `test-login` step starts a real SSO sign-in
+(`POST /enterprise/sso/test-login/start` hands off to `/sign-in/sso`), so it goes
+through the composed resolver like any other. `test-login/finish` passes only
+when the session that comes back belongs to the admin who started it. With
+`existingUsersOnly` the admin's own IdP identity must therefore already be
+provisioned **before** the test login: a `user` row for the IdP e-mail, a
+`member` row in the provider's organization (unless `requireMembership: false`),
+not banned, and no account conflict. Otherwise the test login is refused
+(`?error=SSO_USER_NOT_PROVISIONED`, `SSO_NOT_MEMBER`, …), creates nothing and is
+not recorded as passed, and enforcement, which requires a passed test login,
+cannot be switched on. Create the admin's user and membership first.
+(`test/security/sso-existing-users-only.test.ts` pins the refusal.)
+
+### Peer floor
+
+The resolver depends on upstream behaviour that was read in
+`@better-auth/sso` **1.7.19** only: `verifiedIdTokenClaims` on the resolver
+input, the `link` action with `profile: "preserve"`, the account-linking refusal
+being skipped for a resolver-selected user, and `organizationProvisioning.disabled`.
+That these exist at the `^1.7.10` peer floor is **not verified**. If a resolver
+call arrives without `verifiedIdTokenClaims`, the sign-in is refused
+`SSO_EMAIL_CLAIM_MISMATCH` rather than failing with a TypeError. Run 1.7.19 or
+newer before turning a 1.3 option on.
+
+### What a refusal tells the caller
+
+The error code reaches the browser in the redirect. `SSO_USER_NOT_PROVISIONED`
+therefore tells an IdP-authenticated person whether an account exists for their
+address. The audience is limited to people the IdP just authenticated, but it is
+an enumeration oracle for that audience; if that matters, put the same message
+on every code in your error page.
+
+## Google Workspace and the `hd` claim
+
+`oidcClaims.requireHostedDomain` reads the `hd` (hosted domain) claim Google puts
+in the ID token for Workspace accounts. With `true`, `hd` must be present, a
+string, and equal (lower-cased) to one of the provider's domains — the stored
+list is comma-separated and is split and trimmed — and the e-mail's domain must
+equal `hd` too. **There is no subdomain matching**, unlike the provider's own
+domain match: `eu.acme.test` does not satisfy `hd: acme.test`. An array of
+lower-case hostnames is an explicit allow-list instead; entries are hostnames,
+never regular expressions.
+
+It is Google-specific. `hd` is absent for personal Google accounts and for every
+non-Google IdP, and a Workspace alias domain does not match, so those sign-ins
+are refused with `SSO_HOSTED_DOMAIN_MISMATCH`. The claim is read from the
+verified ID token only; whether Google's userinfo response carries `hd` was not
+verified, which is why nothing else is consulted. A one-time warning at
+construction says as much.
+
+## Using a single-tenant Google Workspace IdP
+
+A product whose users are all on one Google Workspace domain, with accounts
+created ahead of time:
+
+1. **Preset options**, as in the example above, with `allowedIssuers` listing
+   Google's issuer and the origins of its authorization, token and JWKS
+   endpoints. `account.accountLinking` stays `{ enabled: false }` and
+   `emailAndPassword.disableSignUp` stays `true`.
+2. **Register the provider** from server code, with `domain` your Workspace
+   domain, `issuer` `https://accounts.google.com`, and `scopes`
+   `["openid", "email", "profile"]` — the default list adds `offline_access`,
+   and how Google answers it was not verified. Google can also present the issuer
+   without its scheme; upstream compares `iss` exactly, so confirm the string in
+   a real ID token before relying on it.
+3. **Verify the domain**: the DNS flow, or `verifySsoDomainOperator` in operator
+   mode ([SSO on Cloudflare Workers](#sso-on-cloudflare-workers)).
+4. **Pre-provision** each user: the `user` row and a `member` row in the
+   provider's organization must exist before the first sign-in.
+5. **Allow the routes** `/sign-in/sso` and `/sso/callback/*` through whatever
+   allow-list fronts `/api/auth/*`.
+6. **Entitlements**: `/sso/register` is gated on the `sso` entitlement of the
+   organization, so an organization that cannot hold it must register the provider
+   through your own seam.
+7. **Driver**: the resolver needs a native-transaction Postgres driver on Workers
+   (see above).
 
 ## Home-realm discovery (email-first login)
 
