@@ -289,6 +289,9 @@ test("public release uses a local job and confines registry authority to protect
   assert.equal(smoke.needs, "publish");
   assert.deepEqual(smoke.permissions, { contents: "read" });
   assert.match(smoke.steps.at(-1).run, /consumer-install\.sh "@alphabros\/enterprise@\$VERSION"/);
+  assert.match(smoke.steps.at(-1).run, /seq 1 30/);
+  assert.match(smoke.steps.at(-1).run, /not listed on npm after 15 minutes/);
+  assert.ok(smoke["timeout-minutes"] >= 20);
   for (const job of Object.values(release.jobs)) assert.ok(job["timeout-minutes"] > 0);
   assert.equal(release.concurrency["cancel-in-progress"], false);
   assert.equal(release.jobs.release.uses, undefined);

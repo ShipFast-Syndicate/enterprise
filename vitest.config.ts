@@ -4,7 +4,9 @@ import { IDP_CERT } from "./test/helpers/fixtures/saml-keys";
 
 // The suites that also run on Postgres: makeAuth/buildDynamicSchema and the
 // product-shaped harness, the preset, SCIM, policy, and the audit log
-// (golden vectors and hash chain included).
+// (golden vectors and hash chain included), and the 1.3 SSO options (the
+// resolver, the sign-in suite with its concurrent-first-login test, and the
+// operator domain verification).
 const PG_CORE_SUITES = [
   "test/server/preset.test.ts",
   "test/server/policy.test.ts",
@@ -19,6 +21,10 @@ const PG_CORE_SUITES = [
   "test/security/scim-catalog.test.ts",
   "test/security/gap2-require2fa-product-schema.test.ts",
   "test/security/org-lock.test.ts",
+  "test/server/sso-resolve.test.ts",
+  "test/security/sso-existing-users-only.test.ts",
+  "test/security/sso-signup-backstop.test.ts",
+  "test/security/sso-domain-operator.test.ts",
   "test/pg/audit-concurrency.test.ts",
   "test/cli/cli-pg.test.ts",
 ];

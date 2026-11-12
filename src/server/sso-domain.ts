@@ -68,6 +68,7 @@ import { isOrgId } from "./org-id";
 export const SSO_DOMAIN_GUARD_PATHS = new Set([
   "/sso/register",
   "/sso/update-provider",
+  "/sso/request-domain-verification",
   "/sso/verify-domain",
   "/sign-in/sso",
 ]);
@@ -548,7 +549,7 @@ function domainInvalidError(): APIError {
  * domain it happens to know must not learn every other domain the victim
  * org has verified (a cross-tenant disclosure oracle).
  */
-function domainTakenError(mine: readonly string[], taken: VerifiedProviderRow[]): APIError {
+export function domainTakenError(mine: readonly string[], taken: VerifiedProviderRow[]): APIError {
   const theirs = taken.flatMap((row) => normalizeProviderDomains(row.domain) ?? []);
   const colliding = mine.filter((domain) => theirs.some((other) => domainsOverlap(domain, other)));
   return new APIError("CONFLICT", {
@@ -564,6 +565,48 @@ export function issuerNotAllowedError(issuer: string): APIError {
       message: `The issuer ${JSON.stringify(issuer)}, an identity-provider endpoint the configuration points at, or a SAML signing certificate it carries, is not on this deployment's SSO issuer allow-list.`,
     }),
   );
+}
+
+/** Whether any `sso.oidcClaims` option is on (they read OIDC claims, so a SAML provider cannot satisfy them). */
+export function oidcClaimsEnabled(opts: EnterpriseOptions | undefined): boolean {
+  const claims = opts?.sso?.oidcClaims;
+  const hosted = claims?.requireHostedDomain;
+  return (
+    claims?.requireEmailVerified === true ||
+    claims?.requirePkce === true ||
+    hosted === true ||
+    (Array.isArray(hosted) && hosted.length > 0)
+  );
+}
+
+/** A SAML provider is refused (registration, update, sign-in) while an `sso.oidcClaims` option is on — `SSO_POLICY_UNSUPPORTED_PROTOCOL`. */
+export function unsupportedProtocolError(): APIError {
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "SSO_POLICY_UNSUPPORTED_PROTOCOL",
+      message:
+        "This deployment requires OIDC identity claims (sso.oidcClaims), which a SAML provider cannot satisfy.",
+    }),
+  );
+}
+
+/** `sso.oidcClaims.requirePkce` refuses a provider configured without PKCE — `SSO_PKCE_REQUIRED`. */
+export function pkceRequiredError(): APIError {
+  return policyRefusal(
+    new APIError("BAD_REQUEST", {
+      code: "SSO_PKCE_REQUIRED",
+      message: "This deployment requires PKCE (sso.oidcClaims.requirePkce); pkce cannot be false.",
+    }),
+  );
+}
+
+/** `sso.domainVerificationMode: "operator"` replaces the DNS endpoints with `verifySsoDomainOperator` (`./sso-domain-operator.ts`) — not a sign-in refusal. */
+export function domainVerificationOperatorOnlyError(): APIError {
+  return new APIError("FORBIDDEN", {
+    code: "SSO_DOMAIN_VERIFICATION_OPERATOR_ONLY",
+    message:
+      "Domain verification on this deployment is done by the operator, not by a DNS check; ask your administrator to verify the domain.",
+  });
 }
 
 type Body = Record<string, unknown>;
@@ -676,6 +719,13 @@ async function guardRegister(
   body: Body,
   opts: EnterpriseOptions | undefined,
 ): Promise<HookResult> {
+  // The 1.3 claim options (`sso.oidcClaims`): checked first, on the body as
+  // sent, before anything is looked up. A SAML provider cannot carry OIDC
+  // claims; a provider without PKCE cannot satisfy `requirePkce`.
+  if (oidcClaimsEnabled(opts) && isRecord(body.samlConfig)) throw unsupportedProtocolError();
+  if (opts?.sso?.oidcClaims?.requirePkce === true && isRecord(body.oidcConfig)) {
+    if (body.oidcConfig.pkce === false) throw pkceRequiredError();
+  }
   // `ORG_REQUIRED` is the entitlement gate's job and it runs first; a
   // missing org here (a hand-composed plugin list) simply means "no org's
   // own rows are excluded" — still fail-closed.
@@ -710,6 +760,15 @@ async function guardUpdate(
   // A caller upstream would refuse (403) must not get to probe the domain
   // scan or the allow-list through this hook either.
   if (!(await callerMayMutate(ctx, provider, userId))) return;
+
+  // The 1.3 claim options, on the provider as it will be after the update:
+  // no SAML configuration while `sso.oidcClaims` is on, and `requirePkce`
+  // judged the way upstream merges it (`updates.pkce ?? current.pkce ?? true`).
+  if (oidcClaimsEnabled(opts) && isRecord(body.samlConfig)) throw unsupportedProtocolError();
+  if (opts?.sso?.oidcClaims?.requirePkce === true && isRecord(body.oidcConfig)) {
+    const stored = parseStoredConfig(provider.oidcConfig);
+    if ((body.oidcConfig.pkce ?? stored?.pkce ?? true) === false) throw pkceRequiredError();
+  }
 
   // The allow-list judges the provider as it will be *after* the update: a
   // new issuer against the (stored or replaced) endpoints, and replaced
@@ -799,6 +858,18 @@ export function buildSsoDomainGuardHook(opts?: EnterpriseOptions) {
       const fullCtx = ctx as unknown as GenericEndpointContext;
       const body = (ctx.body && typeof ctx.body === "object" ? ctx.body : {}) as Body;
       if (ctx.path === "/sign-in/sso") return pinEmailSignIn(fullCtx, body);
+
+      // `sso.domainVerificationMode: "operator"`: the two DNS endpoints are
+      // closed to everyone, signed in or not; the operator function
+      // (`./sso-domain-operator.ts`) is the only way to verify a domain. Thrown
+      // here because this hook's result type cannot carry a response.
+      if (
+        (ctx.path === "/sso/request-domain-verification" || ctx.path === "/sso/verify-domain") &&
+        opts?.sso?.domainVerificationMode === "operator"
+      ) {
+        throw domainVerificationOperatorOnlyError();
+      }
+      if (ctx.path === "/sso/request-domain-verification") return;
 
       const session = await getSessionFromCtx(fullCtx);
       if (!session) return;

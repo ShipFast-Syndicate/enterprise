@@ -10,11 +10,18 @@ import { IDP_CERT } from "./fixtures/saml-keys";
 import { TEST_IDP_ENTITY_ID } from "./saml-idp";
 import type { TestAuth } from "./auth";
 import type { OidcIssuer } from "./oidc-issuer";
+import { isPg } from "./dialect";
 
+/**
+ * Marks the provider's domain verified without the DNS round trip. The value is
+ * bound as a parameter in the column's own representation (`1` on SQLite, a
+ * boolean on Postgres) instead of being written as a `= 1` literal, so the
+ * statement is the same on both dialects.
+ */
 export async function verifyProviderDomain(t: TestAuth, providerId: string): Promise<void> {
   await t.client.execute({
-    sql: `UPDATE "ssoProvider" SET domainVerified = 1 WHERE providerId = ?`,
-    args: [providerId],
+    sql: `UPDATE "ssoProvider" SET "domainVerified" = ? WHERE "providerId" = ?`,
+    args: [isPg ? true : 1, providerId],
   });
 }
 
@@ -26,6 +33,12 @@ export async function registerOidcProvider(
   issuer: OidcIssuer,
   providerId: string,
   domain = "acme.test",
+  extra: {
+    /** Registers the issuer's `/userinfo` endpoint too, so the profile comes from it and not from the id_token. */
+    userInfo?: boolean;
+    /** Merged over the registered `oidcConfig` (`scopes`, `pkce`, `mapping`, ...). */
+    oidcConfig?: Record<string, unknown>;
+  } = {},
 ): Promise<void> {
   const res = await t.api.post(
     "/sso/register",
@@ -41,6 +54,8 @@ export async function registerOidcProvider(
         authorizationEndpoint: issuer.authorizationEndpoint,
         tokenEndpoint: issuer.tokenEndpoint,
         jwksEndpoint: issuer.jwksEndpoint,
+        ...(extra.userInfo ? { userInfoEndpoint: issuer.userInfoEndpoint } : {}),
+        ...extra.oidcConfig,
       },
     },
     { cookie },

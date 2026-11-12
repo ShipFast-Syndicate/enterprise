@@ -313,6 +313,10 @@ export async function makeAuth(
     // drizzle table map (keyed by model name) and the upstream DDL list; the
     // package's own `applyMigration` still runs afterwards.
     tables?: (built: DynamicSchema) => DynamicSchema;
+    // The top-level `account` options (`accountLinking`, ...): for the suites
+    // that run the way a product with `accountLinking: { enabled: false }` does
+    // (`test/security/sso-existing-users-only.test.ts`).
+    account?: BetterAuthOptions["account"];
   } = {},
 ) {
   const entitled = new Set<Feature>([
@@ -330,6 +334,7 @@ export async function makeAuth(
     trustedOrigins,
     rateLimitCustomRules,
     tables,
+    account,
     ...enterpriseOverrides
   } = overrides;
   const opts: EnterpriseOptions = {
@@ -361,6 +366,7 @@ export async function makeAuth(
       : TEST_RATE_LIMIT,
     plugins: [...presetPlugins, ...(extraPlugins ?? [])],
     ...(trustedOrigins ? { trustedOrigins } : {}),
+    ...(account ? { account } : {}),
   };
 
   const derived = buildDynamicSchema(baseOptions);

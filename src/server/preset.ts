@@ -4,6 +4,7 @@ import { passkey } from "@better-auth/passkey";
 import { apiKey } from "@better-auth/api-key";
 import { sso } from "@better-auth/sso";
 import { resolveScimSsoUser, guardScimSsoProviderMutation } from "./scim-sso";
+import { composeSsoResolvers } from "./sso-resolve";
 import { enterpriseScim, scimMembershipSchema } from "./scim";
 import type { EnterpriseOptions } from "./types";
 import { enterpriseGate } from "./gate";
@@ -87,10 +88,19 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
     apiKeyLifecycle(opts),
     sso({
       domainVerification: { enabled: true },
-      organizationProvisioning: { disabled: false, defaultRole: "member" },
-      disableImplicitSignUp: false,
+      // `sso.organizationProvisioning: "off"` (1.3, opt-in) stops both of
+      // upstream's automatic org joins; absent, it is the 1.2 value.
+      organizationProvisioning: {
+        disabled: opts.sso?.organizationProvisioning === "off",
+        defaultRole: "member",
+      },
+      // `sso.existingUsersOnly` (1.3, opt-in) — upstream's own switch for the
+      // sign-up half; the resolver and the create hook are the rest of it.
+      disableImplicitSignUp: opts.sso?.existingUsersOnly === true,
       provisionUser: opts.provisionUser,
-      resolveUser: resolveScimSsoUser,
+      // The base resolver itself unless a 1.3 option needs the composed one
+      // (`./sso-resolve.ts`'s identity rule).
+      resolveUser: composeSsoResolvers(opts, resolveScimSsoUser),
       guardProviderMutation: guardScimSsoProviderMutation,
       saml: { allowIdpInitiated: true },
     }),
