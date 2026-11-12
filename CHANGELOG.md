@@ -1,3 +1,9 @@
+## [1.3.0](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.2.0...v1.3.0) (2026-11-12)
+
+### Features
+
+* **sso:** add opt-in consumer options for pre-provisioned users ([#85](https://github.com/ShipFast-Syndicate/enterprise/issues/85)) ([38fe06f](https://github.com/ShipFast-Syndicate/enterprise/commit/38fe06f049b54a26986a85b06f70dcba19b546d0))
+
 ## [1.2.0](https://github.com/ShipFast-Syndicate/enterprise/compare/v1.1.3...v1.2.0) (2026-11-11)
 
 ### Features
