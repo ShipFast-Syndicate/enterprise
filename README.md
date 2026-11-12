@@ -573,17 +573,23 @@ at runtime and does not run on Cloudflare Workers/workerd. `./server`, `./client
 `./portal` have no Node built-ins and run anywhere better-auth itself does.
 The `workerd` Vitest project (`test/workerd`) boots `enterprisePreset` on better-auth's memory
 adapter inside the real workerd runtime on every `pnpm test` run and covers social sign-in
-start, SAML SP metadata, SCIM ServiceProviderConfig and Groups, and an audit write.
+start, SAML SP metadata, SCIM ServiceProviderConfig and Groups, an audit write, a boot with every
+1.3 SSO option set, and operator domain verification. A full SSO sign-in does not run there (the
+memory adapter has no native transactions); see `docs/sso.md`, "SSO on Cloudflare Workers".
 
 ## Documentation
 
 - [`docs/sso.md`](./docs/sso.md) — the SSO wizard flow, DNS TXT verification, SAML SP metadata
-  URLs, and the `node:dns`-on-Workers caveat.
+  URLs, SSO on Cloudflare Workers (native transactions, operator domain verification, nonce and
+  PKCE), and the opt-in pre-provisioned-users and Google Workspace `hd` options.
 - [`docs/scim.md`](./docs/scim.md) — native SCIM Users/Groups, credential rotation,
   membership projection, decommissioning, and IdP setup notes.
 - [`docs/security.md`](./docs/security.md) — patched SCIM migration, secrets/token storage,
   policy enforcement, API keys, audit coverage and chain limits, retention/GDPR, and this
   package's trusted-publishing setup.
+- [`docs/upgrading-to-1.3.md`](./docs/upgrading-to-1.3.md) — upgrading from 1.2.x: the opt-in SSO
+  options (pre-provisioned users only, no automatic org joins, ID-token claim checks, operator
+  domain verification) and their new error codes.
 - [`docs/upgrading-to-1.2.md`](./docs/upgrading-to-1.2.md) — upgrading from 1.1.x: optional
   Postgres support, the staff-managed entitlement table and staff-only organization creation.
 - [`docs/upgrading-to-1.1.md`](./docs/upgrading-to-1.1.md) — upgrading from 1.0.x: pre-upgrade

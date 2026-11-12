@@ -439,6 +439,53 @@ none. An operator manages one in either of two ways:
 Either change happens outside the application, so no audit row records it; note it in your own
 change log.
 
+## SSO sign-in options (1.3): threat model
+
+The opt-in keys of `EnterpriseOptions.sso` (`existingUsersOnly`, `requireMembership`,
+`organizationProvisioning`, `oidcClaims`, `domainVerificationMode`; usage in
+[`docs/sso.md`](./sso.md#pre-provisioned-users-only)) change who an SSO sign-in can become. What
+they defend against, and the places a reviewer should look.
+
+- **The link bypasses `accountLinking`.** `existingUsersOnly` links by returning
+  `{ action: "link", profile: "preserve" }` from `resolveUser`; upstream skips its
+  `accountLinking.enabled === false` refusal for a resolver-selected user (`link-account.mjs`,
+  `!opts.selectedUser && (… || accountLinking?.enabled === false …)`). That is what lets a
+  product keep linking off globally and still bind pre-provisioned users, and it means the
+  resolver is the only gate: a bug there is an account-takeover path. It links only when the
+  provider is persisted and domain-verified for the e-mail's domain, the ID token's
+  `email_verified` is boolean `true`, the ID-token e-mail equals the profile e-mail, the user
+  exists, is not banned, is a member of the provider's org (by default), and no other account
+  conflicts. The suites are RED-first and each refusal asserts no session and no row change.
+- **Trust the signed token, nothing else.** Claims come from `verifiedIdTokenClaims`. Upstream
+  reads the profile from the userinfo response whenever the provider has a `userInfoEndpoint`;
+  the ID-token signature does not cover it. The e-mail check closes that divergence. `hd` and
+  `email_verified` are read from the ID token only; `email_verified` is stricter than upstream's
+  (`true` or `"true"`): only the boolean counts.
+- **`hd` is an assertion by Google, about Google.** It identifies a Workspace domain, not a
+  person, and only the e-mail-domain-equals-`hd` rule ties it to the address being signed in.
+  Alias domains and personal accounts do not carry it and are refused.
+- **`requestSignUp` is client-controlled.** Upstream computes
+  `disableSignUp = disableImplicitSignUp && !requestSignUp` for OIDC, so a forged
+  `requestSignUp: true` re-opens creation. The resolver rejects an unknown address before that
+  matters, and the `user.create.before` hook refuses any SSO-callback creation as a backstop.
+- **Organization joins.** Upstream auto-joins on two paths: the provider-bound `member` row at
+  the end of every SSO callback, and a verified-domain join after any `/callback/` (social)
+  sign-in. `organizationProvisioning: "off"` is one switch for both.
+- **Operator-attested domain verification is an assertion, not a proof.** It is mitigated, not
+  removed: server-only (no route, no credential to present), refused unless the deployment opted
+  in, unique per verified domain, and audited with the operator and the evidence.
+- **No nonce.** Upstream sends none; see [`docs/sso.md`](./sso.md#sso-on-cloudflare-workers).
+  State with cookie binding, PKCE, client authentication and the `iss`/`aud`/`azp` checks remain.
+- **Enumeration.** `SSO_USER_NOT_PROVISIONED` is returned in the redirect and tells an
+  IdP-authenticated person whether an account exists for their address.
+- **Parts that depend on upstream's shape.** The conflict check keys on the `account` columns
+  `(providerId, accountId)` upstream stores (it stores no issuer); the operator write copies
+  `completeDomainVerification`'s `id` + `domain` where-clause. Both were read in
+  `@better-auth/sso` 1.7.19; a bump that changes either needs the tests re-read.
+- **Not covered here.** Workers sign-in itself (no CI runs it; needs a native-transaction driver),
+  entitlement gating at sign-in (sign-in is not entitlement-gated today), and an unlink procedure
+  for re-assigned e-mail addresses.
+
 ## Upgrading from 1.0.x
 
 The step-by-step guide, the full behaviour table, the new options and the error codes are in
@@ -598,7 +645,14 @@ session is not); a 2FA challenge instead of a session is `auth.sign_in_2fa_pendi
 `auth.sign_in_refused` when this package refused it with a policy code (`SSO_REQUIRED`,
 `METHOD_NOT_ALLOWED`, `TWO_FACTOR_REQUIRED`, `TWO_FACTOR_ENROLLMENT_REQUIRED`,
 `SSO_DOMAIN_NOT_ALLOWED`, `SSO_PROVIDER_UNRESOLVED`, `SSO_ISSUER_NOT_ALLOWED`,
-`SCIM_PROVISIONING_REQUIRED`, `SCIM_USER_NOT_ACTIVE` — `POLICY_REFUSAL_CODES`). A refusal is
+`SCIM_PROVISIONING_REQUIRED`, `SCIM_USER_NOT_ACTIVE`, and the 1.3 SSO-option codes
+`SSO_EMAIL_NOT_VERIFIED`, `SSO_EMAIL_CLAIM_MISMATCH`, `SSO_HOSTED_DOMAIN_MISMATCH`,
+`SSO_USER_NOT_PROVISIONED`, `SSO_USER_BANNED`, `SSO_NOT_MEMBER`, `SSO_ACCOUNT_CONFLICT`,
+`SSO_SIGNUP_DISABLED`, `SSO_PKCE_REQUIRED`, `SSO_POLICY_UNSUPPORTED_PROTOCOL` —
+`POLICY_REFUSAL_CODES`). A code must be in **both** that set and marked at the throw
+(`policyRefusal` / `notePolicyRefusal`), or the failure is classified as
+`auth.sso_sign_in_failed` instead of a refusal; `test/security/audit-cluster-bounds.test.ts`
+checks the second half. A refusal is
 recognised only from the package's own code, which marks the request it refuses
 (`policyRefusal`), never from the text of the error: a redirect's `error=` starts from a
 callback URL the caller chose, and an IdP error response names whatever code it likes, so a
@@ -627,6 +681,11 @@ triggers → the retention anchor names the caller as its actor; `/enterprise/sc
 `scim.token_created|rotated|revoked`; `/enterprise/sso/test-login/finish` →
 `sso.test_login_passed`; `/enterprise/entitlements/set` → `entitlement.changed` (new and previous
 feature set), in the target organization's chain; `/enterprise/sso/register` forwards to `/sso/register`.
+The server-only `verifySsoDomainOperator()` (not an endpoint, so in no table) writes
+`sso.domain_verified` with `metadata` `{ method: "operator", actor, evidence }` in the provider's
+organization chain, in the same transaction as the `domainVerified` flag. `/sso/verify-domain`
+refused with `SSO_DOMAIN_VERIFICATION_OPERATOR_ONLY` in operator mode is a plain `403`, not a
+sign-in refusal, and writes nothing.
 
 **Actors.** The actor is the session making the request, never a field of the response (a role
 change is attributed to the admin who made it; the member whose role changed is the target,

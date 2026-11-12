@@ -162,6 +162,127 @@ describe("assertEnterpriseOptions — sso", () => {
   });
 });
 
+describe("assertEnterpriseOptions — sso 1.3 opt-ins", () => {
+  it("accepts every new key with a valid value, and none of them at all", () => {
+    expect(() => assertEnterpriseOptions(opts({ sso: {} }))).not.toThrow();
+    expect(() =>
+      assertEnterpriseOptions(
+        opts({
+          sso: {
+            existingUsersOnly: true,
+            requireMembership: false,
+            organizationProvisioning: "off",
+            oidcClaims: { requireEmailVerified: true, requirePkce: true },
+            domainVerificationMode: "operator",
+          },
+        }),
+      ),
+    ).not.toThrow();
+    for (const organizationProvisioning of ["member", "off"] as const) {
+      expect(() =>
+        assertEnterpriseOptions(opts({ sso: { organizationProvisioning } })),
+      ).not.toThrow();
+    }
+    for (const domainVerificationMode of ["dns", "operator"] as const) {
+      expect(() =>
+        assertEnterpriseOptions(opts({ sso: { domainVerificationMode } })),
+      ).not.toThrow();
+    }
+  });
+
+  it("type-checks existingUsersOnly and requireMembership as booleans", () => {
+    for (const bad of ["yes", 1, null]) {
+      expect(() => assertEnterpriseOptions(loose({ sso: { existingUsersOnly: bad } }))).toThrow(
+        /existingUsersOnly/,
+      );
+      expect(() =>
+        assertEnterpriseOptions(
+          loose({ sso: { existingUsersOnly: true, requireMembership: bad } }),
+        ),
+      ).toThrow(/requireMembership/);
+    }
+  });
+
+  it("refuses requireMembership without existingUsersOnly (it would silently do nothing)", () => {
+    expect(() => assertEnterpriseOptions(opts({ sso: { requireMembership: true } }))).toThrow(
+      /requireMembership.*existingUsersOnly/,
+    );
+    expect(() =>
+      assertEnterpriseOptions(
+        opts({ sso: { existingUsersOnly: false, requireMembership: false } }),
+      ),
+    ).toThrow(/requireMembership.*existingUsersOnly/);
+  });
+
+  it("accepts the enum options only with their literals", () => {
+    expect(() =>
+      assertEnterpriseOptions(loose({ sso: { organizationProvisioning: "admin" } })),
+    ).toThrow(/organizationProvisioning/);
+    expect(() =>
+      assertEnterpriseOptions(loose({ sso: { organizationProvisioning: true } })),
+    ).toThrow(/organizationProvisioning/);
+    expect(() =>
+      assertEnterpriseOptions(loose({ sso: { domainVerificationMode: "doh" } })),
+    ).toThrow(/domainVerificationMode/);
+  });
+
+  it("rejects an oidcClaims that is not an object, and unknown oidcClaims keys", () => {
+    for (const bad of ["pkce", true, [], null]) {
+      expect(() => assertEnterpriseOptions(loose({ sso: { oidcClaims: bad } }))).toThrow(
+        /oidcClaims/,
+      );
+    }
+    expect(() =>
+      assertEnterpriseOptions(loose({ sso: { oidcClaims: { requireNonce: true } } })),
+    ).toThrow(/oidcClaims.*requireNonce/);
+  });
+
+  it("type-checks the oidcClaims booleans", () => {
+    for (const key of ["requireEmailVerified", "requirePkce"]) {
+      expect(() =>
+        assertEnterpriseOptions(loose({ sso: { oidcClaims: { [key]: "yes" } } })),
+      ).toThrow(`oidcClaims.${key}`);
+    }
+    expect(() =>
+      assertEnterpriseOptions(loose({ sso: { oidcClaims: { requireHostedDomain: "acme.test" } } })),
+    ).toThrow(/requireHostedDomain/);
+  });
+
+  it("requireHostedDomain: a boolean, or an array of non-empty lower-case hostnames (never a RegExp)", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(() =>
+      assertEnterpriseOptions(opts({ sso: { oidcClaims: { requireHostedDomain: true } } })),
+    ).not.toThrow();
+    expect(() =>
+      assertEnterpriseOptions(
+        opts({ sso: { oidcClaims: { requireHostedDomain: ["acme.test", "eu.acme.test"] } } }),
+      ),
+    ).not.toThrow();
+    for (const bad of [[/acme\.test/], ["Acme.test"], [""], ["acme.test/"], [42], ["a b.test"]]) {
+      expect(() =>
+        assertEnterpriseOptions(loose({ sso: { oidcClaims: { requireHostedDomain: bad } } })),
+      ).toThrow(/requireHostedDomain/);
+    }
+  });
+
+  it("warns once per process that hd is Google-Workspace-specific, only when requireHostedDomain is on", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    assertEnterpriseOptions(opts({ sso: { oidcClaims: { requireEmailVerified: true } } }));
+    assertEnterpriseOptions(opts({ sso: { oidcClaims: { requireHostedDomain: false } } }));
+    expect(warn).not.toHaveBeenCalled();
+
+    assertEnterpriseOptions(opts({ sso: { oidcClaims: { requireHostedDomain: true } } }));
+    assertEnterpriseOptions(opts({ sso: { oidcClaims: { requireHostedDomain: ["acme.test"] } } }));
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/Google Workspace/);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/hd/);
+
+    resetOptionWarningsForTests();
+    assertEnterpriseOptions(opts({ sso: { oidcClaims: { requireHostedDomain: true } } }));
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("assertEnterpriseOptions — organization", () => {
   it("accepts booleans and a function for allowUserToCreateOrganization", () => {
     expect(() =>

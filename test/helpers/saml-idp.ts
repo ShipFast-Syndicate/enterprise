@@ -8,7 +8,7 @@
 // Recipient/Destination — the same shape `spike-a-saml/level2/gen-response.mjs`
 // used to mint responses against a real `@better-auth/sso` worker's ACS. The
 // `null` second argument (no AuthnRequest) is what makes every minted
-// response IdP-initiated (no `InResponseTo`); `@better-auth/sso@1.6.33`
+// response IdP-initiated (no `InResponseTo`); `@better-auth/sso` (1.7.x)
 // accepts that by default (`options?.saml?.allowIdpInitiated !== false`,
 // verified directly against `node_modules/@better-auth/sso/dist/index.mjs`),
 // so this helper never needs to drive a prior `/sign-in/sso` AuthnRequest.

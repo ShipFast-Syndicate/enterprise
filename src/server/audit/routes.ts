@@ -416,4 +416,17 @@ export const POLICY_REFUSAL_CODES: ReadonlySet<string> = new Set([
   "SSO_ISSUER_NOT_ALLOWED",
   "SCIM_PROVISIONING_REQUIRED",
   "SCIM_USER_NOT_ACTIVE",
+  // The 1.3 SSO options (`sso.existingUsersOnly`, `sso.oidcClaims`): raised by
+  // the composed resolver (`../sso-resolve.ts`, marked with `notePolicyRefusal`)
+  // and, for `SSO_SIGNUP_DISABLED`, by the create hook (`../policy/sso-jit.ts`).
+  "SSO_EMAIL_NOT_VERIFIED",
+  "SSO_EMAIL_CLAIM_MISMATCH",
+  "SSO_HOSTED_DOMAIN_MISMATCH",
+  "SSO_USER_NOT_PROVISIONED",
+  "SSO_USER_BANNED",
+  "SSO_NOT_MEMBER",
+  "SSO_ACCOUNT_CONFLICT",
+  "SSO_SIGNUP_DISABLED",
+  "SSO_PKCE_REQUIRED",
+  "SSO_POLICY_UNSUPPORTED_PROTOCOL",
 ]);

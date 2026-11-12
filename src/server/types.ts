@@ -192,6 +192,70 @@ export interface EnterpriseOptions {
    * optional, case-insensitive; list every certificate during a rotation).
    * Ignored without `allowedIssuers`, and by the predicate form (which
    * receives the fingerprints instead).
+   *
+   * **Opt-in tightening (1.3).** The five keys below are all off by default
+   * and every one of them is a no-op when absent: with none of them set the
+   * preset passes `@better-auth/sso` the exact configuration it did in 1.2
+   * (`docs/upgrading-to-1.3.md`). They exist for a deployment whose users
+   * already exist before they sign in through SSO (an internal tool behind a
+   * single-tenant Google Workspace, say) and that wants SSO to be a way to
+   * sign in as an existing account, never a way to create one or to join an
+   * organization. Their enforcement point is one composed `resolveUser`
+   * (`./sso-resolve.ts`) that reads the claims of the signature-verified ID
+   * token inside the sign-in transaction, plus a `user.create.before` backstop
+   * and the provider registration guards.
+   *
+   * `existingUsersOnly` (default `false`): an OIDC sign-in never creates a
+   * user. The verified ID-token e-mail must belong to a user that already
+   * exists, and the sign-in links that user to the IdP account (or signs in
+   * the already-linked account) — or is refused. Banned users are refused, and
+   * so is an account already bound to another subject or user. The link comes
+   * from the resolver (`{ action: "link", profile: "preserve" }`), not from
+   * better-auth's implicit account linking, so it works with the product's
+   * `account.accountLinking.enabled === false`, which stays false: nothing but
+   * this resolver, after every check, can link an SSO account. Implies
+   * `oidcClaims.requireEmailVerified`, requires the provider to be persisted
+   * and domain-verified for the e-mail's domain, and forces
+   * `disableImplicitSignUp: true`. The local `user.emailVerified` is neither
+   * required nor changed — the IdP is the e-mail authority here. SAML sign-ins
+   * are not linked by this option: a SAML assertion for an unlinked user still
+   * ends in upstream's "account not linked", and no user is ever created (the
+   * `user.create.before` hook refuses any SSO callback creation).
+   *
+   * `requireMembership` (default `true`, only with `existingUsersOnly`): the
+   * user must already be a member of the provider's organization
+   * (`SSO_NOT_MEMBER` otherwise). `false` drops that check. Setting it without
+   * `existingUsersOnly` is refused at construction, since it would do nothing.
+   *
+   * `organizationProvisioning` (default `"member"`, today's behaviour):
+   * `"off"` sets upstream's `organizationProvisioning.disabled`, which stops
+   * **both** automatic joins — the provider-bound `member` row an SSO sign-in
+   * creates, and the verified-domain join after a social `/callback/` sign-in.
+   * Membership is then only what an admin or SCIM granted.
+   *
+   * `oidcClaims`: checks on the claims of the verified ID token — never on
+   * the userinfo response or the profile, which an IdP can answer differently.
+   * `requireEmailVerified` requires `email_verified` to be the boolean `true`
+   * (upstream also accepts the string `"true"`). `requireHostedDomain`
+   * requires the Google Workspace `hd` claim to be a string equal to one of
+   * the provider's domains (or, as an array of lower-case hostnames, to one of
+   * those), with the e-mail on that exact domain and no subdomain matching;
+   * it is Google-specific, so personal Google accounts and non-Google IdPs
+   * (which carry no `hd`) are refused. `requirePkce` refuses a provider that
+   * does not use PKCE, at registration and at every sign-in. OIDC only: a SAML
+   * provider cannot be checked against OIDC claims, so with any of these set a
+   * SAML provider is refused at registration and at sign-in
+   * (`SSO_POLICY_UNSUPPORTED_PROTOCOL`). Unknown keys throw. A refused sign-in
+   * is audited as `auth.sign_in_refused` with the refusal code.
+   *
+   * `domainVerificationMode` (default `"dns"`): `"operator"` replaces the DNS
+   * ownership proof with an attestation made by server code
+   * (`verifySsoDomainOperator`, audited as `sso.domain_verified` with
+   * `method: "operator"`) — for runtimes where `@better-auth/sso`'s
+   * `node:dns` lookup is not available, Cloudflare Workers. The two DNS
+   * endpoints (`/sso/request-domain-verification`, `/sso/verify-domain`) are
+   * refused with `SSO_DOMAIN_VERIFICATION_OPERATOR_ONLY`. An attestation is
+   * an assertion by the operator, not a proof.
    */
   sso?: {
     domainBinding?: "verified-domain" | "off";
@@ -207,6 +271,15 @@ export interface EnterpriseOptions {
           },
         ) => boolean | Promise<boolean>);
     samlCertificateFingerprints?: Record<string, string[]>;
+    existingUsersOnly?: boolean;
+    requireMembership?: boolean;
+    organizationProvisioning?: "member" | "off";
+    oidcClaims?: {
+      requireEmailVerified?: boolean;
+      requireHostedDomain?: boolean | readonly string[];
+      requirePkce?: boolean;
+    };
+    domainVerificationMode?: "dns" | "operator";
   };
   /**
    * Forwarded to the upstream `organization()` plugin by the preset. Both

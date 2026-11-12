@@ -33,11 +33,95 @@ const METHOD_NAME_RE = /^[a-z_][a-z0-9_]*$/;
 // instances, and the point is that an operator reads it once.
 let warnedDomainBindingOff = false;
 let warnedDomainBindingOffUnlisted = false;
+// `sso.oidcClaims.requireHostedDomain` (Google-only) — same once-per-process rule.
+let warnedHostedDomain = false;
 
-/** Test-only: forget that the `domainBinding:"off"` warnings were already emitted. */
+/** Test-only: forget that the `domainBinding:"off"` and `requireHostedDomain` warnings were already emitted. */
 export function resetOptionWarningsForTests(): void {
   warnedDomainBindingOff = false;
   warnedDomainBindingOffUnlisted = false;
+  warnedHostedDomain = false;
+}
+
+// One DNS label: lower-case letters, digits and inner hyphens, at most 63 characters.
+const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/** A non-empty, lower-case, plain hostname: dot-separated labels, no scheme, port, path or wildcard. */
+function isLowerCaseHostname(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= 253 &&
+    value.split(".").every((label) => HOSTNAME_LABEL.test(label))
+  );
+}
+
+const OIDC_CLAIM_BOOLEANS = ["requireEmailVerified", "requirePkce"] as const;
+const OIDC_CLAIM_KEYS: ReadonlySet<string> = new Set([
+  ...OIDC_CLAIM_BOOLEANS,
+  "requireHostedDomain",
+]);
+
+/** `sso.existingUsersOnly`, `requireMembership`, `organizationProvisioning`, `oidcClaims` and `domainVerificationMode` (all 1.3, all opt-in). */
+function assertSsoTightening(sso: NonNullable<EnterpriseOptions["sso"]>): void {
+  const existingUsersOnly: unknown = sso.existingUsersOnly;
+  if (existingUsersOnly !== undefined && typeof existingUsersOnly !== "boolean") {
+    fail(`"sso.existingUsersOnly" must be a boolean.`);
+  }
+  const requireMembership: unknown = sso.requireMembership;
+  if (requireMembership !== undefined) {
+    if (typeof requireMembership !== "boolean") fail(`"sso.requireMembership" must be a boolean.`);
+    if (existingUsersOnly !== true) {
+      fail(
+        `"sso.requireMembership" only applies with "sso.existingUsersOnly: true"; set that too, or remove it.`,
+      );
+    }
+  }
+  const provisioning: unknown = sso.organizationProvisioning;
+  if (provisioning !== undefined && provisioning !== "member" && provisioning !== "off") {
+    fail(
+      `"sso.organizationProvisioning" must be "member" or "off" (got ${JSON.stringify(provisioning)}).`,
+    );
+  }
+  const mode: unknown = sso.domainVerificationMode;
+  if (mode !== undefined && mode !== "dns" && mode !== "operator") {
+    fail(`"sso.domainVerificationMode" must be "dns" or "operator" (got ${JSON.stringify(mode)}).`);
+  }
+
+  const claims: unknown = sso.oidcClaims;
+  if (claims === undefined) return;
+  if (typeof claims !== "object" || claims === null || Array.isArray(claims)) {
+    fail(`"sso.oidcClaims" must be an object.`);
+  }
+  const record = claims as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!OIDC_CLAIM_KEYS.has(key)) {
+      fail(`"sso.oidcClaims.${key}" is not an option (known: ${[...OIDC_CLAIM_KEYS].join(", ")}).`);
+    }
+  }
+  for (const key of OIDC_CLAIM_BOOLEANS) {
+    if (record[key] !== undefined && typeof record[key] !== "boolean") {
+      fail(`"sso.oidcClaims.${key}" must be a boolean.`);
+    }
+  }
+  const hosted = record.requireHostedDomain;
+  if (hosted === undefined) return;
+  if (Array.isArray(hosted)) {
+    if (hosted.length === 0 || !hosted.every(isLowerCaseHostname)) {
+      fail(
+        `"sso.oidcClaims.requireHostedDomain" as an array must be a non-empty list of lower-case hostnames (no RegExp, scheme, port or path).`,
+      );
+    }
+  } else if (typeof hosted !== "boolean") {
+    fail(
+      `"sso.oidcClaims.requireHostedDomain" must be a boolean or an array of lower-case hostnames.`,
+    );
+  }
+  if (hosted !== false && !warnedHostedDomain) {
+    warnedHostedDomain = true;
+    console.warn(
+      `${PREFIX} "sso.oidcClaims.requireHostedDomain" checks the Google Workspace "hd" claim: it is absent for personal Google accounts and for every non-Google identity provider, and a Workspace alias domain does not match, so those sign-ins are refused (SSO_HOSTED_DOMAIN_MISMATCH).`,
+    );
+  }
 }
 
 /**
@@ -84,6 +168,12 @@ export function takeDomainBindingOffUnlistedWarning(opts: EnterpriseOptions): st
  *   cross-tenant squatting class GHSA-8p84-pc7q-69jr describes, so it is
  *   accepted but warned about, naming the advisory.
  * - `sso.allowedIssuers` — an array of strings/RegExps or a function.
+ * - `sso.existingUsersOnly` / `requireMembership` — booleans, the second only
+ *   with the first; `sso.organizationProvisioning` — `"member"` or `"off"`;
+ *   `sso.domainVerificationMode` — `"dns"` or `"operator"`; `sso.oidcClaims` —
+ *   an object of known keys only (`requireEmailVerified`, `requirePkce`
+ *   booleans; `requireHostedDomain` a boolean or a non-empty array of
+ *   lower-case hostnames, warned about once since `hd` is Google-only).
  * - `organization.*` — a boolean (or, for `allowUserToCreateOrganization`, a
  *   function), never a truthy string that would silently mean "on";
  *   `organization.creation` — `"self-service"`, `"staff-only"` or a function;
@@ -213,6 +303,8 @@ export function assertEnterpriseOptions(opts: EnterpriseOptions): void {
       }
     }
   }
+
+  if (opts.sso !== undefined) assertSsoTightening(opts.sso);
 
   const requireEmailVerificationOnInvitation =
     opts.organization?.requireEmailVerificationOnInvitation;
