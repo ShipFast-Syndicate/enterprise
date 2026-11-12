@@ -1,6 +1,6 @@
 // Test helper: an in-process OIDC issuer (`node:http`) for the SSO
 // end-to-end tests (`test/e2e/oidc.test.ts`, `test/e2e/jit.test.ts`). Serves
-// the 5 endpoints `@better-auth/sso@1.6.33`'s OIDC code-flow path needs when
+// the 5 endpoints `@better-auth/sso`'s OIDC code-flow path needs (1.7.x) when
 // registered with `oidcConfig.skipDiscovery: true` (ruling (a)):
 // `/.well-known/openid-configuration`, `/jwks`, `/authorize`, `/token`,
 // `/userinfo`.
@@ -29,6 +29,16 @@ import { SignJWT, exportJWK, generateKeyPair } from "jose";
 export interface OidcIssuerUser {
   sub: string;
   email: string;
+  /** Google Workspace hosted-domain claim, written into the id_token only when set. */
+  hd?: string;
+  /**
+   * The `email_verified` claim: `true` by default (what every existing suite
+   * relies on), `"true"`/`false` to assert a string or negative value, `null`
+   * to leave the claim out of the id_token altogether.
+   */
+  emailVerified?: boolean | string | null;
+  /** The e-mail `/userinfo` answers with when it differs from the id_token's (default: the same). */
+  userinfoEmail?: string;
 }
 
 export interface OidcIssuer {
@@ -43,6 +53,8 @@ export interface OidcIssuer {
   clientSecret: string;
   /** Sets the identity `/token`'s id_token (and `/userinfo`) assert for every subsequent `/authorize` round trip. */
   setUser(user: OidcIssuerUser): void;
+  /** The query parameters of every `/authorize` request this issuer has served, oldest first. */
+  authorizeRequests: URLSearchParams[];
   close(): Promise<void>;
 }
 
@@ -86,6 +98,7 @@ export async function startOidcIssuer(
   let currentUser: OidcIssuerUser = opts.user ?? { sub: "test-user-1", email: "user@example.test" };
   // code -> the `nonce` (if any) the /authorize request carried, so /token can echo it.
   const issuedCodes = new Map<string, { nonce?: string }>();
+  const authorizeRequests: URLSearchParams[] = [];
 
   let issuerUrl = "";
 
@@ -120,6 +133,7 @@ export async function startOidcIssuer(
           res.end("missing redirect_uri");
           return;
         }
+        authorizeRequests.push(new URLSearchParams(url.searchParams));
         const code = randomUUID();
         issuedCodes.set(code, { nonce: url.searchParams.get("nonce") ?? undefined });
         const location = new URL(redirectUri);
@@ -152,9 +166,12 @@ export async function startOidcIssuer(
         }
 
         const now = Math.floor(Date.now() / 1000);
+        const emailVerified =
+          currentUser.emailVerified === undefined ? true : currentUser.emailVerified;
         const idToken = await new SignJWT({
           email: currentUser.email,
-          email_verified: true,
+          ...(emailVerified === null ? {} : { email_verified: emailVerified }),
+          ...(currentUser.hd === undefined ? {} : { hd: currentUser.hd }),
           ...(pending.nonce ? { nonce: pending.nonce } : {}),
         })
           .setProtectedHeader({ alg: "RS256", kid })
@@ -180,7 +197,11 @@ export async function startOidcIssuer(
       if (url.pathname === "/userinfo") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(
-          JSON.stringify({ sub: currentUser.sub, email: currentUser.email, email_verified: true }),
+          JSON.stringify({
+            sub: currentUser.sub,
+            email: currentUser.userinfoEmail ?? currentUser.email,
+            email_verified: true,
+          }),
         );
         return;
       }
@@ -209,6 +230,7 @@ export async function startOidcIssuer(
     setUser(user) {
       currentUser = user;
     },
+    authorizeRequests,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));

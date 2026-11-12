@@ -189,6 +189,15 @@ export function ssoDomainNotAllowedError(): APIError {
   );
 }
 
+export function ssoSignupDisabledError(): APIError {
+  return policyRefusal(
+    new APIError("FORBIDDEN", {
+      code: "SSO_SIGNUP_DISABLED",
+      message: "Signing in through SSO does not create accounts on this deployment.",
+    }),
+  );
+}
+
 /** `true` unless the operator switched the binding off (`sso.domainBinding: "off"`, warned about at construction — `../options.ts`). */
 export function domainBindingEnabled(opts: EnterpriseOptions | undefined): boolean {
   return opts?.sso?.domainBinding !== "off";
@@ -217,6 +226,18 @@ export function buildDomainBindingUserCreateBeforeHook(
 ): UserCreateBeforeHook {
   return async (user, ctx) => {
     if (!ctx) return;
+    // `sso.existingUsersOnly` (1.3): no SSO callback creates a user, ahead of
+    // every other check and whether or not the binding or the allow-list is
+    // on. The composed resolver (`../sso-resolve.ts`) already refuses an OIDC
+    // sign-in for an unknown address and `disableImplicitSignUp` blocks the
+    // SAML one; this is the backstop for the client-controlled path upstream
+    // leaves open — `disableSignUp = disableImplicitSignUp && !requestSignUp`,
+    // so a forged `requestSignUp: true` on `/sign-in/sso` re-enables creation
+    // — and for any resolver that is ever composed out of the list. It makes
+    // its own callback-path check: the one below sits behind an early return.
+    if (opts?.sso?.existingUsersOnly === true && isSsoCallbackPath(ctx.path)) {
+      throw ssoSignupDisabledError();
+    }
     const bindingOn = domainBindingEnabled(opts);
     if (!bindingOn && !issuerAllowListEnabled(opts)) return;
     if (!isSsoCallbackPath(ctx.path)) return;

@@ -17,6 +17,12 @@ export {
 } from "./entitlement-store";
 export { enterpriseGate, GATED_PATHS } from "./gate";
 export {
+  SSO_DOMAIN_EVIDENCE_MAX_LENGTH,
+  SSO_DOMAIN_VERIFIED_ACTION,
+  verifySsoDomainOperator,
+  type VerifySsoDomainOperatorInput,
+} from "./sso-domain-operator";
+export {
   ORG_CREATION_STAFF_ONLY,
   ORG_LOCK_PLUGIN_ID,
   ORG_METADATA_STAFF_ONLY,
