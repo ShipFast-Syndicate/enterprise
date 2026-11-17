@@ -346,8 +346,8 @@ class MaintainerHolds(unittest.TestCase):
                 patterns.append(line[12:].strip('"'))
             self.assertTrue(patterns, group)
             self.assertLessEqual(set(patterns), held, group)
-            for pattern in patterns:
-                self.assertIn(pattern, config.split('exclude-patterns:\n', 1)[1].split('\n      release-tooling:', 1)[0])
+        # No catch-all group remains, so nothing needs an exclusion list; a future one must bring the check back.
+        self.assertNotIn('exclude-patterns:', config)
 
 class AggregatedCI(unittest.TestCase):
     reader = Gate.reader
