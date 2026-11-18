@@ -33,7 +33,7 @@ updates:
       # Daily, one PR per ecosystem for that day's patch and minor updates. Majors and security
       # updates stay one PR each (Bastien, 2026-11-17).
       patch-minor:
-        update-types: ['minor', 'patch']
+        update-types: ["minor", "patch"]
     labels:
       - dependencies
     ignore:
@@ -81,4 +81,4 @@ updates:
       # Daily, one PR per ecosystem for that day's patch and minor updates. Majors and security
       # updates stay one PR each (Bastien, 2026-11-17).
       patch-minor:
-        update-types: ['minor', 'patch']
+        update-types: ["minor", "patch"]
