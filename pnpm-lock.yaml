@@ -39,20 +39,20 @@ importers:
         version: 4.6.7
     devDependencies:
       '@better-auth/api-key':
-        specifier: 1.7.19
-        version: 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(better-auth@1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))
+        specifier: 1.7.20
+        version: 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(better-auth@1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))
       '@better-auth/core':
-        specifier: 1.7.19
-        version: 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+        specifier: 1.7.20
+        version: 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/passkey':
-        specifier: 1.7.19
-        version: 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))(nanostores@1.5.3)
+        specifier: 1.7.20
+        version: 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))(nanostores@1.5.3)
       '@better-auth/scim':
-        specifier: 1.7.19
-        version: 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(better-auth@1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))
+        specifier: 1.7.20
+        version: 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(better-auth@1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))
       '@better-auth/sso':
-        specifier: 1.7.19
-        version: 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))
+        specifier: 1.7.20
+        version: 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))
       '@better-auth/utils':
         specifier: 0.5.1
         version: 0.5.1
@@ -90,8 +90,8 @@ importers:
         specifier: ^5.0.5
         version: 5.0.5(vitest@5.0.5)
       better-auth:
-        specifier: 1.7.19
-        version: 1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
+        specifier: 1.7.20
+        version: 1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
       better-call:
         specifier: 1.4.5
         version: 1.4.5(zod@4.6.7)
@@ -186,16 +186,16 @@ packages:
     resolution: {integrity: sha512-6zABk/ECA/QYSCQ1NGiVwwbQerUCZ+TQbp64Q3AgmfNvurHH0j8TtXa1qbShXA6qqkpAj4V5W8pP6mLe1mcMqA==}
     engines: {node: '>=18'}
 
-  '@better-auth/api-key@1.7.19':
-    resolution: {integrity: sha512-tbRuF9jBidh0EgTSGROs6DgIfnM6Uaj+U8Yj4Vboxxl2uI2Ze+B9dg+Nqd+Izy9nQ5KLkx8au9HsQw37WtwNKg==}
+  '@better-auth/api-key@1.7.20':
+    resolution: {integrity: sha512-3qHLYS4Oa+RjVUANuIEVAElb26znf65ZQ3v+7CVXwWzk0BA/aumcZMx8upmDxSkGhoX+leRfiabdJ8s9jysE1A==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
-      better-auth: ^1.7.19
+      better-auth: ^1.7.20
       better-call: 1.4.5
 
-  '@better-auth/core@1.7.19':
-    resolution: {integrity: sha512-ZydLa+xlm6UOJiVrnyOoK7lnuuKiNnCUKiRuIAOYKktc3pY2pjGfKemRSman5+tYLheYP8Q/pS7WkzIQTkKvVw==}
+  '@better-auth/core@1.7.20':
+    resolution: {integrity: sha512-pjPB+Gzjb+KDx3UYhAxZKYV0XxAL+CBVO2cyjPujr5qx9jt0TslKAmz/IAwasQidq0q/SeSxDcxN/68/PCBPsA==}
     peerDependencies:
       '@better-auth/utils': ^0.4.2 || ^0.5.0
       '@better-fetch/fetch': 1.3.3
@@ -208,56 +208,56 @@ packages:
       '@opentelemetry/api':
         optional: true
 
-  '@better-auth/drizzle-adapter@1.7.19':
-    resolution: {integrity: sha512-Yt1Pxx7PySunz3Uh+cL8204NCGI9Dp07M8iN9ryGrr+/pTVJiIF+LewvJeWlqMEqKPvKILB9Qk89bGJ7hthnVw==}
+  '@better-auth/drizzle-adapter@1.7.20':
+    resolution: {integrity: sha512-qxWpu5H2w62jMsq3MkXUKDmsTxNVu3GqG1RWXmSpLheBpfTW9gS67CH9I8fuvqGhBCjQvtxE8gYjz9HumkpvJg==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
       drizzle-orm: ^0.45.2 || >=1.0.0-rc.1 <2.0.0
     peerDependenciesMeta:
       drizzle-orm:
         optional: true
 
-  '@better-auth/kysely-adapter@1.7.19':
-    resolution: {integrity: sha512-blSiE1ax6Pe5EFWs+imFYhPVqewXILoD4QrIm6AcHQn0LfhaPV6NpS28QYo8j9eYZ0C5WCh0vFTk3hxbXFryGg==}
+  '@better-auth/kysely-adapter@1.7.20':
+    resolution: {integrity: sha512-XtKsAiGmXqAwvqyAyW0OPvwbLvFn/nOxT+83iJMVE4ElCAI3eZTK18Ep9Oeze+t26lUN2odORDSzUQwSULIaPQ==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
       kysely: ^0.28.17 || ^0.29.0
     peerDependenciesMeta:
       kysely:
         optional: true
 
-  '@better-auth/memory-adapter@1.7.19':
-    resolution: {integrity: sha512-kaB+gwEAHLXmgG72rpeS7V8984Y4n09MKWnHBAhT9+ZtFKO4sysnkjRBupL730RRPr+rjZuf4BILgWLWKPmCIw==}
+  '@better-auth/memory-adapter@1.7.20':
+    resolution: {integrity: sha512-Jgx+tQ0JGpGeLYCO8OsON8CzlQUi0naWNYnWGhNIlCBc5gzqLXSMMt6fRopoPLOqYw/DsC21kbWrOqZpZP4UIQ==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
 
-  '@better-auth/mongo-adapter@1.7.19':
-    resolution: {integrity: sha512-iFmkW/agBJ6PSvWfz2ADd4GzjHOZv9Nhk7mTA7cEnmhfnYCHx5wGEXp1W9/DsLB2G6d17YP/Jg0wf3g1Phc93g==}
+  '@better-auth/mongo-adapter@1.7.20':
+    resolution: {integrity: sha512-dddGQWeRIS9DCN7vAIYB0r5AzhN/zeXPMM+ri2+eZAExicEpkPP8dn2xNrNCAqkt3Kn8KVjJ296deBRMalJlBg==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
       mongodb: ^6.0.0 || ^7.0.0
     peerDependenciesMeta:
       mongodb:
         optional: true
 
-  '@better-auth/passkey@1.7.19':
-    resolution: {integrity: sha512-l5C1aEVvbiihenQpaVBV9FVbyAThhMoopRL+p/olj+Zr6JQAsn1AllCVS5y2mw6WcXzIs5d9Vpm/h+aTutzfSg==}
+  '@better-auth/passkey@1.7.20':
+    resolution: {integrity: sha512-rA6eP787/1uTmWw+lPWWH6OEwSnU7hZJ6z54u4qb7jsKX3uIiAJuLuzTkcVIauZq9ag511H/M517pJiS9/29gA==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
       '@better-fetch/fetch': 1.3.3
-      better-auth: ^1.7.19
+      better-auth: ^1.7.20
       better-call: 1.4.5
       nanostores: ^1.0.1
 
-  '@better-auth/prisma-adapter@1.7.19':
-    resolution: {integrity: sha512-zuzdoWGJrSWTjbdU/wWLuvWI5Q80bnrK4OicvOCrysZM/RHsTb2TCYMQwD7VZm1Uh4gLphmndgYocwnuVVHr/g==}
+  '@better-auth/prisma-adapter@1.7.20':
+    resolution: {integrity: sha512-iT1D6oDLkV8L2tlgnP/fZkUH30bEkBhb5v6gO3zRDRmtGZVZMy/uUZFEbYk4yZ2mHDH15qW1DvlVqBquRuSVzg==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
       '@prisma/client': ^5.0.0 || ^6.0.0 || ^7.0.0
       prisma: ^5.0.0 || ^6.0.0 || ^7.0.0
@@ -267,27 +267,27 @@ packages:
       prisma:
         optional: true
 
-  '@better-auth/scim@1.7.19':
-    resolution: {integrity: sha512-zXHZ2LxIxCkyJUWFlMGYrtR+cq+XFueXyo5R5MTpjtEC5S/uobCDj2CdDvkj1SBQC9TpVwAdboECqtlVk95WNQ==}
+  '@better-auth/scim@1.7.20':
+    resolution: {integrity: sha512-XjO5XB71Ccgwzh6ML1qiJGh864ZCWLplUpQ0m4Uu28bhqIXo5icFn9e4xoQRLPEk0y4Q1izBLiaa1f7N3oRayA==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
-      better-auth: ^1.7.19
+      better-auth: ^1.7.20
       better-call: 1.4.5
 
-  '@better-auth/sso@1.7.19':
-    resolution: {integrity: sha512-6Xhc96K/+Zm4BWMjRzW8XacwSmDsCbjpp6+mnTB8qhevom9V8VCZtihYCC9kzhBuchpCa/0Ht3lnSgDStA5X3A==}
+  '@better-auth/sso@1.7.20':
+    resolution: {integrity: sha512-hlv0Ve1zT6fsVDRR1OiWicrmQ2Fq/nKwHH0vXTV1f33oHMHn7mzHnDM6BZ6bKP76D+btea4/fCQCrROtvM61ZA==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
       '@better-fetch/fetch': 1.3.3
-      better-auth: ^1.7.19
+      better-auth: ^1.7.20
       better-call: 1.4.5
 
-  '@better-auth/telemetry@1.7.19':
-    resolution: {integrity: sha512-oZDAX2/T/R9qbVfl/3NDONfIwHBr47uweS7jSdYxY6RgeNgRvc8PqtX29qxUQgPI1DirtQNA0C1+jyvwBMmLBw==}
+  '@better-auth/telemetry@1.7.20':
+    resolution: {integrity: sha512-YXU5hcYNajCvD6HFsdBVwMR3WXQ+GMe6tXIEwhPO6qLIgoHlFiirvJHgi6SONNuvSMc0WOvOuhvBrs4EEtSrBA==}
     peerDependencies:
-      '@better-auth/core': ^1.7.19
+      '@better-auth/core': ^1.7.20
       '@better-auth/utils': ^0.4.2 || ^0.5.0
       '@better-fetch/fetch': 1.3.3
 
@@ -1695,8 +1695,8 @@ packages:
   before-after-hook@4.0.0:
     resolution: {integrity: sha512-q6tR3RPqIB1pMiTRMFcZwuG5T8vwp+vUvEG0vuI6B+Rikh5BfPp2fQ82c925FOs+b0lcFQ8CFrL+KbilfZFhOQ==}
 
-  better-auth@1.7.19:
-    resolution: {integrity: sha512-37RSvRwZCcfSonHoikh15hSRgAQ6qT9S2ztz/MFz9hG9miBqS4LCbGHNqgyHja3Eu0Nswd763NZXc12iqkaQaw==}
+  better-auth@1.7.20:
+    resolution: {integrity: sha512-3WtxKLw9aqmIVQTJsmpjtu1ZVF95w2KGY4IBWOCqiYKRse6G3iM9t7jpp6rjfIzazVHlm+shNY/8QBl+LDpbrQ==}
     peerDependencies:
       '@lynx-js/react': '*'
       '@prisma/client': ^5.0.0 || ^6.0.0 || ^7.0.0
@@ -3696,15 +3696,15 @@ snapshots:
 
   '@bcoe/v8-coverage@1.0.2': {}
 
-  '@better-auth/api-key@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(better-auth@1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))':
+  '@better-auth/api-key@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(better-auth@1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
-      better-auth: 1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
+      better-auth: 1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
       better-call: 1.4.5(zod@4.6.7)
       zod: 4.6.7
 
-  '@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)':
+  '@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)':
     dependencies:
       '@better-auth/utils': 0.5.1
       '@better-fetch/fetch': 1.3.3
@@ -3715,63 +3715,63 @@ snapshots:
       nanostores: 1.5.3
       zod: 4.6.7
 
-  '@better-auth/drizzle-adapter@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))':
+  '@better-auth/drizzle-adapter@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
     optionalDependencies:
       drizzle-orm: 0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1)
 
-  '@better-auth/kysely-adapter@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(kysely@0.29.5)':
+  '@better-auth/kysely-adapter@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(kysely@0.29.5)':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
     optionalDependencies:
       kysely: 0.29.5
 
-  '@better-auth/memory-adapter@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)':
+  '@better-auth/memory-adapter@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
 
-  '@better-auth/mongo-adapter@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)':
+  '@better-auth/mongo-adapter@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
 
-  '@better-auth/passkey@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))(nanostores@1.5.3)':
+  '@better-auth/passkey@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))(nanostores@1.5.3)':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
       '@better-fetch/fetch': 1.3.3
       '@simplewebauthn/browser': 13.3.0
       '@simplewebauthn/server': 13.3.3
-      better-auth: 1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
+      better-auth: 1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
       better-call: 1.4.5(zod@4.6.7)
       nanostores: 1.5.3
       zod: 4.6.7
 
-  '@better-auth/prisma-adapter@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)':
+  '@better-auth/prisma-adapter@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
 
-  '@better-auth/scim@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(better-auth@1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))':
+  '@better-auth/scim@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(better-auth@1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
       '@noble/hashes': 2.4.0
-      better-auth: 1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
+      better-auth: 1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
       better-call: 1.4.5(zod@4.6.7)
       zod: 4.6.7
 
-  '@better-auth/sso@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))':
+  '@better-auth/sso@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-auth@1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5))(better-call@1.4.5(zod@4.6.7))':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
       '@better-fetch/fetch': 1.3.3
       '@xmldom/xmldom': 0.9.12
-      better-auth: 1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
+      better-auth: 1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5)
       better-call: 1.4.5(zod@4.6.7)
       fast-xml-parser: 5.11.1
       jose: 6.2.17
@@ -3779,9 +3779,9 @@ snapshots:
       tldts: 7.4.14
       zod: 4.6.7
 
-  '@better-auth/telemetry@1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)':
+  '@better-auth/telemetry@1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)':
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
       '@better-auth/utils': 0.5.1
       '@better-fetch/fetch': 1.3.3
 
@@ -4983,15 +4983,15 @@ snapshots:
 
   before-after-hook@4.0.0: {}
 
-  better-auth@1.7.19(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5):
+  better-auth@1.7.20(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))(pg@8.23.1)(vitest@5.0.5):
     dependencies:
-      '@better-auth/core': 1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
-      '@better-auth/drizzle-adapter': 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))
-      '@better-auth/kysely-adapter': 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(kysely@0.29.5)
-      '@better-auth/memory-adapter': 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)
-      '@better-auth/mongo-adapter': 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)
-      '@better-auth/prisma-adapter': 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)
-      '@better-auth/telemetry': 1.7.19(@better-auth/core@1.7.19(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)
+      '@better-auth/core': 1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3)
+      '@better-auth/drizzle-adapter': 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(drizzle-orm@0.45.4(@electric-sql/pglite@0.5.16)(@libsql/client@0.18.0)(@types/pg@8.23.1)(kysely@0.29.5)(pg@8.23.1))
+      '@better-auth/kysely-adapter': 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(kysely@0.29.5)
+      '@better-auth/memory-adapter': 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)
+      '@better-auth/mongo-adapter': 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)
+      '@better-auth/prisma-adapter': 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)
+      '@better-auth/telemetry': 1.7.20(@better-auth/core@1.7.20(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)(better-call@1.4.5(zod@4.6.7))(jose@6.2.17)(kysely@0.29.5)(nanostores@1.5.3))(@better-auth/utils@0.5.1)(@better-fetch/fetch@1.3.3)
       '@better-auth/utils': 0.5.1
       '@better-fetch/fetch': 1.3.3
       '@noble/ciphers': 2.4.0
