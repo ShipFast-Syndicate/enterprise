@@ -123,7 +123,7 @@
     "@types/pg": "^8.23.1",
     "@typescript/native": "npm:typescript@^7.0.2",
     "@vitest/coverage-v8": "^5.0.5",
-    "better-auth": "1.7.19",
+    "better-auth": "1.7.20",
     "better-call": "1.4.5",
     "conventional-changelog-conventionalcommits": "^9.3.1",
     "drizzle-orm": "^0.45.4",
