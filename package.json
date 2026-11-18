@@ -106,11 +106,11 @@
     }
   },
   "devDependencies": {
-    "@better-auth/api-key": "1.7.19",
-    "@better-auth/core": "1.7.19",
-    "@better-auth/passkey": "1.7.19",
-    "@better-auth/scim": "1.7.19",
-    "@better-auth/sso": "1.7.19",
+    "@better-auth/api-key": "1.7.20",
+    "@better-auth/core": "1.7.20",
+    "@better-auth/passkey": "1.7.20",
+    "@better-auth/scim": "1.7.20",
+    "@better-auth/sso": "1.7.20",
     "@better-auth/utils": "0.5.1",
     "@better-fetch/fetch": "1.3.3",
     "@cloudflare/vitest-plugin": "1.7.0",
