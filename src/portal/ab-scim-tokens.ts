@@ -105,9 +105,7 @@ export class AbScimTokens extends AbElement {
   }
 
   private async handleRevoke(token: ScimToken): Promise<void> {
-    const ok = this.confirm(
-      `Remove SCIM connection "${token.providerId}" and deactivate the access it provisioned?`,
-    );
+    const ok = this.confirm(this.t("scim.confirmRevoke", { providerId: token.providerId }));
     if (!ok) return;
     this.submitError = undefined;
     try {
@@ -123,12 +121,7 @@ export class AbScimTokens extends AbElement {
   }
 
   private async handleRotate(token: ScimToken): Promise<void> {
-    if (
-      !this.confirm(
-        `Replace the token for "${token.providerId}"? The old token will stop working immediately.`,
-      )
-    )
-      return;
+    if (!this.confirm(this.t("scim.confirmRotate", { providerId: token.providerId }))) return;
     this.submitError = undefined;
     try {
       const data = await this.api.post<{ scimToken: string; baseUrl: string }>(
@@ -154,11 +147,14 @@ export class AbScimTokens extends AbElement {
       return html`
         <div class="ab-copy-box">
           ${this.renderShownOnce(
-            "Token",
+            this.t("scim.shownOnce"),
+            this.t("scim.tokenLabel"),
             this.newToken.scimToken,
-            html`<p><strong>Base URL:</strong> <code>${this.newToken.baseUrl}</code></p>`,
+            html`<p>
+              <strong>${this.t("scim.baseUrl")}</strong> <code>${this.newToken.baseUrl}</code>
+            </p>`,
           )}
-          <button type="button" @click=${() => this.handleDone()}>Done</button>
+          <button type="button" @click=${() => this.handleDone()}>${this.t("common.done")}</button>
         </div>
       `;
     }
@@ -168,9 +164,9 @@ export class AbScimTokens extends AbElement {
       <table>
         <thead>
           <tr>
-            <th>Provider id</th>
-            <th>Created</th>
-            <th>Last used</th>
+            <th>${this.t("scim.col.providerId")}</th>
+            <th>${this.t("scim.col.created")}</th>
+            <th>${this.t("scim.col.lastUsed")}</th>
             <th></th>
           </tr>
         </thead>
@@ -183,25 +179,25 @@ export class AbScimTokens extends AbElement {
                 <td>${t.lastUsedAt ?? "—"}</td>
                 <td>
                   <button type="button" @click=${() => void this.handleRevoke(t)}>
-                    ${t.status === "decommissioning" ? "Continue removal" : "Revoke"}
+                    ${t.status === "decommissioning" ? this.t("scim.continueRemoval") : this.t("scim.revoke")}
                   </button>
-                  ${t.status === "decommissioning" ? html`<span role="status">Access removal is in progress.</span>` : html`<button type="button" @click=${() => void this.handleRotate(t)}>Rotate token</button>`}
+                  ${t.status === "decommissioning" ? html`<span role="status">${this.t("scim.removalInProgress")}</span>` : html`<button type="button" @click=${() => void this.handleRotate(t)}>${this.t("scim.rotate")}</button>`}
                 </td>
               </tr>
             `,
           )}
         </tbody>
       </table>
-      ${this.tokens.length === 0 ? html`<p class="ab-muted">No SCIM tokens yet.</p>` : ""}
+      ${this.tokens.length === 0 ? html`<p class="ab-muted">${this.t("scim.noTokens")}</p>` : ""}
       <form @submit=${(e: SubmitEvent) => void this.handleCreate(e)}>
         <label
-          >Provider ID (use the SSO provider ID to pair sign-in)<input
+          >${this.t("scim.providerIdLabel")}<input
             name="providerId"
             maxlength="64"
             .value=${this.defaultProviderId()}
             required
         /></label>
-        <button type="submit">Create token</button>
+        <button type="submit">${this.t("scim.create")}</button>
       </form>
     `;
   }

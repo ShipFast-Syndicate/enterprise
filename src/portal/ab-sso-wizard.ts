@@ -59,7 +59,12 @@ interface SessionResponse {
 }
 
 /** `POST`, tolerating a `204`/empty-body success response — see header comment. */
-async function postAllowingEmptyBody(basePath: string, path: string, body: unknown): Promise<void> {
+async function postAllowingEmptyBody(
+  basePath: string,
+  path: string,
+  body: unknown,
+  fallbackMessage: (status: number) => string,
+): Promise<void> {
   const res = await fetch(`${basePath}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -71,7 +76,7 @@ async function postAllowingEmptyBody(basePath: string, path: string, body: unkno
   throw new PortalError({
     status: res.status,
     code: parsed?.code,
-    message: parsed?.message ?? `Request failed with status ${res.status}`,
+    message: parsed?.message ?? fallbackMessage(res.status),
   });
 }
 
@@ -295,9 +300,12 @@ export class AbSsoWizard extends AbElement {
     if (!this.provider) return;
     this.error = undefined;
     try {
-      await postAllowingEmptyBody(this.basePath, "/sso/verify-domain", {
-        providerId: this.provider.providerId,
-      });
+      await postAllowingEmptyBody(
+        this.basePath,
+        "/sso/verify-domain",
+        { providerId: this.provider.providerId },
+        (status) => this.t("common.requestFailed", { status }),
+      );
       await this.fetchProviders();
       if (this.provider?.domainVerified) {
         this.stopPolling();
@@ -332,9 +340,7 @@ export class AbSsoWizard extends AbElement {
         await this.ensureCurrentUser();
         this.step = "enforce";
       } else {
-        this.testLoginError = new Error(
-          "Test login not detected yet. Complete sign-in in the opened window, then try again.",
-        );
+        this.testLoginError = new Error(this.t("sso.testNotDetected"));
       }
     } catch (e) {
       this.testLoginError = e;
@@ -357,7 +363,7 @@ export class AbSsoWizard extends AbElement {
     // "no break-glass user", which is not what an empty field means.
     const breakGlassUserId = this.breakGlassUserId.trim();
     if (!breakGlassUserId) {
-      this.error = new Error("A break-glass user id is required before enforcing SSO.");
+      this.error = new Error(this.t("sso.breakGlassRequired"));
       return;
     }
     try {
@@ -377,12 +383,20 @@ export class AbSsoWizard extends AbElement {
       // enforcement once an owner has set a break-glass user; say that.
       this.error =
         e instanceof PortalError && e.code === "NOT_ORG_OWNER"
-          ? new Error("An organization owner must set the break-glass user first")
+          ? new Error(this.t("sso.ownerRequired"))
           : e;
     }
   }
 
   // --- render ----------------------------------------------------------------
+
+  /** Raw status+code+message diagnostic — `test-login` step only, per the controller ruling. */
+  private diagnosticMessage(e: unknown): string {
+    if (e instanceof PortalError) {
+      return `${e.status}${e.code ? ` ${e.code}` : ""}: ${e.message}`;
+    }
+    return e instanceof Error ? e.message : this.t("common.somethingWrong");
+  }
 
   private renderChoose(): TemplateResult {
     return html`
@@ -408,36 +422,41 @@ export class AbSsoWizard extends AbElement {
         SAML
       </label>
       <form @submit=${(e: SubmitEvent) => void this.handleChooseSubmit(e)}>
-        <input name="providerId" placeholder="Provider id (e.g. okta)" required />
-        <input name="issuer" placeholder="Issuer URL" required />
-        <input name="domain" placeholder="Domain (e.g. acme.com)" required />
+        <input name="providerId" placeholder=${this.t("sso.providerId")} required />
+        <input name="issuer" placeholder=${this.t("sso.issuer")} required />
+        <input name="domain" placeholder=${this.t("sso.domain")} required />
         ${
           this.ssoType === "oidc"
             ? html`
-                <input name="clientId" placeholder="Client id" required />
-                <input name="clientSecret" type="password" placeholder="Client secret" required />
+                <input name="clientId" placeholder=${this.t("sso.clientId")} required />
+                <input
+                  name="clientSecret"
+                  type="password"
+                  placeholder=${this.t("sso.clientSecret")}
+                  required
+                />
               `
             : html`
-                <input name="entryPoint" placeholder="SAML entry point URL" required />
+                <input name="entryPoint" placeholder=${this.t("sso.entryPoint")} required />
+                <textarea name="cert" placeholder=${this.t("sso.cert")} required></textarea>
                 <textarea
-                  name="cert"
-                  placeholder="SAML signing certificate (PEM)"
+                  name="idpMetadata"
+                  placeholder=${this.t("sso.idpMetadata")}
                   required
                 ></textarea>
-                <textarea name="idpMetadata" placeholder="IdP metadata XML" required></textarea>
                 <label>
-                  or upload an IdP metadata XML file
+                  ${this.t("sso.uploadMetadata")}
                   <input
                     type="file"
                     accept=".xml,text/xml,application/xml"
                     @change=${(e: Event) => void this.handleMetadataFile(e)}
                   />
                 </label>
-                <input name="spEntityId" placeholder="SP entity id (optional)" />
-                <input name="callbackUrl" placeholder="Callback URL (optional)" />
+                <input name="spEntityId" placeholder=${this.t("sso.spEntityId")} />
+                <input name="callbackUrl" placeholder=${this.t("sso.callbackUrl")} />
               `
         }
-        <button type="submit">Register provider</button>
+        <button type="submit">${this.t("sso.register")}</button>
       </form>
     `;
   }
@@ -446,16 +465,16 @@ export class AbSsoWizard extends AbElement {
     const record = this.provider?.verificationRecord;
     return html`
       ${this.error ? this.renderError(this.error) : ""}
-      <p>Add this TXT record to your DNS to prove domain ownership:</p>
+      <p>${this.t("sso.txtIntro")}</p>
       <div class="ab-record">
-        <p><strong>Name:</strong> <code>${record?.name ?? ""}</code></p>
-        <p><strong>Value:</strong> <code>${record?.value ?? ""}</code></p>
+        <p><strong>${this.t("sso.recordName")}</strong> <code>${record?.name ?? ""}</code></p>
+        <p><strong>${this.t("sso.recordValue")}</strong> <code>${record?.value ?? ""}</code></p>
       </div>
-      <p class="ab-muted">
-        ${this.polling ? "Checking automatically…" : "Automatic checking has stopped."}
-      </p>
+      <p class="ab-muted">${this.polling ? this.t("sso.polling") : this.t("sso.pollingStopped")}</p>
       <div class="ab-actions">
-        <button type="button" @click=${() => void this.checkDns()}>Check DNS</button>
+        <button type="button" @click=${() => void this.checkDns()}>
+          ${this.t("sso.checkDns")}
+        </button>
       </div>
     `;
   }
@@ -465,15 +484,17 @@ export class AbSsoWizard extends AbElement {
       ${
         this.testLoginError
           ? html`<p class="ab-diagnostic" role="alert">
-              ${diagnosticMessage(this.testLoginError)}
+              ${this.diagnosticMessage(this.testLoginError)}
             </p>`
           : ""
       }
-      <p>Sign in through this provider once to confirm it works before enforcing it.</p>
+      <p>${this.t("sso.testIntro")}</p>
       <div class="ab-actions">
-        <button type="button" @click=${() => void this.startTestLogin()}>Start test login</button>
+        <button type="button" @click=${() => void this.startTestLogin()}>
+          ${this.t("sso.startTest")}
+        </button>
         <button type="button" @click=${() => void this.checkTestLogin()}>
-          I completed the test
+          ${this.t("sso.completedTest")}
         </button>
       </div>
     `;
@@ -485,10 +506,10 @@ export class AbSsoWizard extends AbElement {
     return html`
       ${this.error ? this.renderError(this.error) : ""}
       <p class=${testLoginPassed ? "" : "ab-muted"}>
-        ${testLoginPassed ? "Test login passed." : "Complete a test login before enforcing SSO."}
+        ${testLoginPassed ? this.t("sso.testPassed") : this.t("sso.testRequired")}
       </p>
       <label>
-        Break-glass user id (keeps password sign-in for this owner)
+        ${this.t("sso.breakGlass")}
         <input
           name="breakGlassUserId"
           required
@@ -503,14 +524,14 @@ export class AbSsoWizard extends AbElement {
           ?disabled=${!testLoginPassed || !hasBreakGlassUser}
           @click=${() => void this.handleEnforce()}
         >
-          Enforce SSO for this organization
+          ${this.t("sso.enforce")}
         </button>
       </div>
     `;
   }
 
   private renderDone(): TemplateResult {
-    return html`<p>SSO is enforced for this organization.</p>`;
+    return html`<p>${this.t("sso.enforced")}</p>`;
   }
 
   override render(): TemplateResult {
@@ -530,12 +551,4 @@ export class AbSsoWizard extends AbElement {
         return this.renderDone();
     }
   }
-}
-
-/** Raw status+code+message diagnostic — `test-login` step only, per the controller ruling. */
-function diagnosticMessage(e: unknown): string {
-  if (e instanceof PortalError) {
-    return `${e.status}${e.code ? ` ${e.code}` : ""}: ${e.message}`;
-  }
-  return e instanceof Error ? e.message : "Something went wrong.";
 }

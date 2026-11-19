@@ -13,6 +13,7 @@
 
 import { html, css, type TemplateResult } from "lit";
 import { AbElement } from "./base";
+import type { MessageKey } from "./i18n";
 
 interface ApiKey {
   id: string;
@@ -41,11 +42,11 @@ interface NewKey {
  * the lifetime to the server's own default (`apiKeys.defaultExpiresInS`, 90
  * days unless the product changed it) — never "no expiry" any more.
  */
-const EXPIRES_IN_OPTIONS: Array<{ label: string; value: number | "" }> = [
-  { label: "90 days", value: 90 * 24 * 60 * 60 },
-  { label: "30 days", value: 30 * 24 * 60 * 60 },
-  { label: "1 year", value: 365 * 24 * 60 * 60 },
-  { label: "Server default", value: "" },
+const EXPIRES_IN_OPTIONS: Array<{ label: MessageKey; value: number | "" }> = [
+  { label: "apiKeys.expires.90d", value: 90 * 24 * 60 * 60 },
+  { label: "apiKeys.expires.30d", value: 30 * 24 * 60 * 60 },
+  { label: "apiKeys.expires.1y", value: 365 * 24 * 60 * 60 },
+  { label: "apiKeys.expires.default", value: "" },
 ];
 
 export class AbApiKeys extends AbElement {
@@ -136,7 +137,7 @@ export class AbApiKeys extends AbElement {
   }
 
   private async handleDelete(key: ApiKey): Promise<void> {
-    const ok = this.confirm(`Delete the API key "${key.name ?? key.id}"?`);
+    const ok = this.confirm(this.t("apiKeys.confirmDelete", { name: key.name ?? key.id }));
     if (!ok) return;
     this.submitError = undefined;
     try {
@@ -156,11 +157,12 @@ export class AbApiKeys extends AbElement {
       return html`
         <div class="ab-copy-box">
           ${this.renderShownOnce(
-            "Key",
+            this.t("apiKeys.shownOnce"),
+            this.t("apiKeys.keyLabel"),
             this.newKey.key,
-            html`<p><strong>Name:</strong> ${this.newKey.name ?? "—"}</p>`,
+            html`<p><strong>${this.t("apiKeys.nameLabel")}</strong> ${this.newKey.name ?? "—"}</p>`,
           )}
-          <button type="button" @click=${() => this.handleDone()}>Done</button>
+          <button type="button" @click=${() => this.handleDone()}>${this.t("common.done")}</button>
         </div>
       `;
     }
@@ -170,10 +172,10 @@ export class AbApiKeys extends AbElement {
       <table>
         <thead>
           <tr>
-            <th>Name</th>
-            <th>Prefix</th>
-            <th>Created</th>
-            <th>Expires</th>
+            <th>${this.t("apiKeys.col.name")}</th>
+            <th>${this.t("apiKeys.col.prefix")}</th>
+            <th>${this.t("apiKeys.col.created")}</th>
+            <th>${this.t("apiKeys.col.expires")}</th>
             <th></th>
           </tr>
         </thead>
@@ -184,22 +186,26 @@ export class AbApiKeys extends AbElement {
                 <td>${k.name ?? "—"}</td>
                 <td>${k.start ?? k.prefix ?? "—"}</td>
                 <td>${k.createdAt}</td>
-                <td>${k.expiresAt ?? "Never"}</td>
+                <td>${k.expiresAt ?? this.t("apiKeys.never")}</td>
                 <td>
-                  <button type="button" @click=${() => void this.handleDelete(k)}>Delete</button>
+                  <button type="button" @click=${() => void this.handleDelete(k)}>
+                    ${this.t("apiKeys.delete")}
+                  </button>
                 </td>
               </tr>
             `,
           )}
         </tbody>
       </table>
-      ${this.keys.length === 0 ? html`<p class="ab-muted">No API keys yet.</p>` : ""}
+      ${this.keys.length === 0 ? html`<p class="ab-muted">${this.t("apiKeys.noKeys")}</p>` : ""}
       <form @submit=${(e: SubmitEvent) => void this.handleCreate(e)}>
-        <input name="name" placeholder="Key name" />
+        <input name="name" placeholder=${this.t("apiKeys.name")} />
         <select name="expiresIn">
-          ${EXPIRES_IN_OPTIONS.map((opt) => html`<option value=${opt.value}>${opt.label}</option>`)}
+          ${EXPIRES_IN_OPTIONS.map(
+            (opt) => html`<option value=${opt.value}>${this.t(opt.label)}</option>`,
+          )}
         </select>
-        <button type="submit">Create key</button>
+        <button type="submit">${this.t("apiKeys.create")}</button>
       </form>
     `;
   }

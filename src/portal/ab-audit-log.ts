@@ -209,24 +209,28 @@ export class AbAuditLog extends AbElement {
       ${this.submitError ? this.renderError(this.submitError) : ""}
       <form @submit=${(e: SubmitEvent) => this.handleFilterSubmit(e)}>
         <select name="action">
-          <option value="">All actions</option>
+          <option value="">${this.t("audit.allActions")}</option>
           ${this.knownActions.map(
             (a) => html`<option value=${a} ?selected=${a === this.filters.action}>${a}</option>`,
           )}
         </select>
-        <input name="actorId" placeholder="Actor id" .value=${this.filters.actorId} />
+        <input
+          name="actorId"
+          placeholder=${this.t("audit.actorId")}
+          .value=${this.filters.actorId}
+        />
         <input name="from" type="date" .value=${this.filters.from} />
         <input name="to" type="date" .value=${this.filters.to} />
-        <button type="submit">Filter</button>
+        <button type="submit">${this.t("audit.filter")}</button>
       </form>
 
       <table>
         <thead>
           <tr>
-            <th>Time</th>
-            <th>Actor</th>
-            <th>Action</th>
-            <th>Target</th>
+            <th>${this.t("audit.col.time")}</th>
+            <th>${this.t("audit.col.actor")}</th>
+            <th>${this.t("audit.col.action")}</th>
+            <th>${this.t("audit.col.target")}</th>
           </tr>
         </thead>
         <tbody>
@@ -242,7 +246,7 @@ export class AbAuditLog extends AbElement {
           )}
         </tbody>
       </table>
-      ${this.items.length === 0 ? html`<p class="ab-muted">No audit events.</p>` : ""}
+      ${this.items.length === 0 ? html`<p class="ab-muted">${this.t("audit.noEvents")}</p>` : ""}
 
       <div class="ab-toolbar">
         ${
@@ -253,21 +257,21 @@ export class AbAuditLog extends AbElement {
                   ?disabled=${this.loadingMore}
                   @click=${() => void this.load(false)}
                 >
-                  Load more
+                  ${this.t("audit.loadMore")}
                 </button>
               `
             : ""
         }
-        <a href=${this.exportHref} download>Export CSV</a>
+        <a href=${this.exportHref} download>${this.t("audit.export")}</a>
         <button type="button" ?disabled=${this.verifying} @click=${() => void this.handleVerify()}>
-          Verify chain
+          ${this.t("audit.verify")}
         </button>
         ${
           this.verifyResult
             ? this.verifyResult.ok
-              ? html`<span class="ab-badge-ok">Chain intact</span>`
+              ? html`<span class="ab-badge-ok">${this.t("audit.intact")}</span>`
               : html`<span class="ab-badge-broken"
-                  >Broken at seq ${this.verifyResult.brokenAtSeq}</span
+                  >${this.t("audit.brokenAt", { seq: this.verifyResult.brokenAtSeq ?? "" })}</span
                 >`
             : ""
         }

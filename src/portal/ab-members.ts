@@ -17,6 +17,7 @@
 
 import { html, css, type TemplateResult } from "lit";
 import { AbElement } from "./base";
+import { isMessageKey } from "./i18n";
 
 interface Member {
   id: string;
@@ -155,7 +156,9 @@ export class AbMembers extends AbElement {
   }
 
   private async handleRemove(member: Member): Promise<void> {
-    const ok = this.confirm(`Remove ${member.email ?? member.userId} from this organization?`);
+    const ok = this.confirm(
+      this.t("members.confirmRemove", { who: member.email ?? member.userId }),
+    );
     if (!ok) return;
     this.submitError = undefined;
     try {
@@ -170,6 +173,17 @@ export class AbMembers extends AbElement {
     }
   }
 
+  /** Role names come from the server; one this catalogue does not know renders as received. */
+  private roleLabel(role: string): string {
+    const key = `role.${role}`;
+    return isMessageKey(key) ? this.t(key) : role;
+  }
+
+  private statusLabel(status: string): string {
+    const key = `invitation.status.${status}`;
+    return isMessageKey(key) ? this.t(key) : status;
+  }
+
   override render(): TemplateResult {
     if (this.loadError) return this.renderError(this.loadError);
     if (this.loading) return this.renderLoading();
@@ -179,10 +193,10 @@ export class AbMembers extends AbElement {
       <table>
         <thead>
           <tr>
-            <th>Email</th>
-            <th>Name</th>
-            <th>Role</th>
-            <th>Teams</th>
+            <th>${this.t("members.col.email")}</th>
+            <th>${this.t("members.col.name")}</th>
+            <th>${this.t("members.col.role")}</th>
+            <th>${this.t("members.col.teams")}</th>
             <th></th>
           </tr>
         </thead>
@@ -195,13 +209,18 @@ export class AbMembers extends AbElement {
                 <td>
                   <select @change=${(e: Event) => void this.handleRoleChange(m, e)}>
                     ${ROLES.map(
-                      (r) => html`<option value=${r} ?selected=${r === m.role}>${r}</option>`,
+                      (r) =>
+                        html`<option value=${r} ?selected=${r === m.role}>
+                          ${this.roleLabel(r)}
+                        </option>`,
                     )}
                   </select>
                 </td>
                 <td>${m.teams.join(", ")}</td>
                 <td>
-                  <button type="button" @click=${() => void this.handleRemove(m)}>Remove</button>
+                  <button type="button" @click=${() => void this.handleRemove(m)}>
+                    ${this.t("common.remove")}
+                  </button>
                 </td>
               </tr>
             `,
@@ -210,16 +229,17 @@ export class AbMembers extends AbElement {
       </table>
 
       <div class="ab-invitations">
-        <h3>Pending invitations</h3>
+        <h3>${this.t("members.pending")}</h3>
         ${
           this.invitations.length === 0
-            ? html`<p class="ab-muted">No pending invitations.</p>`
+            ? html`<p class="ab-muted">${this.t("members.noPending")}</p>`
             : html`
                 <ul>
                   ${this.invitations.map(
                     (i) => html`
                       <li class=${i.status === "accepted" ? "ab-status-accepted" : ""}>
-                        ${i.email} — ${i.role ?? "member"} (${i.status})
+                        ${i.email} — ${this.roleLabel(i.role ?? "member")}
+                        (${this.statusLabel(i.status)})
                       </li>
                     `,
                   )}
@@ -231,9 +251,9 @@ export class AbMembers extends AbElement {
       <form @submit=${(e: SubmitEvent) => void this.handleInvite(e)}>
         <input type="email" name="email" placeholder="email@example.com" required />
         <select name="role">
-          ${ROLES.map((r) => html`<option value=${r}>${r}</option>`)}
+          ${ROLES.map((r) => html`<option value=${r}>${this.roleLabel(r)}</option>`)}
         </select>
-        <button type="submit">Invite</button>
+        <button type="submit">${this.t("members.invite")}</button>
       </form>
     `;
   }
