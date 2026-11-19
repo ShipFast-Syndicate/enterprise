@@ -19,17 +19,36 @@
 
 import { LitElement, css, html, type PropertyValues, type TemplateResult } from "lit";
 import { PortalApi, PortalError } from "./api";
+import { DEFAULT_LOCALE, matchLocale, translate, type Locale, type MessageKey } from "./i18n";
+
+/** The first non-empty `lang` on `start` or an ancestor, stepping out of a shadow root to its host. */
+function closestLang(start: Node): string | undefined {
+  for (let node: Node | null = start; node;) {
+    const lang = node instanceof Element ? node.getAttribute("lang")?.trim() : undefined;
+    if (lang) return lang;
+    node = node.parentNode ?? (node instanceof ShadowRoot ? node.host : null);
+  }
+  return undefined;
+}
 
 export class AbElement extends LitElement {
   static properties = {
     orgId: { type: String, attribute: "org-id" },
     basePath: { type: String, attribute: "base-path" },
+    locale: { type: String },
   };
 
   /** The organization this component operates on. No default — every consumer must set it. */
   declare orgId: string;
   /** better-auth mount path. @default "/api/auth" — better-auth's own default mount path. */
   declare basePath: string;
+  /**
+   * Language of the portal's own copy (`en`, `fr`, `es`, `it` or `de`; a
+   * region suffix such as `fr-CA` is accepted). When unset or unsupported
+   * the closest `lang` attribute up the (shadow-piercing) tree decides, then
+   * `en` — see `resolvedLocale`.
+   */
+  declare locale: string;
 
   /** Scoped to `basePath`; rebuilt in `willUpdate` whenever `basePath` changes. */
   protected api: PortalApi;
@@ -106,6 +125,7 @@ export class AbElement extends LitElement {
     super();
     this.orgId = "";
     this.basePath = "/api/auth";
+    this.locale = "";
     this.api = new PortalApi(this.basePath);
   }
 
@@ -116,9 +136,31 @@ export class AbElement extends LitElement {
     }
   }
 
+  /**
+   * The locale this element renders in: its `locale` attribute, else the
+   * closest ancestor's `lang` (crossing shadow roots, so a `<ab-*>` nested in
+   * another component's shadow tree still sees the page's `lang`), else `en`.
+   * The closest `lang` wins even when unsupported (`lang="ja"` inside a
+   * `lang="fr"` page is Japanese, so it renders `en`). Read on every render,
+   * so a re-render picks up a changed `lang`; the attribute itself is not
+   * observed.
+   */
+  get resolvedLocale(): Locale {
+    const explicit = matchLocale(this.locale);
+    if (explicit) return explicit;
+    const lang = closestLang(this);
+    if (lang !== undefined) return matchLocale(lang) ?? DEFAULT_LOCALE;
+    return DEFAULT_LOCALE;
+  }
+
+  /** Translates a catalogue key into `resolvedLocale`, filling `{placeholders}` from `params`. */
+  protected t(key: MessageKey, params?: Record<string, string | number>): string {
+    return translate(this.resolvedLocale, key, params);
+  }
+
   /** A minimal, consistent loading indicator every component can render while its first fetch is in flight. */
   protected renderLoading(): TemplateResult {
-    return html`<p class="ab-loading" role="status">Loading…</p>`;
+    return html`<p class="ab-loading" role="status">${this.t("common.loading")}</p>`;
   }
 
   /**
@@ -132,7 +174,7 @@ export class AbElement extends LitElement {
     if (e instanceof PortalError && e.code === "FEATURE_NOT_ENTITLED") {
       return html`
         <slot name="not-entitled">
-          <p class="ab-error">This feature is not included in your plan</p>
+          <p class="ab-error">${this.t("common.notEntitled")}</p>
         </slot>
       `;
     }
@@ -141,7 +183,7 @@ export class AbElement extends LitElement {
         ? e.message
         : e instanceof Error
           ? e.message
-          : "Something went wrong.";
+          : this.t("common.somethingWrong");
     return html`<p class="ab-error" role="alert">${message}</p>`;
   }
 
@@ -152,16 +194,23 @@ export class AbElement extends LitElement {
    * same message + label/value pair inside their own `.ab-copy-box` (styled
    * by `baseStyles` above) wrapper. `extra` renders between the message and
    * the value line for a caller that needs another field shown alongside it
-   * (e.g. SCIM's `baseUrl`, or API keys' `name`) — the caller still owns the
+   * (e.g. SCIM's `baseUrl`, or API keys' `name`) — `message` is the caller's
+   * translated "shown once" sentence (grammatical gender differs per noun) and
+   * `label` the translated noun for the value line — the caller still owns the
    * surrounding `.ab-copy-box` `<div>` and its own "Done" button, since both
    * of those differ per component (SCIM re-fetches tokens, API keys
    * re-fetches keys).
    */
-  protected renderShownOnce(label: string, value: string, extra?: TemplateResult): TemplateResult {
+  protected renderShownOnce(
+    message: string,
+    label: string,
+    value: string,
+    extra?: TemplateResult,
+  ): TemplateResult {
     return html`
-      <p>This ${label} is shown once. Store it securely.</p>
+      <p>${message}</p>
       ${extra ?? ""}
-      <p><strong>${label}:</strong> <code>${value}</code></p>
+      <p><strong>${this.t("common.fieldLabel", { label })}</strong> <code>${value}</code></p>
     `;
   }
 

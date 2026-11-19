@@ -30,6 +30,7 @@
 import { html, css, type TemplateResult } from "lit";
 import { html as staticHtml, unsafeStatic } from "lit/static-html.js";
 import { AbElement } from "./base";
+import type { MessageKey } from "./i18n";
 
 interface FeaturesResponse {
   features: string[];
@@ -37,13 +38,14 @@ interface FeaturesResponse {
 
 const DEFAULT_TABS = "members,sso,scim,policy,api-keys,audit";
 
-const TAB_LABELS: Record<string, string> = {
-  members: "Members",
-  sso: "SSO",
-  scim: "SCIM",
-  policy: "Security policy",
-  "api-keys": "API keys",
-  audit: "Audit log",
+/** Tab id -> its catalogue key (`./i18n.ts`). An id this package does not know renders as written. */
+const TAB_LABEL_KEYS: Record<string, MessageKey> = {
+  members: "settings.tab.members",
+  sso: "settings.tab.sso",
+  scim: "settings.tab.scim",
+  policy: "settings.tab.policy",
+  "api-keys": "settings.tab.api-keys",
+  audit: "settings.tab.audit",
 };
 
 /** Tab id -> `Feature` (`../server/types.ts`) it requires. `undefined` = never locked. */
@@ -192,7 +194,11 @@ export class AbSecuritySettings extends AbElement {
     const tag = TAB_ELEMENTS[tab];
     if (!tag) return html``;
     const tagName = unsafeStatic(tag);
-    return staticHtml`<${tagName} org-id=${this.orgId} base-path=${this.basePath}></${tagName}>`;
+    return staticHtml`<${tagName}
+      org-id=${this.orgId}
+      base-path=${this.basePath}
+      locale=${this.resolvedLocale}
+    ></${tagName}>`;
   }
 
   override render(): TemplateResult {
@@ -219,7 +225,7 @@ export class AbSecuritySettings extends AbElement {
               ?disabled=${locked}
               @click=${() => this.selectTab(t)}
             >
-              ${TAB_LABELS[t] ?? t}${
+              ${TAB_LABEL_KEYS[t] ? this.t(TAB_LABEL_KEYS[t]) : t}${
                 locked ? html`<span class="ab-lock" aria-hidden="true">🔒</span>` : ""
               }
             </button>
@@ -237,7 +243,7 @@ export class AbSecuritySettings extends AbElement {
           this.selected === ""
             ? ""
             : selectedLocked
-              ? html`<p class="ab-muted">This feature is not included in your plan.</p>`
+              ? html`<p class="ab-muted">${this.t("settings.locked")}</p>`
               : this.renderTabContent(this.selected)
         }
       </div>

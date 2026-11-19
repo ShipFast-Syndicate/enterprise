@@ -493,6 +493,34 @@ tokens (`DESIGN.md`) instead of imposing new ones:
 Define these once in a global stylesheet or `:root` block; the components consume them, they
 don't ship defaults. Full reference: `src/portal/tokens.md`.
 
+### Language
+
+Every label, heading, button, placeholder, status line and confirmation prompt the portal
+renders comes from a built-in catalogue (`src/portal/i18n.ts`) in **en, fr, es, it and de** — all
+six tabs, not only the four that carry the most copy. There is no `labels` property to fill:
+the host picks a language and the portal translates itself.
+
+```html
+<ab-security-settings org-id="acme" locale="fr"></ab-security-settings>
+```
+
+The language is resolved per element, in this order:
+
+1. the `locale` attribute (`fr`, or a region-qualified tag such as `fr-CA` — only the primary
+   subtag counts);
+2. the closest `lang` attribute on the element or an ancestor, looking through shadow roots, so
+   `<html lang="de">` is enough and a nested `<div lang="it">` overrides it;
+3. `en`.
+
+An unsupported `locale` falls through to `lang`; an unsupported closest `lang` (`lang="ja"`)
+renders `en` rather than keeping on to a farther ancestor. `<ab-security-settings>` passes the
+language it resolved to the tab it shows, so the whole portal follows one setting. Every other
+`<ab-*>` element accepts the same attribute when used on its own.
+
+`locale` is reactive; a change to `lang` is picked up on the element's next render, not
+observed. Text that comes from the server — a `PortalError` message, an audit action name, a role
+or invitation status the catalogue does not list — is shown as received.
+
 ## CLI (`ab-enterprise`)
 
 Node-only (reads/writes the local filesystem and talks to libSQL directly) — run it from a

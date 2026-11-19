@@ -15,6 +15,7 @@
 
 import { html, css, type TemplateResult } from "lit";
 import { AbElement } from "./base";
+import type { MessageKey } from "./i18n";
 
 type Role = "owner" | "admin" | "member";
 
@@ -42,12 +43,12 @@ const ALLOWED_METHODS = [
 
 const ROLES: Role[] = ["owner", "admin", "member"];
 
-const SESSION_MAX_AGE_OPTIONS: Array<{ label: string; value: number | null }> = [
-  { label: "Off (use the default)", value: null },
-  { label: "1 hour", value: 3600 },
-  { label: "8 hours", value: 28800 },
-  { label: "24 hours", value: 86400 },
-  { label: "7 days", value: 604800 },
+const SESSION_MAX_AGE_OPTIONS: Array<{ label: MessageKey; value: number | null }> = [
+  { label: "policy.session.off", value: null },
+  { label: "policy.session.1h", value: 3600 },
+  { label: "policy.session.8h", value: 28800 },
+  { label: "policy.session.24h", value: 86400 },
+  { label: "policy.session.7d", value: 604800 },
 ];
 
 function sortedJson(value: unknown): string {
@@ -215,7 +216,7 @@ export class AbSecurityPolicy extends AbElement {
     this.noChangesMessage = undefined;
     const patch = this.buildPatch();
     if (Object.keys(patch).length === 0) {
-      this.noChangesMessage = "Nothing to save.";
+      this.noChangesMessage = this.t("policy.nothingToSave");
       return;
     }
     this.submitError = undefined;
@@ -241,11 +242,11 @@ export class AbSecurityPolicy extends AbElement {
             .checked=${this.require2fa}
             @change=${(e: Event) => (this.require2fa = (e.target as HTMLInputElement).checked)}
           />
-          Require two-factor authentication
+          ${this.t("policy.require2fa")}
         </label>
 
         <label>
-          Session max age
+          ${this.t("policy.sessionMaxAge")}
           <select
             name="sessionMaxAgeS"
             @change=${(e: Event) => {
@@ -256,7 +257,7 @@ export class AbSecurityPolicy extends AbElement {
             ${SESSION_MAX_AGE_OPTIONS.map(
               (opt) => html`
                 <option value=${opt.value ?? ""} ?selected=${opt.value === this.sessionMaxAgeS}>
-                  ${opt.label}
+                  ${this.t(opt.label)}
                 </option>
               `,
             )}
@@ -264,7 +265,7 @@ export class AbSecurityPolicy extends AbElement {
         </label>
 
         <fieldset>
-          <legend>Allowed sign-in methods</legend>
+          <legend>${this.t("policy.allowedMethods")}</legend>
           <div class="ab-methods">
             ${ALLOWED_METHODS.map(
               (method) => html`
@@ -277,7 +278,7 @@ export class AbSecurityPolicy extends AbElement {
                     @change=${(e: Event) =>
                       this.toggleMethod(method, (e.target as HTMLInputElement).checked)}
                   />
-                  ${method}
+                  ${this.t(`policy.method.${method}`)}
                 </label>
               `,
             )}
@@ -285,12 +286,12 @@ export class AbSecurityPolicy extends AbElement {
         </fieldset>
 
         <fieldset>
-          <legend>Group → role mapping</legend>
+          <legend>${this.t("policy.groupRole")}</legend>
           <table>
             <thead>
               <tr>
-                <th>Group</th>
-                <th>Role</th>
+                <th>${this.t("policy.col.group")}</th>
+                <th>${this.t("policy.col.role")}</th>
                 <th></th>
               </tr>
             </thead>
@@ -305,13 +306,16 @@ export class AbSecurityPolicy extends AbElement {
                           this.changeGroupRole(name, (e.target as HTMLSelectElement).value as Role)}
                       >
                         ${ROLES.map(
-                          (r) => html`<option value=${r} ?selected=${r === role}>${r}</option>`,
+                          (r) =>
+                            html`<option value=${r} ?selected=${r === role}>
+                              ${this.t(`role.${r}`)}
+                            </option>`,
                         )}
                       </select>
                     </td>
                     <td>
                       <button type="button" @click=${() => this.removeGroupRow(name)}>
-                        Remove
+                        ${this.t("common.remove")}
                       </button>
                     </td>
                   </tr>
@@ -321,7 +325,7 @@ export class AbSecurityPolicy extends AbElement {
           </table>
           <div class="ab-row-add">
             <input
-              placeholder="Group display name"
+              placeholder=${this.t("policy.groupName")}
               .value=${this.newRowName}
               @input=${(e: Event) => (this.newRowName = (e.target as HTMLInputElement).value)}
             />
@@ -329,15 +333,17 @@ export class AbSecurityPolicy extends AbElement {
               .value=${this.newRowRole}
               @change=${(e: Event) => (this.newRowRole = (e.target as HTMLSelectElement).value as Role)}
             >
-              ${ROLES.map((r) => html`<option value=${r}>${r}</option>`)}
+              ${ROLES.map((r) => html`<option value=${r}>${this.t(`role.${r}`)}</option>`)}
             </select>
-            <button type="button" @click=${() => this.addGroupRow()}>Add</button>
+            <button type="button" @click=${() => this.addGroupRow()}>
+              ${this.t("policy.add")}
+            </button>
           </div>
         </fieldset>
 
         ${this.submitError ? this.renderError(this.submitError) : ""}
         ${this.noChangesMessage ? html`<p class="ab-muted">${this.noChangesMessage}</p>` : ""}
-        <button type="submit">Save changes</button>
+        <button type="submit">${this.t("policy.save")}</button>
       </form>
     `;
   }
