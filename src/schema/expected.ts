@@ -1,4 +1,4 @@
-// Snapshot of Better Auth 1.7.20 (the version the suite runs against) plus enterprise plugin models.
+// Snapshot of Better Auth 1.7.21 (the version the suite runs against) plus enterprise plugin models.
 // The schema drift test compares this contract to getAuthTables().
 export const EXPECTED_TABLES: Record<string, string[]> = {
   user: [
