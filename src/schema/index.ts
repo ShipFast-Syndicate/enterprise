@@ -1,4 +1,4 @@
-// Enterprise-owned SQLite models. Native SCIM models come from Better Auth (1.7.21 in the test suite).
+// Enterprise-owned SQLite models. Native SCIM models come from Better Auth (1.7.22 in the test suite).
 // SQL migrations preserve legacy tables and add the projection ownership marker.
 
 import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqlite-core";

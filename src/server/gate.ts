@@ -119,13 +119,13 @@ export const GATE_ORG_SOURCES: Record<string, GateOrgSource> = {
     kind: "request",
     fields: [body("organizationId")],
     activeOrganization: false,
-    refs: [`${SSO}:3371`, `${SSO}:3520`],
+    refs: [`${SSO}:3339`, `${SSO}:3488`],
   },
   // `checkProviderAccess(ctx, body.providerId)` / `ctx.body.providerId`.
-  "/sso/request-domain-verification": { kind: "provider", refs: [`${SSO}:2564`] },
-  "/sso/verify-domain": { kind: "provider", refs: [`${SSO}:2602`] },
-  "/sso/update-provider": { kind: "provider", refs: [`${SSO}:2388`] },
-  "/sso/delete-provider": { kind: "provider", refs: [`${SSO}:2491`] },
+  "/sso/request-domain-verification": { kind: "provider", refs: [`${SSO}:2536`] },
+  "/sso/verify-domain": { kind: "provider", refs: [`${SSO}:2574`] },
+  "/sso/update-provider": { kind: "provider", refs: [`${SSO}:2361`] },
+  "/sso/delete-provider": { kind: "provider", refs: [`${SSO}:2464`] },
   // `ctx.body.organizationId || session?.session.activeOrganizationId`.
   "/organization/create-team": {
     kind: "request",
@@ -142,7 +142,7 @@ export const GATE_ORG_SOURCES: Record<string, GateOrgSource> = {
     kind: "request",
     fields: [body("organizationId")],
     activeOrganization: true,
-    refs: ["node_modules/@better-auth/api-key/dist/index.mjs:740"],
+    refs: ["node_modules/@better-auth/api-key/dist/index.mjs:737"],
   },
   // This package's own endpoints: exactly the field each handler reads.
   "/enterprise/audit/list": {
