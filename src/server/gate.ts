@@ -142,7 +142,7 @@ export const GATE_ORG_SOURCES: Record<string, GateOrgSource> = {
     kind: "request",
     fields: [body("organizationId")],
     activeOrganization: true,
-    refs: ["node_modules/@better-auth/api-key/dist/index.mjs:737"],
+    refs: ["node_modules/@better-auth/api-key/dist/index.mjs:735"],
   },
   // This package's own endpoints: exactly the field each handler reads.
   "/enterprise/audit/list": {
