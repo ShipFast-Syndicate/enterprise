@@ -429,7 +429,7 @@ export function collectSamlTrustRoot(samlConfig: unknown, issuer: string): SamlT
  * and every certificate it carries must be one of them. No pins at all, an
  * entity id without pins, or an unreadable trust root → `false`.
  */
-function samlTrustRootPinned(
+export function samlTrustRootPinned(
   pins: Record<string, string[]> | undefined,
   saml: SamlTrustRoot,
 ): boolean {
@@ -579,13 +579,89 @@ export function oidcClaimsEnabled(opts: EnterpriseOptions | undefined): boolean 
   );
 }
 
-/** A SAML provider is refused (registration, update, sign-in) while an `sso.oidcClaims` option is on — `SSO_POLICY_UNSUPPORTED_PROTOCOL`. */
+/** A SAML provider is refused (registration, update, sign-in) only when the host opted out of SAML (`sso.samlPolicy: false`) — `SSO_POLICY_UNSUPPORTED_PROTOCOL`. */
 export function unsupportedProtocolError(): APIError {
   return policyRefusal(
     new APIError("FORBIDDEN", {
       code: "SSO_POLICY_UNSUPPORTED_PROTOCOL",
+      message: "This deployment does not accept SAML providers (sso.samlPolicy is false).",
+    }),
+  );
+}
+
+/** The effective SAML pins: `sso.samlPolicy` as the host wrote it, defaulted strict whenever `sso.oidcClaims` is on, else `null` (the 1.2 behaviour). */
+export interface SamlPolicy {
+  requireSignedAssertions: boolean;
+  requireCertificatePin: boolean;
+  allowIdpInitiated: boolean;
+}
+
+/**
+ * The per-protocol claims policy: `sso.oidcClaims` binds OIDC providers
+ * only, `sso.samlPolicy` binds SAML ones. `false` (an explicit opt-out of
+ * SAML) and "not configured and no `oidcClaims`" both return `null` — the
+ * caller tells them apart with `samlOptedOut`. With `oidcClaims` on and no
+ * `samlPolicy`, every pin is on, so turning an OIDC option on never loosens
+ * what SAML had to pass (it used to be refused outright).
+ */
+export function effectiveSamlPolicy(opts: EnterpriseOptions | undefined): SamlPolicy | null {
+  const configured = opts?.sso?.samlPolicy;
+  if (configured === false) return null;
+  if (configured === undefined && !oidcClaimsEnabled(opts)) return null;
+  return {
+    requireSignedAssertions: configured?.requireSignedAssertions !== false,
+    requireCertificatePin: configured?.requireCertificatePin !== false,
+    allowIdpInitiated: configured?.allowIdpInitiated === true,
+  };
+}
+
+/** Whether the host opted out of SAML (`sso.samlPolicy: false`). */
+export function samlOptedOut(opts: EnterpriseOptions | undefined): boolean {
+  return opts?.sso?.samlPolicy === false;
+}
+
+export type SamlPolicyRefusal = "SSO_SAML_UNSIGNED_ASSERTIONS" | "SSO_SAML_CERT_NOT_PINNED";
+
+const SP_WANTS_SIGNED = /WantAssertionsSigned\s*=\s*["']?(?:true|1)\b/i;
+
+/**
+ * The first `sso.samlPolicy` pin a stored or about-to-be-stored `samlConfig`
+ * does not satisfy, or `null`. Signed assertions: `wantAssertionsSigned` must
+ * be `true` and custom SP metadata (which upstream lets override it) must say
+ * so too. Certificate pin: the configuration's whole trust root must be under
+ * `sso.samlCertificateFingerprints` — with no `allowedIssuers` list too, which
+ * is what makes it a per-provider pin and not only a deployment-wide one.
+ */
+export function samlPolicyRefusal(
+  opts: EnterpriseOptions | undefined,
+  policy: SamlPolicy,
+  samlConfig: unknown,
+  issuer: string,
+): SamlPolicyRefusal | null {
+  if (!isRecord(samlConfig)) return "SSO_SAML_UNSIGNED_ASSERTIONS";
+  if (policy.requireSignedAssertions) {
+    const sp = isRecord(samlConfig.spMetadata) ? samlConfig.spMetadata.metadata : undefined;
+    const spOk = typeof sp !== "string" || sp.length === 0 || SP_WANTS_SIGNED.test(sp);
+    if (samlConfig.wantAssertionsSigned !== true || !spOk) return "SSO_SAML_UNSIGNED_ASSERTIONS";
+  }
+  if (policy.requireCertificatePin) {
+    const root = collectSamlTrustRoot(samlConfig, issuer);
+    if (!root || !samlTrustRootPinned(opts?.sso?.samlCertificateFingerprints, root)) {
+      return "SSO_SAML_CERT_NOT_PINNED";
+    }
+  }
+  return null;
+}
+
+/** A SAML configuration that does not meet `sso.samlPolicy` is refused at registration and update. */
+export function samlPolicyError(refusal: SamlPolicyRefusal): APIError {
+  return policyRefusal(
+    new APIError("BAD_REQUEST", {
+      code: refusal,
       message:
-        "This deployment requires OIDC identity claims (sso.oidcClaims), which a SAML provider cannot satisfy.",
+        refusal === "SSO_SAML_UNSIGNED_ASSERTIONS"
+          ? "This deployment requires signed SAML assertions (sso.samlPolicy.requireSignedAssertions); set samlConfig.wantAssertionsSigned to true."
+          : "This deployment requires the SAML signing certificate to be pinned (sso.samlPolicy.requireCertificatePin) under sso.samlCertificateFingerprints.",
     }),
   );
 }
@@ -719,10 +795,21 @@ async function guardRegister(
   body: Body,
   opts: EnterpriseOptions | undefined,
 ): Promise<HookResult> {
-  // The 1.3 claim options (`sso.oidcClaims`): checked first, on the body as
-  // sent, before anything is looked up. A SAML provider cannot carry OIDC
-  // claims; a provider without PKCE cannot satisfy `requirePkce`.
-  if (oidcClaimsEnabled(opts) && isRecord(body.samlConfig)) throw unsupportedProtocolError();
+  // The 1.3 claim options (`sso.oidcClaims`, OIDC only) and the per-protocol
+  // SAML pins (`sso.samlPolicy`): checked first, on the body as sent, before
+  // anything is looked up. A provider without PKCE cannot satisfy
+  // `requirePkce`.
+  if (samlOptedOut(opts) && isRecord(body.samlConfig)) throw unsupportedProtocolError();
+  const samlPolicy = effectiveSamlPolicy(opts);
+  if (samlPolicy && isRecord(body.samlConfig)) {
+    const refusal = samlPolicyRefusal(
+      opts,
+      samlPolicy,
+      body.samlConfig,
+      stringField(body, "issuer") ?? "",
+    );
+    if (refusal) throw samlPolicyError(refusal);
+  }
   if (opts?.sso?.oidcClaims?.requirePkce === true && isRecord(body.oidcConfig)) {
     if (body.oidcConfig.pkce === false) throw pkceRequiredError();
   }
@@ -762,9 +849,21 @@ async function guardUpdate(
   if (!(await callerMayMutate(ctx, provider, userId))) return;
 
   // The 1.3 claim options, on the provider as it will be after the update:
-  // no SAML configuration while `sso.oidcClaims` is on, and `requirePkce`
-  // judged the way upstream merges it (`updates.pkce ?? current.pkce ?? true`).
-  if (oidcClaimsEnabled(opts) && isRecord(body.samlConfig)) throw unsupportedProtocolError();
+  // no SAML configuration for a host that opted out of SAML, the SAML pins on
+  // the merged configuration, and `requirePkce` judged the way upstream merges
+  // it (`updates.pkce ?? current.pkce ?? true`).
+  if (samlOptedOut(opts) && isRecord(body.samlConfig)) throw unsupportedProtocolError();
+  const samlPolicy = effectiveSamlPolicy(opts);
+  if (samlPolicy && isRecord(body.samlConfig)) {
+    const merged = mergedProviderConfig(provider, body);
+    const refusal = samlPolicyRefusal(
+      opts,
+      samlPolicy,
+      merged.samlConfig,
+      stringField(body, "issuer") ?? provider.issuer,
+    );
+    if (refusal) throw samlPolicyError(refusal);
+  }
   if (opts?.sso?.oidcClaims?.requirePkce === true && isRecord(body.oidcConfig)) {
     const stored = parseStoredConfig(provider.oidcConfig);
     if ((body.oidcConfig.pkce ?? stored?.pkce ?? true) === false) throw pkceRequiredError();

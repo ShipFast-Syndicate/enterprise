@@ -15,7 +15,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createOrg, extractCookie, makeAuth, signUpOwner, type TestAuth } from "../helpers/auth";
 import { isPg, ts } from "../helpers/dialect";
 import { getNoRedirect, startOidcIssuer, type OidcIssuer } from "../helpers/oidc-issuer";
-import { registerOidcProvider, registerSamlProvider } from "../helpers/sso";
+import { X509Certificate } from "node:crypto";
+import { registerOidcProvider, registerSamlProvider, verifyProviderDomain } from "../helpers/sso";
+import { TEST_IDP_ENTITY_ID } from "../helpers/saml-idp";
+import { IDP_CERT, SP_KEY } from "../helpers/fixtures/saml-keys";
 import { mintSamlResponse } from "../helpers/saml-idp";
 import { createScimUser, insertMemberRow, mintScimToken, coreUserId } from "./helpers";
 import { sessionCookieOf, sessionOf, userRowsFor } from "./ghsa-sso-helpers";
@@ -413,7 +416,7 @@ describe("existingUsersOnly — SAML", () => {
   // `requestSignUp` escape, so it refuses first (`signup_disabled`, upstream's
   // own code); the `user.create.before` backstop is not reached on this path.
   // The backstop's own contract is test/security/sso-signup-backstop.test.ts.
-  it("SAML with only existingUsersOnly creates no user and no session for an unknown address (upstream's own signup_disabled)", async () => {
+  it("SAML with only existingUsersOnly creates no user and no session for an unknown address (SSO_USER_NOT_PROVISIONED)", async () => {
     const { t, orgId, ownerCookie } = await world({
       existingUsersOnly: true,
       organizationProvisioning: "off",
@@ -432,17 +435,45 @@ describe("existingUsersOnly — SAML", () => {
       RelayState: "",
     });
     expect(res.status).toBe(302);
-    expect(res.headers.get("location") ?? "").toContain("error=signup_disabled");
+    expect(res.headers.get("location") ?? "").toContain("error=SSO_USER_NOT_PROVISIONED");
     expect(extractCookie(res)).not.toContain("session_token");
     expect(await counts(t)).toEqual(before);
     expect(await userRowsFor(t, "ghost@acme.test")).toBe(0);
   });
 
-  it("SAML for an existing, unlinked user is not linked (upstream's 'account not linked'), whatever the claims options say", async () => {
-    const { t, orgId, ownerCookie } = await world({
+  it("SAML for a provisioned, unlinked member is linked (1.4), with no new user", async () => {
+    const { t, orgId, ownerCookie, janeId } = await world({
       existingUsersOnly: true,
       organizationProvisioning: "off",
     });
+    const saml = await registerSamlProvider(
+      t,
+      ownerCookie,
+      orgId,
+      "acme-saml",
+      undefined,
+      "acme.test",
+    );
+    const users = await count(t, "user");
+    const res = await t.api.postForm(`/sso/saml2/sp/acs/acme-saml`, {
+      SAMLResponse: await mintSamlResponse({ ...saml, email: "jane@acme.test" }),
+      RelayState: "",
+    });
+    expect(extractCookie(res)).toContain("session_token");
+    expect(await count(t, "user")).toBe(users);
+    const accounts = await t.client.execute({
+      sql: `SELECT "userId" FROM account WHERE "providerId" = ?`,
+      args: ["acme-saml"],
+    });
+    expect(accounts.rows.map((r) => r.userId)).toEqual([janeId]);
+  });
+
+  it("SAML for a user who is not a member of the provider's organization is refused SSO_NOT_MEMBER", async () => {
+    const { t, orgId, ownerCookie } = await world(
+      { existingUsersOnly: true, organizationProvisioning: "off" },
+      {},
+      false,
+    );
     const saml = await registerSamlProvider(
       t,
       ownerCookie,
@@ -456,35 +487,123 @@ describe("existingUsersOnly — SAML", () => {
       SAMLResponse: await mintSamlResponse({ ...saml, email: "jane@acme.test" }),
       RelayState: "",
     });
+    expect(res.headers.get("location") ?? "").toContain("error=SSO_NOT_MEMBER");
+    expect(extractCookie(res)).not.toContain("session_token");
+    expect(await counts(t)).toEqual(before);
+  });
+});
+
+describe("sso.samlPolicy — SAML under sso.oidcClaims (1.4)", () => {
+  const PINS = { [TEST_IDP_ENTITY_ID]: [new X509Certificate(IDP_CERT).fingerprint256] };
+  const samlBody = (orgId: string, extra: Record<string, unknown> = {}) => ({
+    providerId: "acme-saml",
+    issuer: TEST_IDP_ENTITY_ID,
+    domain: "acme.test",
+    organizationId: orgId,
+    samlConfig: {
+      entryPoint: `${TEST_IDP_ENTITY_ID}/sso`,
+      cert: IDP_CERT,
+      idpMetadata: { entityID: TEST_IDP_ENTITY_ID },
+      callbackUrl: "http://localhost:3000/api/auth/sso/saml2/sp/acs/acme-saml",
+      spMetadata: { entityID: "http://localhost:3000/api/auth/sso/saml2/sp/acme-saml" },
+      wantAssertionsSigned: true,
+      ...extra,
+    },
+  });
+  const registerSaml = (t: TestAuth, cookie: string, body: Record<string, unknown>) =>
+    t.api.post("/sso/register", body, { cookie });
+
+  it("a SAML provider with signed assertions and a pinned certificate registers under oidcClaims; an unsigned or unpinned one is refused", async () => {
+    const { t, orgId, ownerCookie } = await world({
+      ...STRICT_ALL,
+      samlCertificateFingerprints: PINS,
+    });
+    const unsigned = await registerSaml(
+      t,
+      ownerCookie,
+      samlBody(orgId, { wantAssertionsSigned: false }),
+    );
+    expect(unsigned.status).toBe(400);
+    expect(await unsigned.json()).toMatchObject({ code: "SSO_SAML_UNSIGNED_ASSERTIONS" });
+    const ok = await registerSaml(t, ownerCookie, samlBody(orgId));
+    expect(ok.status).toBe(200);
+
+    const other = await world({ ...STRICT_ALL, samlCertificateFingerprints: {} });
+    const unpinned = await registerSaml(other.t, other.ownerCookie, samlBody(other.orgId));
+    expect(unpinned.status).toBe(400);
+    expect(await unpinned.json()).toMatchObject({ code: "SSO_SAML_CERT_NOT_PINNED" });
+  });
+
+  it("an IdP-initiated assertion is refused by default under oidcClaims (unsolicited_response)", async () => {
+    // The shared mint helper signs the Response, not the Assertion, so this
+    // case relaxes `requireSignedAssertions`; the pin and IdP-initiated rules
+    // are the ones under test.
+    const { t, orgId, ownerCookie } = await world({
+      ...STRICT_ALL,
+      samlPolicy: { requireSignedAssertions: false },
+      samlCertificateFingerprints: PINS,
+    });
+    expect(
+      (await registerSaml(t, ownerCookie, samlBody(orgId, { wantAssertionsSigned: false }))).status,
+    ).toBe(200);
+    await verifyProviderDomain(t, "acme-saml");
+    const before = await counts(t);
+    const res = await t.api.postForm(`/sso/saml2/sp/acs/acme-saml`, {
+      SAMLResponse: await mintSamlResponse({
+        acsUrl: "http://localhost:3000/api/auth/sso/saml2/sp/acs/acme-saml",
+        spEntityID: "http://localhost:3000/api/auth/sso/saml2/sp/acme-saml",
+        email: "jane@acme.test",
+      }),
+      RelayState: "",
+    });
+    expect(res.headers.get("location") ?? "").toContain("error=unsolicited_response");
     expect(extractCookie(res)).not.toContain("session_token");
     expect(await counts(t)).toEqual(before);
   });
 
-  it("with oidcClaims set, a SAML provider is refused at registration (the resolver refuses a SAML sign-in too: test/server/sso-resolve.test.ts)", async () => {
-    const { t, orgId, ownerCookie } = await world(STRICT_ALL);
-    const register = await t.api.post(
-      "/sso/register",
-      {
-        providerId: "acme-saml",
-        issuer: "https://test-idp.alphabros.test/idp",
-        domain: "acme.test",
-        organizationId: orgId,
-        samlConfig: {
-          entryPoint: "https://test-idp.alphabros.test/idp/sso",
-          cert: "x",
-          callbackUrl: "http://localhost:3000/api/auth/sso/saml2/sp/acs/acme-saml",
-          spMetadata: { entityID: "http://localhost:3000/api/auth/sso/saml2/sp/acme-saml" },
-        },
-      },
-      { cookie: ownerCookie },
-    );
-    expect(register.status).toBe(403);
-    expect(await register.json()).toMatchObject({ code: "SSO_POLICY_UNSUPPORTED_PROTOCOL" });
-    const rows = await t.client.execute({
-      sql: `SELECT id FROM "ssoProvider" WHERE "providerId" = ?`,
+  it("with allowIdpInitiated opted in, a pinned provider signs the provisioned member in under oidcClaims; a wrong signing key is refused", async () => {
+    const { t, orgId, ownerCookie, janeId } = await world({
+      ...STRICT_ALL,
+      samlPolicy: { allowIdpInitiated: true, requireSignedAssertions: false },
+      samlCertificateFingerprints: PINS,
+    });
+    expect(
+      (await registerSaml(t, ownerCookie, samlBody(orgId, { wantAssertionsSigned: false }))).status,
+    ).toBe(200);
+    await verifyProviderDomain(t, "acme-saml");
+    const urls = {
+      acsUrl: "http://localhost:3000/api/auth/sso/saml2/sp/acs/acme-saml",
+      spEntityID: "http://localhost:3000/api/auth/sso/saml2/sp/acme-saml",
+    };
+    const before = await counts(t);
+    const wrongKey = await t.api.postForm(`/sso/saml2/sp/acs/acme-saml`, {
+      SAMLResponse: await mintSamlResponse({
+        ...urls,
+        email: "jane@acme.test",
+        signWithKey: SP_KEY,
+      }),
+      RelayState: "",
+    });
+    expect(extractCookie(wrongKey)).not.toContain("session_token");
+    expect(await counts(t)).toEqual(before);
+
+    const res = await t.api.postForm(`/sso/saml2/sp/acs/acme-saml`, {
+      SAMLResponse: await mintSamlResponse({ ...urls, email: "jane@acme.test" }),
+      RelayState: "",
+    });
+    expect(extractCookie(res)).toContain("session_token");
+    const accounts = await t.client.execute({
+      sql: `SELECT "userId" FROM account WHERE "providerId" = ?`,
       args: ["acme-saml"],
     });
-    expect(rows.rows).toEqual([]);
+    expect(accounts.rows.map((r) => r.userId)).toEqual([janeId]);
+  });
+
+  it("sso.samlPolicy:false opts out of SAML: registration is refused SSO_POLICY_UNSUPPORTED_PROTOCOL", async () => {
+    const { t, orgId, ownerCookie } = await world({ ...STRICT_ALL, samlPolicy: false });
+    const res = await registerSaml(t, ownerCookie, samlBody(orgId));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ code: "SSO_POLICY_UNSUPPORTED_PROTOCOL" });
   });
 });
 

@@ -206,8 +206,8 @@ describe("enterprisePreset inside workerd", () => {
     return providerId;
   }
 
-  it("with oidcClaims set, a SAML provider is refused at registration", async () => {
-    const t = boot(ALL_OPTIONS);
+  it("with samlPolicy:false, a SAML provider is refused at registration", async () => {
+    const t = boot({ ...ALL_OPTIONS, samlPolicy: false });
     const { cookie, orgId } = await ownerWithOrg(t);
     const res = await t.post(
       "/sso/register",

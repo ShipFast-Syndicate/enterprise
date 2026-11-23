@@ -22,11 +22,12 @@
 // redirects as `?error=<code>`. When `existingUsersOnly` is on, an OIDC sign-in
 // never gets `continue` from this function: every outcome is a link or a reject,
 // and a throw (a database error) becomes upstream's `SSO_USER_RESOLUTION_FAILED`,
-// which also fails closed. A SAML sign-in is different: with no `oidcClaims`
-// option on, the function delegates to the base resolver, which returns
-// `continue` for a non-SCIM organization. That is safe because it cannot create
-// a user: `disableImplicitSignUp` and the `user.create.before` backstop refuse
-// the creation (`SSO_SIGNUP_DISABLED`).
+// which also fails closed. A SAML sign-in under `existingUsersOnly` is judged
+// the same way (`resolveSaml`, 1.4) minus the ID-token claims; with neither
+// `existingUsersOnly` nor a SAML policy the function delegates to the base
+// resolver, which returns `continue` for a non-SCIM organization. That cannot
+// create a user: `disableImplicitSignUp` and the `user.create.before` backstop
+// refuse the creation (`SSO_SIGNUP_DISABLED`).
 //
 // What was read in upstream before writing this (`@better-auth/sso` and
 // `better-auth` 1.7.19), because the design depends on it:
@@ -65,6 +66,12 @@ import { findPersistedSsoProvider } from "./scim-sso";
 import { notePolicyRefusal } from "./audit/refusal";
 import { emailDomain, normalizeProviderDomains } from "./policy/domains";
 import { providerAuthorizesEmail } from "./policy/sso-jit";
+import {
+  effectiveSamlPolicy,
+  samlOptedOut,
+  samlPolicyRefusal,
+  type SamlPolicy,
+} from "./sso-domain";
 import type { EnterpriseOptions } from "./types";
 
 type SsoOptions = NonNullable<EnterpriseOptions["sso"]>;
@@ -83,6 +90,8 @@ type SsoPolicyRefusal =
   | "SSO_ACCOUNT_CONFLICT"
   | "SSO_PKCE_REQUIRED"
   | "SSO_POLICY_UNSUPPORTED_PROTOCOL"
+  | "SSO_SAML_UNSIGNED_ASSERTIONS"
+  | "SSO_SAML_CERT_NOT_PINNED"
   | "SSO_PROVIDER_UNRESOLVED"
   | "SSO_DOMAIN_NOT_ALLOWED";
 
@@ -275,10 +284,79 @@ async function checkUserBinding(
   return null;
 }
 
+/** Links the existing user a sign-in may bind to (SCIM decision `scim` first), or refuses; shared by OIDC and SAML. */
+async function linkExistingUser(
+  input: ResolverInput,
+  context: ResolverContext,
+  sso: SsoOptions,
+  provider: PersistedSsoProvider,
+  email: string,
+  scim: Awaited<ReturnType<SsoResolver>>,
+) {
+  const user =
+    scim.action === "link"
+      ? await findUser(context.database, { field: "id", value: scim.userId })
+      : await findUser(context.database, { field: "email", value: email.toLowerCase() });
+  if (!user) return refuse("SSO_USER_NOT_PROVISIONED");
+  const refusal = await checkUserBinding(
+    context.database,
+    sso,
+    provider,
+    user,
+    input.accountKey.accountId,
+    input.providerId,
+  );
+  if (refusal) return refuse(refusal);
+  return { action: "link", userId: user.id, profile: "preserve" } as const;
+}
+
+/**
+ * The SAML half of the resolver. A SAML assertion carries no ID-token claims,
+ * so `oidcClaims` do not apply: the provider is judged by `sso.samlPolicy`
+ * (signed assertions, certificate pin — the signature, replay and IdP-initiated
+ * checks themselves are upstream's, configured by the preset) and, under
+ * `existingUsersOnly`, the user is linked with the same ban, membership and
+ * one-subject checks as OIDC. The e-mail is the one upstream took from the
+ * signature-verified assertion.
+ */
+async function resolveSaml(
+  opts: EnterpriseOptions,
+  policy: SamlPolicy | null,
+  input: Extract<ResolverInput, { protocol: "saml" }>,
+  context: ResolverContext,
+  base: SsoResolver,
+) {
+  const sso = opts.sso ?? {};
+  const existingUsersOnly = sso.existingUsersOnly === true;
+  if (samlOptedOut(opts)) return refuse("SSO_POLICY_UNSUPPORTED_PROTOCOL");
+  if (!existingUsersOnly && !policy) return base(input, context);
+
+  const provider = await findPersistedSsoProvider(input, context);
+  if (!provider) return refuse("SSO_PROVIDER_UNRESOLVED");
+  if (policy) {
+    const refusal = samlPolicyRefusal(
+      opts,
+      policy,
+      parseOidcConfig(provider.samlConfig),
+      provider.issuer,
+    );
+    if (refusal) return refuse(refusal);
+  }
+  const email = input.providerUser.email;
+  if (typeof email !== "string" || email.length === 0) return refuse("SSO_EMAIL_CLAIM_MISMATCH");
+  if (existingUsersOnly && !providerAuthorizesEmail(provider, email)) {
+    return refuse("SSO_DOMAIN_NOT_ALLOWED");
+  }
+  const scim = await base(input, context);
+  if (scim.action === "reject") return scim;
+  if (!existingUsersOnly) return scim;
+  return linkExistingUser(input, context, sso, provider, email, scim);
+}
+
 /**
  * Composes the SSO resolver for the 1.3 options (see the file header).
- * Returns `base` itself unless `existingUsersOnly` or an `oidcClaims` option
- * is on.
+ * Returns `base` itself unless `existingUsersOnly`, an `oidcClaims` option or
+ * `samlPolicy` is on.
  */
 export function composeSsoResolvers(opts: EnterpriseOptions, base: SsoResolver): SsoResolver {
   const sso = opts.sso ?? {};
@@ -286,15 +364,14 @@ export function composeSsoResolvers(opts: EnterpriseOptions, base: SsoResolver):
   const claimsOn =
     wanted.requireEmailVerified || wanted.requirePkce || wanted.hostedDomain !== null;
   const existingUsersOnly = sso.existingUsersOnly === true;
-  if (!existingUsersOnly && !claimsOn) return base;
+  const samlPolicy = effectiveSamlPolicy(opts);
+  const samlOff = samlOptedOut(opts);
+  if (!existingUsersOnly && !claimsOn && !samlPolicy && !samlOff) return base;
 
   return async (input, context) => {
-    // 1. Protocol. The claim options read OIDC claims; a SAML assertion has
-    // none, so a deployment that asked for them must not sign SAML users in.
-    if (input.protocol === "saml") {
-      if (claimsOn) return refuse("SSO_POLICY_UNSUPPORTED_PROTOCOL");
-      return base(input, context);
-    }
+    // 1. Protocol. The claim options read OIDC claims and bind OIDC only;
+    // SAML has its own policy.
+    if (input.protocol === "saml") return resolveSaml(opts, samlPolicy, input, context, base);
 
     // 2. Provider: persisted only (a `defaultSSO` entry has no row to judge).
     const provider = await findPersistedSsoProvider(input, context);
@@ -317,20 +394,6 @@ export function composeSsoResolvers(opts: EnterpriseOptions, base: SsoResolver):
     if (!existingUsersOnly) return scim;
 
     // 6. The existing user this sign-in may bind to.
-    const user =
-      scim.action === "link"
-        ? await findUser(context.database, { field: "id", value: scim.userId })
-        : await findUser(context.database, { field: "email", value: checked.email.toLowerCase() });
-    if (!user) return refuse("SSO_USER_NOT_PROVISIONED");
-    const refusal = await checkUserBinding(
-      context.database,
-      sso,
-      provider,
-      user,
-      input.accountKey.accountId,
-      input.providerId,
-    );
-    if (refusal) return refuse(refusal);
-    return { action: "link", userId: user.id, profile: "preserve" };
+    return linkExistingUser(input, context, sso, provider, checked.email, scim);
   };
 }

@@ -17,6 +17,7 @@ export interface PersistedSsoProvider {
   domainVerified: boolean;
   issuer: string;
   oidcConfig?: unknown;
+  samlConfig?: unknown;
 }
 
 /**

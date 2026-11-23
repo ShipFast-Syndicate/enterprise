@@ -429,4 +429,7 @@ export const POLICY_REFUSAL_CODES: ReadonlySet<string> = new Set([
   "SSO_SIGNUP_DISABLED",
   "SSO_PKCE_REQUIRED",
   "SSO_POLICY_UNSUPPORTED_PROTOCOL",
+  // `sso.samlPolicy`: raised by the composed resolver (and at registration).
+  "SSO_SAML_UNSIGNED_ASSERTIONS",
+  "SSO_SAML_CERT_NOT_PINNED",
 ]);

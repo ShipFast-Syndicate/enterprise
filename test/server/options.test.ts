@@ -226,6 +226,24 @@ describe("assertEnterpriseOptions — sso 1.3 opt-ins", () => {
     ).toThrow(/domainVerificationMode/);
   });
 
+  it("validates sso.samlPolicy: false or an object of the three known booleans", () => {
+    for (const ok of [false, {}, { requireSignedAssertions: false, allowIdpInitiated: true }]) {
+      expect(() => assertEnterpriseOptions(loose({ sso: { samlPolicy: ok } }))).not.toThrow();
+    }
+    for (const bad of [
+      true,
+      "strict",
+      [],
+      null,
+      { requireNonce: true },
+      { allowIdpInitiated: "yes" },
+    ]) {
+      expect(() => assertEnterpriseOptions(loose({ sso: { samlPolicy: bad } }))).toThrow(
+        /samlPolicy/,
+      );
+    }
+  });
+
   it("rejects an oidcClaims that is not an object, and unknown oidcClaims keys", () => {
     for (const bad of ["pkce", true, [], null]) {
       expect(() => assertEnterpriseOptions(loose({ sso: { oidcClaims: bad } }))).toThrow(

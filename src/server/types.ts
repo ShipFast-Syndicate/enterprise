@@ -218,9 +218,10 @@ export interface EnterpriseOptions {
    * and domain-verified for the e-mail's domain, and forces
    * `disableImplicitSignUp: true`. The local `user.emailVerified` is neither
    * required nor changed — the IdP is the e-mail authority here. SAML sign-ins
-   * are not linked by this option: a SAML assertion for an unlinked user still
-   * ends in upstream's "account not linked", and no user is ever created (the
-   * `user.create.before` hook refuses any SSO callback creation).
+   * are linked the same way (1.4), minus the ID-token checks: the e-mail comes
+   * from the signature-verified assertion and the provider must still pass
+   * `samlPolicy`. No user is ever created (the `user.create.before` hook
+   * refuses any SSO callback creation).
    *
    * `requireMembership` (default `true`, only with `existingUsersOnly`): the
    * user must already be a member of the provider's organization
@@ -242,11 +243,26 @@ export interface EnterpriseOptions {
    * those), with the e-mail on that exact domain and no subdomain matching;
    * it is Google-specific, so personal Google accounts and non-Google IdPs
    * (which carry no `hd`) are refused. `requirePkce` refuses a provider that
-   * does not use PKCE, at registration and at every sign-in. OIDC only: a SAML
-   * provider cannot be checked against OIDC claims, so with any of these set a
-   * SAML provider is refused at registration and at sign-in
-   * (`SSO_POLICY_UNSUPPORTED_PROTOCOL`). Unknown keys throw. A refused sign-in
+   * does not use PKCE, at registration and at every sign-in. OIDC only: these
+   * options never apply to a SAML provider, which `samlPolicy` governs
+   * instead (below). Unknown keys throw. A refused sign-in
    * is audited as `auth.sign_in_refused` with the refusal code.
+   *
+   * `samlPolicy` (1.4): the SAML counterpart of `oidcClaims`. A SAML
+   * assertion carries no OIDC claims, so SAML providers are judged by their
+   * own pins, at registration, update and every sign-in. Absent, SAML keeps
+   * its 1.2/1.3 behaviour — unless an `oidcClaims` option is on, in which case
+   * every pin below is on (SAML used to be refused outright). An object
+   * tunes them: `requireSignedAssertions` (default `true`) the provider must
+   * have `wantAssertionsSigned: true` (`SSO_SAML_UNSIGNED_ASSERTIONS`);
+   * `requireCertificatePin` (default `true`) its signing certificates must
+   * all be under `samlCertificateFingerprints` (`SSO_SAML_CERT_NOT_PINNED`);
+   * `allowIdpInitiated` (default `false`) lets an unsolicited assertion
+   * through. A set `samlPolicy` also turns on upstream's `InResponseTo`
+   * check, which binds a response to one AuthnRequest and so refuses a replay.
+   * `false` opts out of SAML: every SAML provider is refused
+   * (`SSO_POLICY_UNSUPPORTED_PROTOCOL`). With `existingUsersOnly`, a SAML
+   * sign-in links a provisioned user with the same checks as OIDC.
    *
    * `domainVerificationMode` (default `"dns"`): `"operator"` replaces the DNS
    * ownership proof with an attestation made by server code
@@ -279,6 +295,13 @@ export interface EnterpriseOptions {
       requireHostedDomain?: boolean | readonly string[];
       requirePkce?: boolean;
     };
+    samlPolicy?:
+      | false
+      | {
+          requireSignedAssertions?: boolean;
+          requireCertificatePin?: boolean;
+          allowIdpInitiated?: boolean;
+        };
     domainVerificationMode?: "dns" | "operator";
   };
   /**
