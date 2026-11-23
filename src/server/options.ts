@@ -61,6 +61,28 @@ const OIDC_CLAIM_KEYS: ReadonlySet<string> = new Set([
   "requireHostedDomain",
 ]);
 
+const SAML_POLICY_BOOLEANS: ReadonlySet<string> = new Set([
+  "requireSignedAssertions",
+  "requireCertificatePin",
+  "allowIdpInitiated",
+]);
+
+/** `sso.samlPolicy` (1.4): `false` (opt out of SAML) or an object of three known booleans. */
+function assertSamlPolicy(policy: unknown): void {
+  if (policy === undefined || policy === false) return;
+  if (typeof policy !== "object" || policy === null || Array.isArray(policy)) {
+    fail(`"sso.samlPolicy" must be false or an object.`);
+  }
+  for (const [key, value] of Object.entries(policy)) {
+    if (!SAML_POLICY_BOOLEANS.has(key)) {
+      fail(
+        `"sso.samlPolicy.${key}" is not an option (known: ${[...SAML_POLICY_BOOLEANS].join(", ")}).`,
+      );
+    }
+    if (typeof value !== "boolean") fail(`"sso.samlPolicy.${key}" must be a boolean.`);
+  }
+}
+
 /** `sso.existingUsersOnly`, `requireMembership`, `organizationProvisioning`, `oidcClaims` and `domainVerificationMode` (all 1.3, all opt-in). */
 function assertSsoTightening(sso: NonNullable<EnterpriseOptions["sso"]>): void {
   const existingUsersOnly: unknown = sso.existingUsersOnly;
@@ -86,6 +108,8 @@ function assertSsoTightening(sso: NonNullable<EnterpriseOptions["sso"]>): void {
   if (mode !== undefined && mode !== "dns" && mode !== "operator") {
     fail(`"sso.domainVerificationMode" must be "dns" or "operator" (got ${JSON.stringify(mode)}).`);
   }
+
+  assertSamlPolicy(sso.samlPolicy);
 
   const claims: unknown = sso.oidcClaims;
   if (claims === undefined) return;

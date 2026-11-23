@@ -6,7 +6,9 @@
 // resolver, and user creation is blocked by the create hook backstop).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { notePolicyRefusal } from "../../src/server/audit/refusal";
+import { X509Certificate } from "node:crypto";
 import { composeSsoResolvers } from "../../src/server/sso-resolve";
+import { IDP_CERT } from "../helpers/fixtures/saml-keys";
 import type { EnterpriseOptions } from "../../src/server/types";
 
 vi.mock("../../src/server/audit/refusal", async (importOriginal) => {
@@ -171,31 +173,106 @@ describe("composeSsoResolvers — identity", () => {
   });
 });
 
+const SAML_ENTITY = "https://idp.test/saml";
+const PINS = {
+  samlCertificateFingerprints: { [SAML_ENTITY]: [new X509Certificate(IDP_CERT).fingerprint256] },
+};
+const SAML_CONFIG = {
+  cert: IDP_CERT,
+  idpMetadata: { entityID: SAML_ENTITY },
+  entryPoint: `${SAML_ENTITY}/sso`,
+  wantAssertionsSigned: true,
+};
+const SAML_ROW = {
+  id: "rec-1",
+  providerId: "acme-saml",
+  organizationId: "org-1",
+  domain: "acme.test",
+  domainVerified: true,
+  issuer: SAML_ENTITY,
+  samlConfig: JSON.stringify(SAML_CONFIG),
+};
+const samlTables = (row: Row = SAML_ROW) => baseTables({ ssoProvider: [row] });
+const CLAIMS = { oidcClaims: { requireEmailVerified: true, requirePkce: true }, ...PINS } as const;
+
 describe("composeSsoResolvers — protocol", () => {
-  it("SAML with oidcClaims set is refused SSO_POLICY_UNSUPPORTED_PROTOCOL (the claims cannot be checked)", async () => {
-    const { run, baseResolver } = setup({ oidcClaims: { requireEmailVerified: true } });
+  it("SAML under oidcClaims is judged by the SAML policy, not refused: a signed, pinned provider passes to the base resolver", async () => {
+    const { run, baseResolver } = setup(CLAIMS, samlTables());
+    expect(await run(samlInput())).toEqual({ action: "continue" });
+    expect(baseResolver).toHaveBeenCalledTimes(1);
+    expect(notePolicyRefusal).not.toHaveBeenCalled();
+  });
+
+  it("under oidcClaims a provider that does not require signed assertions is refused SSO_SAML_UNSIGNED_ASSERTIONS", async () => {
+    for (const config of [
+      { ...SAML_CONFIG, wantAssertionsSigned: false },
+      { ...SAML_CONFIG, wantAssertionsSigned: undefined },
+      {
+        ...SAML_CONFIG,
+        spMetadata: { metadata: '<SPSSODescriptor WantAssertionsSigned="false"/>' },
+      },
+    ]) {
+      const { run, baseResolver } = setup(
+        CLAIMS,
+        samlTables({ ...SAML_ROW, samlConfig: JSON.stringify(config) }),
+      );
+      await expectRefusal(run(samlInput()), "SSO_SAML_UNSIGNED_ASSERTIONS");
+      expect(baseResolver).not.toHaveBeenCalled();
+      vi.mocked(notePolicyRefusal).mockClear();
+    }
+  });
+
+  it("a wrongly pinned or unpinned certificate is refused SSO_SAML_CERT_NOT_PINNED", async () => {
+    const wrong: Record<string, string[]> = { [SAML_ENTITY]: ["ab".repeat(32)] };
+    for (const pins of [
+      { samlCertificateFingerprints: wrong },
+      { samlCertificateFingerprints: {} as Record<string, string[]> },
+      {},
+    ]) {
+      const { run } = setup({ oidcClaims: CLAIMS.oidcClaims, ...pins }, samlTables());
+      await expectRefusal(run(samlInput()), "SSO_SAML_CERT_NOT_PINNED");
+      vi.mocked(notePolicyRefusal).mockClear();
+    }
+  });
+
+  it("samlPolicy can switch a pin off; an unreadable stored config is refused", async () => {
+    const { run } = setup(
+      { samlPolicy: { requireCertificatePin: false, requireSignedAssertions: false } },
+      samlTables({
+        ...SAML_ROW,
+        samlConfig: JSON.stringify({ ...SAML_CONFIG, wantAssertionsSigned: false }),
+      }),
+    );
+    expect(await run(samlInput())).toEqual({ action: "continue" });
+    const broken = setup(CLAIMS, samlTables({ ...SAML_ROW, samlConfig: "not json" }));
+    await expectRefusal(broken.run(samlInput()), "SSO_SAML_UNSIGNED_ASSERTIONS");
+  });
+
+  it("a SAML provider that is not persisted is refused SSO_PROVIDER_UNRESOLVED under samlPolicy", async () => {
+    const { run } = setup(CLAIMS, samlTables());
+    const input = samlInput();
+    await expectRefusal(
+      run({
+        ...input,
+        providerReference: { ...input.providerReference, source: { type: "configured" } },
+      } as never),
+      "SSO_PROVIDER_UNRESOLVED",
+    );
+  });
+
+  it("samlPolicy:false refuses SAML SSO_POLICY_UNSUPPORTED_PROTOCOL, and only then", async () => {
+    const { run, baseResolver } = setup({ samlPolicy: false }, samlTables());
     await expectRefusal(run(samlInput()), "SSO_POLICY_UNSUPPORTED_PROTOCOL");
     expect(baseResolver).not.toHaveBeenCalled();
   });
 
-  it("SAML with only existingUsersOnly delegates to the base resolver unchanged", async () => {
-    const { run, baseResolver, database } = setup(STRICT, baseTables(), async () => ({
-      action: "link",
-      userId: "scim-user",
-      profile: "preserve",
-    }));
-    expect(await run(samlInput())).toEqual({
-      action: "link",
-      userId: "scim-user",
-      profile: "preserve",
-    });
-    expect(baseResolver).toHaveBeenCalledTimes(1);
-    expect(database.findOne).not.toHaveBeenCalled();
-    expect(notePolicyRefusal).not.toHaveBeenCalled();
+  it("SAML with no SAML policy and no existingUsersOnly is the base resolver itself", () => {
+    const base = async () => ({ action: "continue" as const });
+    expect(composeSsoResolvers(options({ samlPolicy: undefined }), base)).toBe(base);
   });
 
   it("SAML: a base reject is returned as is", async () => {
-    const { run } = setup(STRICT, baseTables(), async () => ({
+    const { run } = setup(STRICT, samlTables(), async () => ({
       action: "reject",
       code: "SCIM_PROVISIONING_REQUIRED",
     }));
@@ -203,6 +280,67 @@ describe("composeSsoResolvers — protocol", () => {
       action: "reject",
       code: "SCIM_PROVISIONING_REQUIRED",
     });
+  });
+});
+
+describe("composeSsoResolvers — linking a provisioned user on SAML", () => {
+  const LINK = { ...STRICT, ...CLAIMS } as const;
+
+  it("links the pre-existing member found by the assertion's e-mail, preserving the profile", async () => {
+    const { run } = setup(LINK, samlTables());
+    expect(await run(samlInput())).toEqual({ action: "link", userId: "u1", profile: "preserve" });
+    expect(notePolicyRefusal).not.toHaveBeenCalled();
+  });
+
+  it("existingUsersOnly alone links on SAML too (no SAML pins unless asked for)", async () => {
+    const { run } = setup(
+      STRICT,
+      samlTables({ ...SAML_ROW, samlConfig: JSON.stringify({ cert: "x" }) }),
+    );
+    expect(await run(samlInput())).toEqual({ action: "link", userId: "u1", profile: "preserve" });
+  });
+
+  it("no local user is SSO_USER_NOT_PROVISIONED, never a continue", async () => {
+    const { run } = setup(LINK, samlTables());
+    const input = samlInput();
+    await expectRefusal(
+      run({ ...input, providerUser: { ...input.providerUser, email: "ghost@acme.test" } }),
+      "SSO_USER_NOT_PROVISIONED",
+    );
+  });
+
+  it("a non-member is SSO_NOT_MEMBER; requireMembership:false drops that check", async () => {
+    const tables = samlTables();
+    tables.member = [];
+    await expectRefusal(setup(LINK, tables).run(samlInput()), "SSO_NOT_MEMBER");
+    vi.mocked(notePolicyRefusal).mockClear();
+    const relaxed = setup({ ...LINK, requireMembership: false }, tables);
+    expect(await relaxed.run(samlInput())).toMatchObject({ action: "link", userId: "u1" });
+  });
+
+  it("a second subject for the same user, or the subject of another user, is SSO_ACCOUNT_CONFLICT", async () => {
+    const second = samlTables();
+    second.account = [{ userId: "u1", providerId: "acme-saml", accountId: "other-name-id" }];
+    await expectRefusal(setup(LINK, second).run(samlInput()), "SSO_ACCOUNT_CONFLICT");
+    vi.mocked(notePolicyRefusal).mockClear();
+    const taken = samlTables();
+    taken.account = [{ userId: "u2", providerId: "acme-saml", accountId: "name-id-1" }];
+    await expectRefusal(setup(LINK, taken).run(samlInput()), "SSO_ACCOUNT_CONFLICT");
+  });
+
+  it("a banned user is refused, and an unverified provider domain is SSO_DOMAIN_NOT_ALLOWED", async () => {
+    const banned = samlTables();
+    banned.user = [{ id: "u1", email: "jane@acme.test", banned: true }];
+    await expectRefusal(setup(LINK, banned).run(samlInput()), "SSO_USER_BANNED");
+    vi.mocked(notePolicyRefusal).mockClear();
+    const unverified = setup(LINK, samlTables({ ...SAML_ROW, domainVerified: false }));
+    await expectRefusal(unverified.run(samlInput()), "SSO_DOMAIN_NOT_ALLOWED");
+  });
+
+  it("the SAML policy is checked before any user lookup", async () => {
+    const { run, database } = setup({ ...STRICT, oidcClaims: CLAIMS.oidcClaims }, samlTables());
+    await expectRefusal(run(samlInput()), "SSO_SAML_CERT_NOT_PINNED");
+    expect(database.findMany).not.toHaveBeenCalled();
   });
 });
 

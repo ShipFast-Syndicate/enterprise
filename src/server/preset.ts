@@ -5,6 +5,7 @@ import { apiKey } from "@better-auth/api-key";
 import { sso } from "@better-auth/sso";
 import { resolveScimSsoUser, guardScimSsoProviderMutation } from "./scim-sso";
 import { composeSsoResolvers } from "./sso-resolve";
+import { effectiveSamlPolicy } from "./sso-domain";
 import { enterpriseScim, scimMembershipSchema } from "./scim";
 import type { EnterpriseOptions } from "./types";
 import { enterpriseGate } from "./gate";
@@ -26,6 +27,13 @@ export { API_KEY_LIFECYCLE_PLUGIN_ID, API_KEY_STANDING_PLUGIN_ID };
 
 /** 90 days, in seconds — the default lifetime of a key created without `expiresIn`. */
 const DEFAULT_API_KEY_EXPIRES_IN_S = 90 * 24 * 3600;
+
+function samlOptions(opts: EnterpriseOptions) {
+  const policy = effectiveSamlPolicy(opts);
+  return policy
+    ? { allowIdpInitiated: policy.allowIdpInitiated, enableInResponseToValidation: true }
+    : { allowIdpInitiated: true };
+}
 
 export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
   // `secretsKey` is load-bearing as of the pre-publish security pass (C-04):
@@ -102,7 +110,10 @@ export function enterprisePreset(opts: EnterpriseOptions): BetterAuthPlugin[] {
       // (`./sso-resolve.ts`'s identity rule).
       resolveUser: composeSsoResolvers(opts, resolveScimSsoUser),
       guardProviderMutation: guardScimSsoProviderMutation,
-      saml: { allowIdpInitiated: true },
+      // `sso.samlPolicy` (1.4, or any `oidcClaims` option) closes the 1.2
+      // IdP-initiated default and turns upstream's `InResponseTo` check on
+      // explicitly; absent, it is the 1.2 literal.
+      saml: samlOptions(opts),
     }),
     enterpriseScim(opts),
     enterpriseGate(opts),

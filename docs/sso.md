@@ -520,18 +520,18 @@ response or the profile. In order, an OIDC sign-in is checked for:
 Every refusal is a redirect with `?error=<code>`, no session, no row written, and
 an `auth.sign_in_refused` audit row naming the code and the provider. A database
 error becomes upstream's `SSO_USER_RESOLUTION_FAILED`, which also refuses. With
-`existingUsersOnly` on, the resolver never lets an OIDC sign-in continue. A SAML
-sign-in (when no `oidcClaims` option is on) is handed to the 1.2 resolver, which
-can let it continue; it still cannot create a user, because
-`disableImplicitSignUp` and the `user.create.before` backstop below refuse the
-creation.
+`existingUsersOnly` on, the resolver never lets an OIDC or SAML sign-in
+continue: every outcome is a link or a refusal. With neither `existingUsersOnly`
+nor a SAML policy, a SAML sign-in is handed to the 1.2 resolver; it still cannot
+create a user, because `disableImplicitSignUp` and the `user.create.before`
+backstop below refuse the creation.
 
 Two backstops sit beside it: a `user.create.before` hook that refuses any user
 created from an SSO callback (`SSO_SIGNUP_DISABLED`), because upstream computes
 `disableSignUp = disableImplicitSignUp && !requestSignUp` and `requestSignUp` is
-client-controlled; and the registration guards, which refuse a SAML provider
-while an `oidcClaims` option is on and `pkce: false` while `requirePkce` is on
-(`SSO_POLICY_UNSUPPORTED_PROTOCOL`, `SSO_PKCE_REQUIRED`).
+client-controlled; and the registration guards, which refuse `pkce: false` while
+`requirePkce` is on (`SSO_PKCE_REQUIRED`) and a SAML provider that does not meet
+`samlPolicy` (below).
 
 ### Linking, and why account linking can stay off
 
@@ -549,9 +549,30 @@ e-mail authority, and `profile: "preserve"` leaves the user's name, image and
 e-mail alone. If you need the local flag too, that is a separate decision
 (`requireLocalEmailVerified` is not part of 1.3).
 
-SAML is **not** linked by this option. A SAML assertion for an existing, unlinked
-user still ends in upstream's "account not linked", and no SAML sign-in creates
-a user. With any `oidcClaims` option set, SAML is refused outright.
+### SAML: `sso.samlPolicy` (1.4)
+
+`oidcClaims` bind OIDC providers only: a SAML assertion has no ID-token claims.
+SAML has its own pins, checked at registration, at update and at every sign-in:
+
+| Option                               | Default | Effect                                                                                                                        |
+| ------------------------------------ | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `samlPolicy.requireSignedAssertions` | `true`  | The provider needs `wantAssertionsSigned: true` (and SP metadata that agrees); else `SSO_SAML_UNSIGNED_ASSERTIONS`.           |
+| `samlPolicy.requireCertificatePin`   | `true`  | Every signing certificate must be under `sso.samlCertificateFingerprints` for its entity id; else `SSO_SAML_CERT_NOT_PINNED`. |
+| `samlPolicy.allowIdpInitiated`       | `false` | `true` lets an unsolicited assertion (no `InResponseTo`) through. Otherwise upstream refuses it (`unsolicited_response`).     |
+| `samlPolicy: false`                  | —       | Opt out of SAML: every SAML provider is refused (`SSO_POLICY_UNSUPPORTED_PROTOCOL`).                                          |
+
+The defaults in the table apply when `samlPolicy` is an object **or** any
+`oidcClaims` option is on (SAML used to be refused outright then); with neither,
+SAML behaves as in 1.2/1.3 (IdP-initiated allowed). A set policy also turns on
+upstream's `InResponseTo` validation explicitly, which binds a response to one
+AuthnRequest and so refuses a replayed or unsolicited one; signature, audience
+and timestamp checks stay upstream's.
+
+With `existingUsersOnly`, a SAML sign-in links a provisioned user the same way as
+OIDC: persisted provider, domain authorised for the e-mail (the e-mail is the one
+upstream took from the signature-verified assertion), then the ban,
+`requireMembership` (organisation) and one-subject checks, and the refusal is
+audited as `auth.sign_in_refused`. No SAML sign-in creates a user.
 
 Email reassignment (the IdP gives an address to a new person) ends in
 `SSO_ACCOUNT_CONFLICT` for the new subject; there is no unlink procedure in 1.3,

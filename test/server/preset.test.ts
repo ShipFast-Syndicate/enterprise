@@ -129,7 +129,7 @@ describe("enterprisePreset", () => {
       });
     });
 
-    it("an oidcClaims option changes only the resolver", () => {
+    it("an oidcClaims option or samlPolicy changes the resolver and closes IdP-initiated SAML", () => {
       const baseline = ssoArgumentFor();
       for (const oidcClaims of [
         { requireEmailVerified: true },
@@ -141,8 +141,15 @@ describe("enterprisePreset", () => {
         expect({ ...arg, resolveUser: undefined }).toStrictEqual({
           ...baseline,
           resolveUser: undefined,
+          saml: { allowIdpInitiated: false, enableInResponseToValidation: true },
         });
       }
+      const opened = ssoArgumentFor({ sso: { samlPolicy: { allowIdpInitiated: true } } });
+      expect(opened.saml).toStrictEqual({
+        allowIdpInitiated: true,
+        enableInResponseToValidation: true,
+      });
+      expect(ssoArgumentFor({ sso: { samlPolicy: false } }).saml).toStrictEqual(baseline.saml);
     });
 
     it("domainVerificationMode:'operator' leaves every sso() key as it was", () => {
