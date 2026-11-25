@@ -17,7 +17,7 @@ import { isPg, ts } from "../helpers/dialect";
 import { getNoRedirect, startOidcIssuer, type OidcIssuer } from "../helpers/oidc-issuer";
 import { X509Certificate } from "node:crypto";
 import { registerOidcProvider, registerSamlProvider, verifyProviderDomain } from "../helpers/sso";
-import { TEST_IDP_ENTITY_ID } from "../helpers/saml-idp";
+import { authnRequestId, TEST_IDP_ENTITY_ID } from "../helpers/saml-idp";
 import { IDP_CERT, SP_KEY } from "../helpers/fixtures/saml-keys";
 import { mintSamlResponse } from "../helpers/saml-idp";
 import { createScimUser, insertMemberRow, mintScimToken, coreUserId } from "./helpers";
@@ -597,6 +597,88 @@ describe("sso.samlPolicy — SAML under sso.oidcClaims (1.4)", () => {
       args: ["acme-saml"],
     });
     expect(accounts.rows.map((r) => r.userId)).toEqual([janeId]);
+  });
+
+  it("with the default strict pins (requireEmailVerified + requirePkce on), an SP-initiated signed assertion signs the provisioned member in; replayed, unsigned and wrongly pinned ones are refused", async () => {
+    const { t, orgId, ownerCookie, janeId } = await world({
+      ...STRICT_ALL,
+      samlCertificateFingerprints: PINS,
+    });
+    expect((await registerSaml(t, ownerCookie, samlBody(orgId))).status).toBe(200);
+    await verifyProviderDomain(t, "acme-saml");
+    const urls = {
+      acsUrl: "http://localhost:3000/api/auth/sso/saml2/sp/acs/acme-saml",
+      spEntityID: "http://localhost:3000/api/auth/sso/saml2/sp/acme-saml",
+    };
+    const requestId = async () => {
+      const res = await t.api.post("/sign-in/sso", { providerId: "acme-saml", callbackURL: "/" });
+      expect(res.status).toBe(200);
+      return authnRequestId(((await res.json()) as { url: string }).url);
+    };
+    const acs = (SAMLResponse: string) =>
+      t.api.postForm(`/sso/saml2/sp/acs/acme-saml`, { SAMLResponse, RelayState: "" });
+
+    // Signed Response but unsigned Assertion: wantAssertionsSigned refuses it.
+    const before = await counts(t);
+    const unsigned = await acs(
+      await mintSamlResponse({ ...urls, email: "jane@acme.test", inResponseTo: await requestId() }),
+    );
+    expect(extractCookie(unsigned)).not.toContain("session_token");
+    expect(await counts(t)).toEqual(before);
+
+    // Signed with a key outside the pinned certificate.
+    const wrongPin = await acs(
+      await mintSamlResponse({
+        ...urls,
+        email: "jane@acme.test",
+        inResponseTo: await requestId(),
+        signAssertion: true,
+        signWithKey: SP_KEY,
+      }),
+    );
+    expect(extractCookie(wrongPin)).not.toContain("session_token");
+    expect(await counts(t)).toEqual(before);
+
+    const signed = await mintSamlResponse({
+      ...urls,
+      email: "jane@acme.test",
+      inResponseTo: await requestId(),
+      signAssertion: true,
+    });
+    const res = await acs(signed);
+    expect(extractCookie(res)).toContain("session_token");
+    const accounts = await t.client.execute({
+      sql: `SELECT "userId" FROM account WHERE "providerId" = ?`,
+      args: ["acme-saml"],
+    });
+    expect(accounts.rows.map((r) => r.userId)).toEqual([janeId]);
+
+    // The same response posted again: its AuthnRequest is consumed, so it is refused.
+    const replay = await acs(signed);
+    expect(replay.headers.get("location") ?? "").toContain("error=");
+    expect(extractCookie(replay)).not.toContain("session_token");
+  });
+
+  it("an IdP-initiated assertion replayed under allowIdpInitiated is refused replay_detected", async () => {
+    const { t, orgId, ownerCookie } = await world({
+      ...STRICT_ALL,
+      samlPolicy: { allowIdpInitiated: true },
+      samlCertificateFingerprints: PINS,
+    });
+    expect((await registerSaml(t, ownerCookie, samlBody(orgId))).status).toBe(200);
+    await verifyProviderDomain(t, "acme-saml");
+    const signed = await mintSamlResponse({
+      acsUrl: "http://localhost:3000/api/auth/sso/saml2/sp/acs/acme-saml",
+      spEntityID: "http://localhost:3000/api/auth/sso/saml2/sp/acme-saml",
+      email: "jane@acme.test",
+      signAssertion: true,
+    });
+    const acs = () =>
+      t.api.postForm(`/sso/saml2/sp/acs/acme-saml`, { SAMLResponse: signed, RelayState: "" });
+    expect(extractCookie(await acs())).toContain("session_token");
+    const replay = await acs();
+    expect(replay.headers.get("location") ?? "").toContain("error=replay_detected");
+    expect(extractCookie(replay)).not.toContain("session_token");
   });
 
   it("sso.samlPolicy:false opts out of SAML: registration is refused SSO_POLICY_UNSUPPORTED_PROTOCOL", async () => {
