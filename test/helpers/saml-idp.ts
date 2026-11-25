@@ -19,6 +19,7 @@
 // generating a cert at test start.
 
 import { randomUUID } from "node:crypto";
+import { inflateRawSync } from "node:zlib";
 // A plain default import matches how `spike-a-saml/level2/gen-response.mjs`
 // — the exact code this ports — imports samlify under plain Node (not
 // workerd, where the spike needed a namespace-vs-default interop guard).
@@ -47,13 +48,14 @@ function buildIdp(signingKey: string) {
   });
 }
 
-function buildSp(entityID: string, acsUrl: string) {
+function buildSp(entityID: string, acsUrl: string, wantAssertionsSigned = false) {
   return samlify.ServiceProvider({
     entityID,
     assertionConsumerService: [
       { Binding: "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST", Location: acsUrl },
     ],
     wantMessageSigned: true,
+    wantAssertionsSigned,
   });
 }
 
@@ -69,11 +71,15 @@ export interface MintSamlResponseOptions {
   audience?: string;
   /** Overrides the response's `Destination` (default `acsUrl`) — pass another ACS URL for the wrong-destination negative test. */
   destination?: string;
+  /** Answers this AuthnRequest ID (SP-initiated) instead of minting an IdP-initiated response — read it from `/sign-in/sso` with `authnRequestId`. */
+  inResponseTo?: string;
+  /** Also signs the Assertion itself (samlify signs it when the SP wants signed assertions), for providers registered with `wantAssertionsSigned: true`. */
+  signAssertion?: boolean;
 }
 
-/** Mints a base64-encoded, IdP-initiated, signed SAMLResponse asserting `email`. */
+/** Mints a base64-encoded, signed SAMLResponse asserting `email` (IdP-initiated unless `inResponseTo` is set). */
 export async function mintSamlResponse(opts: MintSamlResponseOptions): Promise<string> {
-  const sp = buildSp(opts.spEntityID, opts.acsUrl);
+  const sp = buildSp(opts.spEntityID, opts.acsUrl, opts.signAssertion === true);
   const idp = buildIdp(opts.signWithKey ?? IDP_KEY);
 
   // samlify's own `RequestInfo` (`node_modules/samlify/types/src/types.d.ts`)
@@ -110,7 +116,7 @@ export async function mintSamlResponse(opts: MintSamlResponseOptions): Promise<s
           SubjectConfirmationDataNotOnOrAfter: later.toISOString(),
           NameIDFormat: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
           NameID: opts.email,
-          InResponseTo: "",
+          InResponseTo: opts.inResponseTo ?? "",
           AuthnStatement: `<saml:AuthnStatement AuthnInstant="${now.toISOString()}" SessionIndex="${id}"><saml:AuthnContext><saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef></saml:AuthnContext></saml:AuthnStatement>`,
           AttributeStatement: attributeStatement,
         }),
@@ -124,4 +130,14 @@ export async function mintSamlResponse(opts: MintSamlResponseOptions): Promise<s
 export function tamperSamlResponse(base64Response: string, from: string, to: string): string {
   const xml = Buffer.from(base64Response, "base64").toString("utf8").split(from).join(to);
   return Buffer.from(xml, "utf8").toString("base64");
+}
+
+/** The ID of the AuthnRequest a `/sign-in/sso` redirect URL carries (HTTP-Redirect binding: base64 of raw DEFLATE). */
+export function authnRequestId(redirectUrl: string): string {
+  const encoded = new URL(redirectUrl).searchParams.get("SAMLRequest");
+  if (!encoded) throw new Error(`no SAMLRequest in ${redirectUrl}`);
+  const xml = inflateRawSync(Buffer.from(encoded, "base64")).toString("utf8");
+  const id = /\sID="([^"]+)"/.exec(xml)?.[1];
+  if (!id) throw new Error("no ID on the AuthnRequest");
+  return id;
 }
